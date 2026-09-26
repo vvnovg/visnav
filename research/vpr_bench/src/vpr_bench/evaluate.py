@@ -15,6 +15,8 @@ class EvalResult:
     model: str
     setting: str
     n_queries: int
+    n_covered: int
+    coverage: float
     recall: dict[int, float]
     median_err_m: float
     p95_err_m: float
@@ -27,7 +29,7 @@ def evaluate(
     q_lons: np.ndarray,
     model: str,
     setting: str,
-    ks: tuple[int, ...] = (1, 5, 10),
+    ks: tuple[int, ...] = (1, 5, 10, 20),
     threshold_m: float = 25.0,
     prior_radius_m: float | None = None,
     prior_noise_m: float = 0.0,
@@ -40,8 +42,15 @@ def evaluate(
     kmax = max(ks)
     hits = {k: 0 for k in ks}
     errors: list[float] = []
+    n_covered = 0
     for i in range(n):
         lat, lon = float(q_lats[i]), float(q_lons[i])
+        # coverage is a property of the query itself: is there any reference
+        # within threshold_m, independent of the geo-prior search window?
+        all_dists = haversine_m_vec(lat, lon, index.lats, index.lons)
+        covered = bool(all_dists.size) and bool(np.any(all_dists <= threshold_m))
+        if covered:
+            n_covered += 1
         center = None
         if prior_radius_m is not None:
             east, north = rng.normal(0.0, prior_noise_m, 2) if prior_noise_m > 0 else (0.0, 0.0)
@@ -52,15 +61,19 @@ def evaluate(
             continue
         dists = haversine_m_vec(lat, lon, index.lats[top], index.lons[top])
         errors.append(float(dists[0]))
-        for k in ks:
-            if np.any(dists[:k] <= threshold_m):
-                hits[k] += 1
+        if covered:
+            for k in ks:
+                if np.any(dists[:k] <= threshold_m):
+                    hits[k] += 1
     errs = np.array(errors)
+    recall = {k: (hits[k] / n_covered if n_covered > 0 else 0.0) for k in ks}
     return EvalResult(
         model=model,
         setting=setting,
         n_queries=n,
-        recall={k: hits[k] / n for k in ks},
-        median_err_m=float(np.median(errs)),
-        p95_err_m=float(np.percentile(errs, 95)),
+        n_covered=n_covered,
+        coverage=n_covered / n,
+        recall=recall,
+        median_err_m=float(np.quantile(errs, 0.5, method="higher")),
+        p95_err_m=float(np.quantile(errs, 0.95, method="higher")),
     )
