@@ -53,18 +53,20 @@ def extract_query_frames(
     (out_dir / "images").mkdir(parents=True, exist_ok=True)
 
     places: list[Place] = []
-    idx = 0
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        if idx % step == 0:
-            pose = pose_at(track, video_start_epoch + idx / fps)
-            if pose is not None and pose[3] >= min_speed_mps:
-                rel = f"images/q_{idx:06d}.jpg"
-                cv2.imwrite(str(out_dir / rel), frame)
-                places.append(Place(rel, pose[0], pose[1], pose[2]))
-        idx += 1
-    cap.release()
+    try:
+        idx = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if idx % step == 0:
+                pose = pose_at(track, video_start_epoch + idx / fps)
+                if pose is not None and pose[3] >= min_speed_mps:
+                    rel = f"images/q_{idx:06d}.jpg"
+                    cv2.imwrite(str(out_dir / rel), frame)
+                    places.append(Place(rel, pose[0], pose[1], pose[2]))
+            idx += 1
+    finally:
+        cap.release()
     write_places(out_dir / "queries.csv", places)
     return places

@@ -58,3 +58,24 @@ def test_extract_query_frames(tmp_path, track):
 def test_extract_rejects_missing_video(tmp_path, track):
     with pytest.raises(ValueError):
         extract_query_frames(tmp_path / "nope.avi", track, T0, 1.0, tmp_path / "q")
+
+
+def test_extract_drops_stationary_frames(tmp_path):
+    # GPX with stationary object (same location at t=0 and t=20)
+    stationary_gpx = """<?xml version="1.0"?>
+<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
+<trk><trkseg>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:00Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:20Z</time></trkpt>
+</trkseg></trk></gpx>
+"""
+    gpx_path = tmp_path / "stationary.gpx"
+    gpx_path.write_text(stationary_gpx)
+    track = parse_gpx(gpx_path)
+
+    video = tmp_path / "stationary.avi"
+    _write_video(video, n_frames=200, fps=10)
+    places = extract_query_frames(video, track, T0, every_s=2.0, out_dir=tmp_path / "q")
+
+    assert len(places) == 0  # All frames filtered due to zero speed
+    assert read_places(tmp_path / "q" / "queries.csv") == []
