@@ -248,7 +248,7 @@ from dataclasses import dataclass
 import numpy as np
 
 EARTH_RADIUS_M = 6_371_000.0
-M_PER_DEG_LAT = 111_320.0
+M_PER_DEG_LAT = math.pi * EARTH_RADIUS_M / 180.0  # согласовано с haversine_m
 
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
