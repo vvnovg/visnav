@@ -19,8 +19,8 @@ class FakeSession:
         self.pages = list(pages)
         self.calls = []
 
-    def get(self, url, params=None, timeout=None):
-        self.calls.append((url, params))
+    def get(self, url, params=None, timeout=None, headers=None):
+        self.calls.append((url, params, headers))
         return self.pages.pop(0)
 
 
@@ -56,9 +56,11 @@ def test_list_images_tiles_bbox_and_dedupes():
     images = client.list_images(BBox(0.0, 0.0, 0.01, 0.005))
     assert sorted(i.id for i in images) == ["1", "2"]
     assert len(session.calls) == 2
-    first_params = session.calls[0][1]
+    first_url, first_params, first_headers = session.calls[0]
     assert first_params["bbox"] == "0.0,0.0,0.005,0.005"
-    assert first_params["access_token"] == "TOKEN"
+    assert "access_token" not in first_params
+    assert first_headers == {"Authorization": "OAuth TOKEN"}
+    assert "TOKEN" not in first_url
 
 
 def test_download_writes_bytes(tmp_path):
@@ -67,4 +69,8 @@ def test_download_writes_bytes(tmp_path):
     img = parse_image(_item("7", 1, 1))
     dest = client.download(img, tmp_path / "raw" / "7.jpg")
     assert dest.read_bytes() == b"JPEGDATA"
-    assert session.calls[0][0] == "https://img/7.jpg"
+    url, params, headers = session.calls[0]
+    assert url == "https://img/7.jpg"
+    assert not headers
+    assert "TOKEN" not in url
+    assert not params or "TOKEN" not in str(params)

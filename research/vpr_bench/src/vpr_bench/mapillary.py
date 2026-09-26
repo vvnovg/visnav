@@ -54,12 +54,12 @@ class MapillaryClient:
             resp = self._session.get(
                 GRAPH_URL,
                 params={
-                    "access_token": self._token,
                     "fields": FIELDS,
                     "bbox": tile.as_param(),
                     "limit": PAGE_LIMIT,
                 },
                 timeout=self._timeout_s,
+                headers={"Authorization": f"OAuth {self._token}"},
             )
             resp.raise_for_status()
             for item in resp.json().get("data", []):
