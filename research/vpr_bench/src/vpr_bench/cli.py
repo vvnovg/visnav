@@ -26,6 +26,8 @@ def parse_queries(specs: list[str]) -> dict[str, Path]:
         else:
             path = spec
             name = Path(spec).parent.name
+        if name in result:
+            raise ValueError(f"duplicate --queries session name {name!r}")
         result[name] = Path(path)
     return result
 
@@ -115,7 +117,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: no models given; known models: {sorted(MODEL_SPECS)}", file=sys.stderr)
         return 2
 
-    queries = parse_queries(args.queries)
+    try:
+        queries = parse_queries(args.queries)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     pools = [[s.strip() for s in p.split(",") if s.strip()] for p in args.pool]
     decision_session = args.decision_session
     if decision_session is None and pools:

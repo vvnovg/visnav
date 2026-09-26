@@ -39,6 +39,30 @@ def test_parse_queries_bare_path_uses_parent_dir_name():
     assert result == {"session_a": Path("some/session_a/queries.csv")}
 
 
+def test_parse_queries_duplicate_name_raises():
+    import pytest
+
+    with pytest.raises(ValueError, match="S1"):
+        parse_queries(["S1=q1.csv", "S1=q2.csv"])
+
+
+def test_bench_duplicate_query_session_exits_2_and_no_output_dir(tmp_path, capsys):
+    out_dir = tmp_path / "out"
+    code = main(
+        [
+            "bench",
+            "--refs", "r.csv",
+            "--queries", "S1=q1.csv",
+            "--queries", "S1=q2.csv",
+            "--models", "cosplace-r50",
+            "--out", str(out_dir),
+        ]
+    )
+    assert code == 2
+    assert "S1" in capsys.readouterr().err
+    assert not out_dir.exists()
+
+
 def test_bench_unknown_model_exits_2_and_no_output_dir(tmp_path, capsys):
     out_dir = tmp_path / "out"
     code = main(

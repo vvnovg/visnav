@@ -5,9 +5,10 @@ import numpy as np
 import pytest
 import torch
 
+from vpr_bench import pipeline
 from vpr_bench.dataset import Place, write_places
 from vpr_bench.models import VprModel
-from vpr_bench.pipeline import SETTINGS, embed_places_cached, run_benchmark
+from vpr_bench.pipeline import SETTINGS, embed_places, embed_places_cached, run_benchmark
 
 COLORS = [(0, 0, 255), (0, 255, 0), (255, 0, 0)]
 LATS = [55.7500, 55.7509, 55.7518]
@@ -20,6 +21,18 @@ def _make_set(root, name):
         (root / "images").mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(root / rel), np.full((48, 64, 3), color, np.uint8))
         places.append(Place(rel, LATS[i], 37.6, 0.0))
+    write_places(root / name, places)
+    return root / name
+
+
+def _make_set_n(root, name, n):
+    places = []
+    (root / "images").mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        rel = f"images/{i}.jpg"
+        color = COLORS[i % len(COLORS)]
+        cv2.imwrite(str(root / rel), np.full((48, 64, 3), color, np.uint8))
+        places.append(Place(rel, 55.75 + i * 0.0001, 37.6, 0.0))
     write_places(root / name, places)
     return root / name
 
@@ -73,6 +86,29 @@ def test_run_benchmark_unknown_pool_session_raises(tmp_path):
     q1 = _make_set(tmp_path / "q1", "queries.csv")
     with pytest.raises(ValueError):
         run_benchmark(["fake"], refs, {"S1": q1}, pools=[["S1", "S99"]], loader=_fake_loader)
+
+
+def test_run_benchmark_ms_per_image_is_query_count_weighted_mean(tmp_path, monkeypatch):
+    refs = _make_set(tmp_path / "refs", "refs.csv")
+    n1, n2 = 3, 5
+    ms1, ms2 = 10.0, 40.0
+    q1 = _make_set_n(tmp_path / "q1", "queries.csv", n1)
+    q2 = _make_set_n(tmp_path / "q2", "queries.csv", n2)
+
+    def _fake_cached(model, places, csv_path, cache_dir):
+        desc, real_ms = embed_places(model, places, csv_path.parent)
+        if len(places) == n1:
+            return desc, ms1
+        if len(places) == n2:
+            return desc, ms2
+        return desc, real_ms  # refs pass-through, not part of this assertion
+
+    monkeypatch.setattr(pipeline, "embed_places_cached", _fake_cached)
+
+    _, meta = run_benchmark(["fake"], refs, {"S1": q1, "S2": q2}, loader=_fake_loader)
+
+    expected = (ms1 * n1 + ms2 * n2) / (n1 + n2)
+    assert meta["fake"]["ms_per_image"] == pytest.approx(expected)
 
 
 def test_run_benchmark_calls_on_model_done_once_per_model(tmp_path):

@@ -54,6 +54,23 @@ def embed_places_cached(
     return desc, ms_per_image
 
 
+def _evaluate_all_settings(
+    index: GeoIndex,
+    desc: np.ndarray,
+    lats: np.ndarray,
+    lons: np.ndarray,
+    name: str,
+    session: str,
+) -> list[EvalResult]:
+    return [
+        evaluate(
+            index, desc, lats, lons, name, setting,
+            prior_radius_m=radius, prior_noise_m=noise, session=session,
+        )
+        for setting, radius, noise in SETTINGS
+    ]
+
+
 def run_benchmark(
     model_names: list[str],
     refs_csv: Path,
@@ -82,7 +99,8 @@ def run_benchmark(
         session_desc: dict[str, np.ndarray] = {}
         session_lats: dict[str, np.ndarray] = {}
         session_lons: dict[str, np.ndarray] = {}
-        ms = 0.0
+        ms_weighted_sum = 0.0
+        n_total = 0
         for session, places in session_places.items():
             csv_path = queries[session]
             cache_dir = csv_path.parent / "desc"
@@ -90,33 +108,29 @@ def run_benchmark(
             session_desc[session] = desc
             session_lats[session] = np.array([p.lat for p in places])
             session_lons[session] = np.array([p.lon for p in places])
+            ms_weighted_sum += ms * len(places)
+            n_total += len(places)
+        ms_per_image = ms_weighted_sum / n_total if n_total else 0.0
 
         hub_ref = MODEL_SPECS[name].repo if name in MODEL_SPECS else ""
         meta[name] = {
-            "dim": int(ref_desc.shape[1]), "size_mb": model.size_mb(), "ms_per_image": ms, "hub_ref": hub_ref,
+            "dim": int(ref_desc.shape[1]), "size_mb": model.size_mb(),
+            "ms_per_image": ms_per_image, "hub_ref": hub_ref,
         }
 
         for session in session_places:
-            for setting, radius, noise in SETTINGS:
-                results.append(
-                    evaluate(
-                        index, session_desc[session], session_lats[session], session_lons[session],
-                        name, setting, prior_radius_m=radius, prior_noise_m=noise, session=session,
-                    )
+            results.extend(
+                _evaluate_all_settings(
+                    index, session_desc[session], session_lats[session], session_lons[session], name, session
                 )
+            )
 
         for pool in pools or []:
             pool_name = "+".join(pool)
             pool_desc = np.concatenate([session_desc[s] for s in pool])
             pool_lats = np.concatenate([session_lats[s] for s in pool])
             pool_lons = np.concatenate([session_lons[s] for s in pool])
-            for setting, radius, noise in SETTINGS:
-                results.append(
-                    evaluate(
-                        index, pool_desc, pool_lats, pool_lons,
-                        name, setting, prior_radius_m=radius, prior_noise_m=noise, session=pool_name,
-                    )
-                )
+            results.extend(_evaluate_all_settings(index, pool_desc, pool_lats, pool_lons, name, pool_name))
 
         if on_model_done is not None:
             on_model_done(results, meta)
