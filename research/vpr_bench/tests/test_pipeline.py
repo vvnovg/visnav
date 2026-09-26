@@ -1,10 +1,12 @@
+import json
+
 import cv2
 import numpy as np
 import torch
 
 from vpr_bench.dataset import Place, write_places
 from vpr_bench.models import VprModel
-from vpr_bench.pipeline import SETTINGS, run_benchmark
+from vpr_bench.pipeline import SETTINGS, embed_places_cached, run_benchmark
 
 COLORS = [(0, 0, 255), (0, 255, 0), (255, 0, 0)]
 LATS = [55.7500, 55.7509, 55.7518]
@@ -34,3 +36,48 @@ def test_run_benchmark_perfect_match(tmp_path):
     assert all(r.recall[1] == 1.0 for r in results)
     assert meta["fake"]["dim"] == 3
     assert meta["fake"]["ms_per_image"] > 0
+
+
+def _fake_model():
+    net = torch.nn.Sequential(torch.nn.AdaptiveAvgPool2d(1), torch.nn.Flatten())
+    return VprModel("fake", net, (32, 32), "cpu")
+
+
+def test_embed_places_cached_hit_does_not_read_images(tmp_path, monkeypatch):
+    from vpr_bench.dataset import read_places
+
+    root = tmp_path / "refs"
+    csv_path = _make_set(root, "refs.csv")
+    places = read_places(csv_path)
+    model = _fake_model()
+    cache_dir = tmp_path / "desc"
+
+    desc1, ms1 = embed_places_cached(model, places, csv_path, cache_dir)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("cv2.imread should not be called on cache hit")
+
+    monkeypatch.setattr(cv2, "imread", _boom)
+    desc2, ms2 = embed_places_cached(model, places, csv_path, cache_dir)
+
+    assert np.array_equal(desc1, desc2)
+    assert ms2 == ms1  # cached ms_per_image, not re-measured
+
+
+def test_embed_places_cached_writes_cache_files(tmp_path):
+    from vpr_bench.dataset import read_places
+
+    root = tmp_path / "refs"
+    csv_path = _make_set(root, "refs.csv")
+    places = read_places(csv_path)
+    model = _fake_model()
+    cache_dir = tmp_path / "desc"
+
+    embed_places_cached(model, places, csv_path, cache_dir)
+
+    npy_files = list(cache_dir.glob("fake-*.npy"))
+    json_files = list(cache_dir.glob("fake-*.json"))
+    assert len(npy_files) == 1
+    assert len(json_files) == 1
+    meta = json.loads(json_files[0].read_text())
+    assert meta["ms_per_image"] > 0

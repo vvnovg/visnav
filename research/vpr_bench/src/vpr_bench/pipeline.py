@@ -1,6 +1,8 @@
 """Прогон набора моделей по базе эталонов и кадрам-запросам."""
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -33,6 +35,23 @@ def embed_places(model: VprModel, places: list[Place], root: Path, batch_size: i
         chunks.append(model.embed(images))
     ms_per_image = (time.perf_counter() - start) * 1000 / max(1, len(places))
     return np.concatenate(chunks), ms_per_image
+
+
+def embed_places_cached(
+    model: VprModel, places: list[Place], csv_path: Path, cache_dir: Path
+) -> tuple[np.ndarray, float]:
+    key = hashlib.sha1(csv_path.read_bytes()).hexdigest()[:12]
+    npy_path = cache_dir / f"{model.name}-{key}.npy"
+    json_path = cache_dir / f"{model.name}-{key}.json"
+    if npy_path.exists() and json_path.exists():
+        desc = np.load(npy_path)
+        meta = json.loads(json_path.read_text())
+        return desc, meta["ms_per_image"]
+    desc, ms_per_image = embed_places(model, places, csv_path.parent)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    np.save(npy_path, desc)
+    json_path.write_text(json.dumps({"ms_per_image": ms_per_image}))
+    return desc, ms_per_image
 
 
 def run_benchmark(
