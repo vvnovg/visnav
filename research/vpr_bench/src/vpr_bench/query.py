@@ -65,6 +65,8 @@ def extract_query_frames(
     out_dir: Path,
     min_speed_mps: float = 2.0,
 ) -> list[Place]:
+    if every_s <= 0:
+        raise ValueError(f"every_s must be > 0, got {every_s!r}")
     cap = cv2.VideoCapture(str(video))
     if not cap.isOpened():
         raise ValueError(f"cannot open video: {video}")

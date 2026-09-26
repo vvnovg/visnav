@@ -60,6 +60,21 @@ def test_extract_rejects_missing_video(tmp_path, track):
         extract_query_frames(tmp_path / "nope.avi", track, T0, 1.0, tmp_path / "q")
 
 
+@pytest.mark.parametrize("every_s", [0.0, -1.0])
+def test_extract_rejects_non_positive_every_s(monkeypatch, tmp_path, track, every_s):
+    # every_s <= 0 would make `while next_sample_t <= frame_t: next_sample_t
+    # += every_s` loop forever (or never advance), so it must be rejected up
+    # front, before even opening the video — proven here by making
+    # cv2.VideoCapture blow up if it's ever reached (using a missing video
+    # path would raise ValueError anyway and mask whether this guard fired).
+    def _boom(_path):
+        raise AssertionError("cv2.VideoCapture must not be called when every_s <= 0")
+
+    monkeypatch.setattr("vpr_bench.query.cv2.VideoCapture", _boom)
+    with pytest.raises(ValueError, match="every_s"):
+        extract_query_frames(tmp_path / "drive.avi", track, T0, every_s, tmp_path / "q")
+
+
 class FakeCapture:
     """Fake cv2.VideoCapture whose POS_MSEC timestamps are irregular (VFR-like)."""
 
@@ -106,6 +121,19 @@ def wide_track(tmp_path):
     return parse_gpx(p)
 
 
+WIDE_LAT0 = 55.7500
+WIDE_DEG_PER_S = 0.0001
+
+
+def _recovered_t(lat, lat0=WIDE_LAT0, deg_per_s=WIDE_DEG_PER_S):
+    """Invert Place.lat back to the wide_track time it was interpolated from,
+    so timing assertions compare seconds with a tight absolute tolerance
+    instead of comparing latitudes with pytest.approx's default *relative*
+    tolerance — which, at lat≈55.75, is loose enough (≈±0.06 s worth of
+    latitude) to let a wrong expected time pass by accident."""
+    return (lat - lat0) / deg_per_s
+
+
 def test_extract_samples_by_container_time_not_index(monkeypatch, tmp_path, wide_track):
     # Irregular (VFR-like) timestamps, ms: 900, 1050, 1300, 1650, 1800, 2100, 2400.
     times_ms = [900, 1050, 1300, 1650, 1800, 2100, 2400]
@@ -124,7 +152,7 @@ def test_extract_samples_by_container_time_not_index(monkeypatch, tmp_path, wide
     expected_t = [0.9, 1.05, 1.65, 2.1]
     assert len(places) == len(expected_t)
     for place, t in zip(places, expected_t):
-        assert place.lat == pytest.approx(55.7500 + t * 0.0001)
+        assert _recovered_t(place.lat) == pytest.approx(t, abs=1e-6)
 
 
 def test_extract_falls_back_to_index_over_fps_when_pos_msec_invalid(monkeypatch, tmp_path, wide_track):
@@ -141,10 +169,10 @@ def test_extract_falls_back_to_index_over_fps_when_pos_msec_invalid(monkeypatch,
     # idx=0 t=0.9 -> keep (next=0.5); idx=1 raw=0.8s is backwards -> fallback
     # to idx/fps=0.1s, which is < next_sample_t(0.5) -> skip;
     # idx=2 t=2.0 -> keep.
-    assert [p.lat for p in places] == [
-        pytest.approx(55.7500 + 0.9 * 0.0001),
-        pytest.approx(55.7500 + 2.0 * 0.0001),
-    ]
+    expected_t = [0.9, 2.0]
+    assert len(places) == len(expected_t)
+    for place, t in zip(places, expected_t):
+        assert _recovered_t(place.lat) == pytest.approx(t, abs=1e-6)
 
 
 def test_frame_clock_anchors_backward_check_to_last_good_raw_not_prev():
@@ -174,13 +202,15 @@ def test_extract_catches_up_after_timestamp_gap_without_bursting(monkeypatch, tm
 
     # Without catch-up, next_sample_t would sit at 1.5 after the t=1.0 frame,
     # and every one of the seven frames from 5.1s to 5.7s (all >= 1.5) would
-    # be kept in a burst. With catch-up, next_sample_t jumps past the gap to
-    # 5.5 as soon as the t=5.0 frame is sampled, so only one frame per every_s
-    # interval survives: t = 0.0, 1.0, 5.0, 5.8.
-    expected_t = [0.0, 1.0, 5.0, 5.8]
+    # be kept in a burst. With catch-up, next_sample_t jumps to 5.5 as soon as
+    # the t=5.0 frame is sampled (while next_sample_t<=5.0: += 0.5 lands it at
+    # 5.5), so the very next frame at t=5.5 is the one kept (5.5 >= 5.5), and
+    # next_sample_t then jumps to 6.0 — past every remaining frame up to 5.8.
+    # One frame per every_s interval survives: t = 0.0, 1.0, 5.0, 5.5.
+    expected_t = [0.0, 1.0, 5.0, 5.5]
     assert len(places) == len(expected_t)
     for place, t in zip(places, expected_t):
-        assert place.lat == pytest.approx(55.7500 + t * 0.0001)
+        assert _recovered_t(place.lat) == pytest.approx(t, abs=1e-6)
 
 
 def test_extract_drops_stationary_frames(tmp_path):

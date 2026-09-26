@@ -125,6 +125,21 @@ def test_extract_queries_naive_video_start_exits_2(tmp_path, capsys):
     assert "2026-09-20T10:00:03.250+03:00" in err
 
 
+def test_extract_queries_non_positive_every_exits_2(tmp_path, capsys):
+    code = main(
+        [
+            "extract-queries",
+            "--video", "v.mp4",
+            "--gpx", "t.gpx",
+            "--video-start", "2026-09-20T10:00:03.250+03:00",
+            "--every", "0",
+            "--out", str(tmp_path / "out"),
+        ]
+    )
+    assert code == 2
+    assert "--every must be > 0" in capsys.readouterr().err
+
+
 def test_parser_fetch_refs_defaults():
     args = build_parser().parse_args(["fetch-refs", "--bbox", "0,0,1,1", "--out", "out"])
     assert args.width == 640

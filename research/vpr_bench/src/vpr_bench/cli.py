@@ -107,6 +107,9 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+        if args.every <= 0:
+            print("error: --every must be > 0", file=sys.stderr)
+            return 2
         track = parse_gpx(args.gpx)
         start = video_start_dt.timestamp()
         places = extract_query_frames(args.video, track, start, args.every, args.out)
