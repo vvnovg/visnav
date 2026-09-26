@@ -35,6 +35,7 @@ research/vpr_bench/data/drives/sessions.csv   # session,video_start_iso,conditio
 ```bash
 uv run vpr-bench extract-queries --video data/drives/S1/video.mp4 --gpx data/drives/S1/track.gpx \
   --video-start <из sessions.csv> --every 1 --out data/queries/S1
+```
+
 Выборочно открыть 5 кадров из data/queries/S1/images и сверить место на карте
 по координатам из queries.csv. Расхождение > 20 м означает ошибку синхронизации: поправить video_start.
-```
