@@ -43,6 +43,17 @@ def evaluate(
     hits = {k: 0 for k in ks}
     errors: list[float] = []
     n_covered = 0
+
+    centers: list[tuple[float, float]] | None = None
+    if prior_radius_m is not None:
+        centers = []
+        for i in range(n):
+            lat, lon = float(q_lats[i]), float(q_lons[i])
+            east, north = rng.normal(0.0, prior_noise_m, 2) if prior_noise_m > 0 else (0.0, 0.0)
+            centers.append(offset_m(lat, lon, east, north))
+
+    tops = index.search_batch(q_desc, kmax, centers=centers, radius_m=prior_radius_m)
+
     for i in range(n):
         lat, lon = float(q_lats[i]), float(q_lons[i])
         # coverage is a property of the query itself: is there any reference
@@ -51,11 +62,7 @@ def evaluate(
         covered = bool(all_dists.size) and bool(np.any(all_dists <= threshold_m))
         if covered:
             n_covered += 1
-        center = None
-        if prior_radius_m is not None:
-            east, north = rng.normal(0.0, prior_noise_m, 2) if prior_noise_m > 0 else (0.0, 0.0)
-            center = offset_m(lat, lon, east, north)
-        top = index.search(q_desc[i], kmax, center=center, radius_m=prior_radius_m)
+        top = tops[i]
         if top.size == 0:
             errors.append(math.inf)
             continue

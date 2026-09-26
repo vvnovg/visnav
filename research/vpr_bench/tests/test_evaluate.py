@@ -57,6 +57,58 @@ def test_coverage_excludes_far_queries_from_recall():
     assert r.recall == {1: 1.0}
 
 
+def test_evaluate_matches_per_query_reference_implementation():
+    rng = np.random.default_rng(42)
+    n_refs, n_q, dim = 30, 12, 8
+    ref_desc = rng.normal(size=(n_refs, dim)).astype(np.float32)
+    ref_lats = LATS[0] + rng.normal(scale=0.001, size=n_refs)
+    ref_lons = LONS[0] + rng.normal(scale=0.001, size=n_refs)
+    index = GeoIndex(ref_desc, ref_lats, ref_lons)
+    q_desc = rng.normal(size=(n_q, dim)).astype(np.float32)
+    q_lats = LATS[0] + rng.normal(scale=0.001, size=n_q)
+    q_lons = LONS[0] + rng.normal(scale=0.001, size=n_q)
+
+    r = evaluate(
+        index, q_desc, q_lats, q_lons, "m", "prior",
+        ks=(1, 5), prior_radius_m=300.0, prior_noise_m=50.0, seed=7,
+    )
+
+    # Reference implementation: identical RNG draw sequence, per-query search().
+    rng2 = np.random.default_rng(7)
+    import math
+
+    from vpr_bench.geo import haversine_m_vec, offset_m
+
+    hits = {1: 0, 5: 0}
+    n_covered = 0
+    errors = []
+    for i in range(n_q):
+        lat, lon = float(q_lats[i]), float(q_lons[i])
+        all_dists = haversine_m_vec(lat, lon, index.lats, index.lons)
+        covered = bool(np.any(all_dists <= 25.0))
+        if covered:
+            n_covered += 1
+        east, north = rng2.normal(0.0, 50.0, 2)
+        center = offset_m(lat, lon, east, north)
+        top = index.search(q_desc[i], 5, center=center, radius_m=300.0)
+        if top.size == 0:
+            errors.append(math.inf)
+            continue
+        dists = haversine_m_vec(lat, lon, index.lats[top], index.lons[top])
+        errors.append(float(dists[0]))
+        if covered:
+            for k in (1, 5):
+                if np.any(dists[:k] <= 25.0):
+                    hits[k] += 1
+
+    assert r.n_covered == n_covered
+    expected_recall = {k: (hits[k] / n_covered if n_covered else 0.0) for k in (1, 5)}
+    assert r.recall == expected_recall
+    errs = np.array(errors)
+    assert r.median_err_m == pytest.approx(float(np.quantile(errs, 0.5, method="higher")))
+    assert r.p95_err_m == pytest.approx(float(np.quantile(errs, 0.95, method="higher")))
+
+
 def test_p95_and_median_are_inf_not_nan_when_mostly_uncovered():
     index = GeoIndex(np.eye(1, dtype=np.float32), np.array([55.75]), np.array([37.6]))
     q_desc = np.stack([np.array([1.0], np.float32)] * 4)
