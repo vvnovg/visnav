@@ -99,8 +99,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "extract-queries":
+        video_start_dt = datetime.fromisoformat(args.video_start)
+        if video_start_dt.tzinfo is None:
+            print(
+                "error: --video-start must include a timezone offset, "
+                "e.g. 2026-09-20T10:00:03.250+03:00",
+                file=sys.stderr,
+            )
+            return 2
         track = parse_gpx(args.gpx)
-        start = datetime.fromisoformat(args.video_start).timestamp()
+        start = video_start_dt.timestamp()
         places = extract_query_frames(args.video, track, start, args.every, args.out)
         print(f"{len(places)} query frames -> {args.out / 'queries.csv'}")
         return 0

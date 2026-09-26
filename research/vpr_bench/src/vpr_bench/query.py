@@ -49,22 +49,30 @@ def extract_query_frames(
     if not cap.isOpened():
         raise ValueError(f"cannot open video: {video}")
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    step = max(1, round(every_s * fps))
     (out_dir / "images").mkdir(parents=True, exist_ok=True)
 
     places: list[Place] = []
     try:
         idx = 0
+        next_sample_t = 0.0
+        prev_frame_t = -1.0
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
-            if idx % step == 0:
-                pose = pose_at(track, video_start_epoch + idx / fps)
+            # Variable-frame-rate video (phone/dashcam) drifts against idx / fps,
+            # so take each frame's time from the container and sample by time.
+            frame_t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            if frame_t < 0 or frame_t < prev_frame_t:
+                frame_t = idx / fps
+            prev_frame_t = frame_t
+            if frame_t >= next_sample_t:
+                pose = pose_at(track, video_start_epoch + frame_t)
                 if pose is not None and pose[3] >= min_speed_mps:
                     rel = f"images/q_{idx:06d}.jpg"
                     cv2.imwrite(str(out_dir / rel), frame)
                     places.append(Place(rel, pose[0], pose[1], pose[2]))
+                next_sample_t += every_s
             idx += 1
     finally:
         cap.release()

@@ -60,6 +60,91 @@ def test_extract_rejects_missing_video(tmp_path, track):
         extract_query_frames(tmp_path / "nope.avi", track, T0, 1.0, tmp_path / "q")
 
 
+class FakeCapture:
+    """Fake cv2.VideoCapture whose POS_MSEC timestamps are irregular (VFR-like)."""
+
+    def __init__(self, times_ms, fps=10.0, frame_shape=(48, 64, 3)):
+        self.times_ms = times_ms
+        self.fps = fps
+        self.frame_shape = frame_shape
+        self.i = -1
+        self._opened = True
+
+    def isOpened(self):
+        return self._opened
+
+    def get(self, prop):
+        if prop == cv2.CAP_PROP_FPS:
+            return self.fps
+        if prop == cv2.CAP_PROP_POS_MSEC:
+            return self.times_ms[self.i]
+        return 0.0
+
+    def read(self):
+        self.i += 1
+        if self.i >= len(self.times_ms):
+            return False, None
+        return True, np.full(self.frame_shape, self.i % 255, np.uint8)
+
+    def release(self):
+        self._opened = False
+
+
+WIDE_GPX = """<?xml version="1.0"?>
+<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
+<trk><trkseg>
+<trkpt lat="55.7490" lon="37.6000"><time>2026-09-20T09:59:50Z</time></trkpt>
+<trkpt lat="55.7530" lon="37.6000"><time>2026-09-20T10:00:30Z</time></trkpt>
+</trkseg></trk></gpx>
+"""
+
+
+@pytest.fixture
+def wide_track(tmp_path):
+    p = tmp_path / "wide_track.gpx"
+    p.write_text(WIDE_GPX)
+    return parse_gpx(p)
+
+
+def test_extract_samples_by_container_time_not_index(monkeypatch, tmp_path, wide_track):
+    # Irregular (VFR-like) timestamps, ms: 900, 1050, 1300, 1650, 1800, 2100, 2400.
+    times_ms = [900, 1050, 1300, 1650, 1800, 2100, 2400]
+    fake = FakeCapture(times_ms)
+    monkeypatch.setattr("vpr_bench.query.cv2.VideoCapture", lambda path: fake)
+
+    places = extract_query_frames(
+        tmp_path / "irregular.avi", wide_track, T0, every_s=0.5, out_dir=tmp_path / "q"
+    )
+
+    # next_sample_t starts at 0.0 and advances by every_s each time a frame is
+    # sampled: 0.9->keep(next=0.5), 1.05->keep(next=1.0), 1.3->keep(next=1.5),
+    # 1.65->keep(next=2.0), 1.8->skip, 2.1->keep(next=2.5), 2.4->skip.
+    expected_t = [0.9, 1.05, 1.3, 1.65, 2.1]
+    assert len(places) == len(expected_t)
+    for place, t in zip(places, expected_t):
+        assert place.lat == pytest.approx(55.7500 + t * 0.0001)
+
+
+def test_extract_falls_back_to_index_over_fps_when_pos_msec_invalid(monkeypatch, tmp_path, wide_track):
+    # Second timestamp goes backwards (900 -> 800): that frame must fall back
+    # to idx/fps = 1/10 = 0.1s instead of the bogus container timestamp.
+    times_ms = [900, 800, 2000]
+    fake = FakeCapture(times_ms, fps=10.0)
+    monkeypatch.setattr("vpr_bench.query.cv2.VideoCapture", lambda path: fake)
+
+    places = extract_query_frames(
+        tmp_path / "backwards.avi", wide_track, T0, every_s=0.5, out_dir=tmp_path / "q"
+    )
+
+    # idx=0 t=0.9 -> keep (next=0.5); idx=1 raw=0.8s is backwards -> fallback
+    # to idx/fps=0.1s, which is < next_sample_t(0.5) -> skip;
+    # idx=2 t=2.0 -> keep.
+    assert [p.lat for p in places] == [
+        pytest.approx(55.7500 + 0.9 * 0.0001),
+        pytest.approx(55.7500 + 2.0 * 0.0001),
+    ]
+
+
 def test_extract_drops_stationary_frames(tmp_path):
     # GPX with stationary object (same location at t=0 and t=20)
     stationary_gpx = """<?xml version="1.0"?>
