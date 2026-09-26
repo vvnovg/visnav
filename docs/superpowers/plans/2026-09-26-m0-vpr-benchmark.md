@@ -24,7 +24,7 @@
 ## Global Constraints
 
 Из `docs/SPEC.md`:
-- Критерий выхода M0: **Recall@5 ≥ 85 %** на собственном датасете. Совпадение засчитывается, если эталон находится в пределах **25 м** от истинной позиции.
+- Критерий выхода M0: **Recall@5 ≥ 85 %**, считается по кадрам, у которых есть эталон в пределах **25 м** (покрытие показывается отдельно), в режиме `prior-500m` на объединённых сессиях S1+S2.
 - Целевые параметры модели для устройства (в M0 фиксируются, но не оптимизируются):
   - размер ≤ 30 МБ после INT8;
   - инференс ≤ 60 мс;
@@ -2000,29 +2000,57 @@ git commit -m "docs: add drive recording protocol for M0 dataset"
 
 ---
 
+### Task 12.5 (сделано)
+
+После Task 12 CLI и протокол дополнительно доработаны тремя подзадачами:
+
+- **12.5a**: `fetch-refs` умеет собирать эталоны вдоль коридора GPX-треков
+  (`--gpx` можно указывать несколько раз, `--buffer-m`), а не только по
+  одному `--bbox`; загрузка идёт параллельно (`--workers`), уже нарезанные
+  виды не пересчитываются повторно, пишется `meta.json` с датами съёмки.
+- **12.5b**: `bench` умеет объединять несколько сессий одним прогоном —
+  `--queries NAME=PATH` можно указывать несколько раз, `--pool
+  SESSION,SESSION,...` задаёт сводную оценку (например, S1+S2), отчёт и
+  `results.json` пишутся инкрементально после каждой модели; CLI падает
+  быстро (exit 2) на дублирующихся именах сессий и неизвестных моделях, не
+  создавая каталог вывода.
+- **12.5c** (эта задача): `extract-queries` берёт время каждого кадра из
+  контейнера видео (`CAP_PROP_POS_MSEC`), а не из `idx / fps`, и требует
+  часовой пояс в `--video-start`; протокол поездок и критерий выхода M0
+  обновлены под фактические флаги CLI и добавлена геометрия камеры (HFOV).
+
+---
+
 ### Task 13: Прогон на реальных данных и решение о выходе из M0
 
 Предусловия:
-- Tasks 1–10 и 12 выполнены.
+- Tasks 1–10 и 12 (включая 12.5a/b/c) выполнены.
 - Токен Mapillary получен владельцем проекта на mapillary.com/dashboard/developers (Client Token) и выставлен в окружении.
+- Владелец проекта просмотрел `hubconf.py` четырёх запиненных репозиториев
+  (SHA в `research/vpr_bench/src/vpr_bench/models.py`) и репозитория
+  `facebookresearch/dinov2` (SALAD/BoQ грузят его внутри своего hubconf), и
+  выполнил `uv run pytest -m slow`.
 - Записаны сессии S1–S4.
 
 **Files:**
 - Create: `docs/research/m0-results.md`
 
-- [ ] **Step 1: Собрать базу эталонов по bbox, покрывающему маршруты**
-
-bbox строится по крайним точкам всех GPX-треков с запасом 0.005°.
+- [ ] **Step 1: Собрать базу эталонов вдоль коридора всех треков**
 
 ```bash
 cd /Users/vvnovg/navigator/research/vpr_bench
 export MAPILLARY_TOKEN=...   # вводит владелец токена, в файлы не сохранять
-uv run vpr-bench fetch-refs --bbox <min_lon,min_lat,max_lon,max_lat> --out data/refs
+uv run vpr-bench fetch-refs --gpx data/drives/S1/track.gpx --gpx data/drives/S2/track.gpx \
+  --gpx data/drives/S3/track.gpx --gpx data/drives/S4/track.gpx \
+  --buffer-m 600 --fov <hfov_deg> --width <W> --height <H> --out data/refs
 ```
+
+`hfov_deg`, `W`, `H` берутся из `sessions.csv` (см. `docs/research/drive-protocol.md`,
+раздел «Геометрия камеры»); `W×H` — с соотношением сторон видео запросов.
 
 Expected: строка `N reference images -> data/refs/refs.csv`, где N > 0.
 
-- [ ] **Step 2: Нарезать запросы для каждой сессии и объединить их**
+- [ ] **Step 2: Нарезать запросы для каждой сессии**
 
 ```bash
 for s in S1 S2 S3 S4; do
@@ -2031,18 +2059,20 @@ for s in S1 S2 S3 S4; do
 done
 ```
 
-Для каждой сессии затем нужен отдельный прогон бенчмарка: так видна разница между днём, ночью и дождём.
-
-- [ ] **Step 3: Запустить бенчмарк всех моделей по каждой сессии**
+- [ ] **Step 3: Один прогон бенчмарка по всем сессиям**
 
 ```bash
-for s in S1 S2 S3 S4; do
-  uv run vpr-bench bench --refs data/refs/refs.csv --queries data/queries/$s/queries.csv \
-    --models cosplace-r50,eigenplaces-r50,salad-dinov2,boq-dinov2 --out data/results/$s
-done
+uv run vpr-bench bench --refs data/refs/refs.csv \
+  --queries S1=data/queries/S1/queries.csv --queries S2=data/queries/S2/queries.csv \
+  --queries S3=data/queries/S3/queries.csv --queries S4=data/queries/S4/queries.csv \
+  --pool S1,S2 --models cosplace-r50,eigenplaces-r50,salad-dinov2,boq-dinov2 --out data/results
 ```
 
-Expected: в каждом `data/results/<S>/` лежат `report.md` и `results.json`.
+`--pool S1,S2` даёт сводную оценку по объединённым дневным сессиям — это и
+есть критерий выхода M0. Отдельные сессии (S1..S4) при этом тоже остаются в
+отчёте, так видна разница между днём, ночью и дождём.
+
+Expected: в `data/results/` лежат `report.md` и `results.json` со всеми сессиями и сводной строкой S1+S2.
 
 - [ ] **Step 4: Свести результаты в `docs/research/m0-results.md`**
 
@@ -2051,17 +2081,29 @@ Expected: в каждом `data/results/<S>/` лежат `report.md` и `results
 # Итоги M0
 
 ## Данные
-- База эталонов: N снимков Mapillary, bbox ..., даты съёмки от ... до ...
-- Запросы: сессии S1–S4, всего M кадров
+- База эталонов: N снимков Mapillary, коридор вокруг треков S1–S4 (буфер 600 м),
+  даты съёмки от ... до ... (из data/refs/meta.json)
+- Камера: hfov_deg=..., width=..., height=... (из sessions.csv)
+- Запросы: сессии S1–S4, всего M кадров; покрытие (доля кадров с эталоном в
+  пределах 25 м) по каждой сессии: S1 ...%, S2 ...%, S3 ...%, S4 ...%
 
 ## Результаты
-(вставить таблицы из data/results/S*/report.md)
+(вставить таблицы из data/results/report.md, включая строку решения prior-500m, S1+S2)
 
 ## Выбор модели
-Модель: ... Причины: R@5 в режиме prior-500m = ...; размер ...; время ...
+Модель: ... Причины: R@5 в режиме prior-500m (покрытые запросы, S1+S2) = ...;
+пинованный SHA репозитория модели (из results.json meta) = ...; размер ...; время ...
+Примечания:
+- CosPlace заменил MixVPR в реестре моделей: MixVPR не публикуется через
+  `torch.hub` (см. `research/vpr_bench/src/vpr_bench/models.py`).
+- Дескриптор BoQ (`boq-dinov2`) — 12288 значений, что выше целевого диапазона
+  устройства (512–4096); при выборе BoQ это нужно решить отдельно (сжатие/PCA
+  в M1) или не брать модель в M1.
+- Проверены 2–3 панорамы Mapillary: `computed_compass_angle` соответствует
+  центральному столбцу панорамы (см. соглашение о курсе в `panorama.py`).
 
 ## Критерий выхода M0
-- [ ] R@5 ≥ 85 % (prior-500m, дневные сессии S1+S2) — факт: ...
+- [ ] R@5 ≥ 85 % по покрытым запросам (prior-500m, объединённые сессии S1+S2) — факт: ...
 - [ ] Источник снимков юридически подтверждён (docs/research/legal-imagery.md)
 
 ## Что переносится в M1
