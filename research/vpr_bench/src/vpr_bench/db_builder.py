@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import shutil
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -41,6 +42,7 @@ def build_reference_db(
         if img.is_pano:
             frame = cv2.imread(str(raw_path))
             if frame is None:
+                warnings.warn(f"skipping undecodable panorama: {raw_path}", stacklevel=2)
                 continue
             for yaw, view in perspective_views(frame, views.n_views, views.fov_deg, views.width, views.height):
                 rel = f"images/{img.id}_{int(round(yaw)):03d}.jpg"

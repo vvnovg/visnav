@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import pytest
 
 from vpr_bench.dataset import read_places
 from vpr_bench.db_builder import ViewConfig, build_reference_db
@@ -43,3 +44,25 @@ def test_skips_download_when_raw_exists(tmp_path):
     build_reference_db(source, BBox(0, 0, 1, 1), tmp_path, ViewConfig(width=64, height=48))
     build_reference_db(source, BBox(0, 0, 1, 1), tmp_path, ViewConfig(width=64, height=48))
     assert source.downloads == 1
+
+
+class UndecodableSource:
+    def __init__(self, images):
+        self.images = images
+
+    def list_images(self, bbox):
+        return self.images
+
+    def download(self, img, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"not a jpeg")
+        return dest
+
+
+def test_warns_on_undecodable_panorama(tmp_path):
+    source = UndecodableSource([RefImage("p1", 55.75, 37.62, 10.0, 0, True, "u1")])
+    views = ViewConfig(n_views=8, fov_deg=90.0, width=64, height=48)
+    with pytest.warns(UserWarning, match="undecodable"):
+        places = build_reference_db(source, BBox(37.6, 55.7, 37.7, 55.8), tmp_path, views)
+    assert len(places) == 0
+    assert (tmp_path / "refs.csv").exists()
