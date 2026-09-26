@@ -19,16 +19,24 @@ class ModelSpec:
     image_size: tuple[int, int]  # (h, w)
 
 
+# Repos are pinned to a reviewed commit via torch.hub's "owner/repo:ref" syntax
+# so a `bench` run cannot silently pick up unreviewed upstream changes.
+# SALAD/BoQ hubconf may load facebookresearch/dinov2 internally, which this pin
+# does not cover; reviewed dinov2 HEAD at time of pinning was
+# 7764ea0f912e53c92e82eb78a2a1631e92725fc8.
 MODEL_SPECS: dict[str, ModelSpec] = {
     "cosplace-r50": ModelSpec(
-        "gmberton/cosplace", "get_trained_model", {"backbone": "ResNet50", "fc_output_dim": 2048}, (480, 640)
+        "gmberton/cosplace:52b56e95ea62245281281f3bafd7b9390d19a0fd",
+        "get_trained_model", {"backbone": "ResNet50", "fc_output_dim": 2048}, (480, 640)
     ),
     "eigenplaces-r50": ModelSpec(
-        "gmberton/eigenplaces", "get_trained_model", {"backbone": "ResNet50", "fc_output_dim": 2048}, (480, 640)
+        "gmberton/eigenplaces:a2969f71d5ea31017443af490b15273ca4c50af1",
+        "get_trained_model", {"backbone": "ResNet50", "fc_output_dim": 2048}, (480, 640)
     ),
-    "salad-dinov2": ModelSpec("serizba/salad", "dinov2_salad", {}, (322, 322)),
+    "salad-dinov2": ModelSpec("serizba/salad:6aede13a3f6c25750bf7fde10209c06cb73060bb", "dinov2_salad", {}, (322, 322)),
     "boq-dinov2": ModelSpec(
-        "amaralibey/bag-of-queries", "get_trained_boq", {"backbone_name": "dinov2", "output_dim": 12288}, (322, 322)
+        "amaralibey/bag-of-queries:1a4965ea7dfd9bd0dd846adf7a0e430f68101d12",
+        "get_trained_boq", {"backbone_name": "dinov2", "output_dim": 12288}, (322, 322)
     ),
 }
 

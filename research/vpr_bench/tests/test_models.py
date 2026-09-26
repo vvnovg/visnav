@@ -49,6 +49,15 @@ def test_registry_has_expected_models():
     assert set(MODEL_SPECS) == {"cosplace-r50", "eigenplaces-r50", "salad-dinov2", "boq-dinov2"}
 
 
+def test_registry_repos_are_pinned_to_a_reviewed_sha():
+    for name, spec in MODEL_SPECS.items():
+        assert ":" in spec.repo, f"{name} repo is not pinned: {spec.repo!r}"
+        owner_repo, _, ref = spec.repo.partition(":")
+        assert owner_repo, name
+        assert len(ref) == 40, f"{name} ref {ref!r} is not a 40-hex SHA"
+        int(ref, 16)  # raises ValueError if not hex
+
+
 def test_load_unknown_model_raises():
     with pytest.raises(KeyError):
         load_model("nope")

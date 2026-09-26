@@ -38,6 +38,7 @@ def test_run_benchmark_perfect_match(tmp_path):
     assert all(r.session == "S1" for r in results)
     assert meta["fake"]["dim"] == 3
     assert meta["fake"]["ms_per_image"] > 0
+    assert meta["fake"]["hub_ref"] == ""
 
 
 def test_run_benchmark_sessions_and_pool(tmp_path, monkeypatch):

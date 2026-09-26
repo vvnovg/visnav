@@ -13,7 +13,7 @@ import numpy as np
 from vpr_bench.dataset import Place, read_places
 from vpr_bench.evaluate import EvalResult, evaluate
 from vpr_bench.index import GeoIndex
-from vpr_bench.models import VprModel, load_model
+from vpr_bench.models import MODEL_SPECS, VprModel, load_model
 
 # (режим, радиус окна поиска, σ шума центра окна)
 SETTINGS: list[tuple[str, float | None, float]] = [
@@ -91,7 +91,10 @@ def run_benchmark(
             session_lats[session] = np.array([p.lat for p in places])
             session_lons[session] = np.array([p.lon for p in places])
 
-        meta[name] = {"dim": int(ref_desc.shape[1]), "size_mb": model.size_mb(), "ms_per_image": ms}
+        hub_ref = MODEL_SPECS[name].repo if name in MODEL_SPECS else ""
+        meta[name] = {
+            "dim": int(ref_desc.shape[1]), "size_mb": model.size_mb(), "ms_per_image": ms, "hub_ref": hub_ref,
+        }
 
         for session in session_places:
             for setting, radius, noise in SETTINGS:
