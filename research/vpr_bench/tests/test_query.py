@@ -116,10 +116,12 @@ def test_extract_samples_by_container_time_not_index(monkeypatch, tmp_path, wide
         tmp_path / "irregular.avi", wide_track, T0, every_s=0.5, out_dir=tmp_path / "q"
     )
 
-    # next_sample_t starts at 0.0 and advances by every_s each time a frame is
-    # sampled: 0.9->keep(next=0.5), 1.05->keep(next=1.0), 1.3->keep(next=1.5),
-    # 1.65->keep(next=2.0), 1.8->skip, 2.1->keep(next=2.5), 2.4->skip.
-    expected_t = [0.9, 1.05, 1.3, 1.65, 2.1]
+    # next_sample_t starts at 0.0 and, once a frame is sampled, catches up past
+    # that frame's own time (a while-loop, not a single += every_s) so a gap
+    # can't leave next_sample_t behind and cause a later burst of kept frames:
+    # 0.9->keep(catch-up next=1.0), 1.05->keep(next=1.5), 1.3->skip(<1.5),
+    # 1.65->keep(next=2.0), 1.8->skip(<2.0), 2.1->keep(next=2.5), 2.4->skip.
+    expected_t = [0.9, 1.05, 1.65, 2.1]
     assert len(places) == len(expected_t)
     for place, t in zip(places, expected_t):
         assert place.lat == pytest.approx(55.7500 + t * 0.0001)
@@ -143,6 +145,42 @@ def test_extract_falls_back_to_index_over_fps_when_pos_msec_invalid(monkeypatch,
         pytest.approx(55.7500 + 0.9 * 0.0001),
         pytest.approx(55.7500 + 2.0 * 0.0001),
     ]
+
+
+def test_frame_clock_anchors_backward_check_to_last_good_raw_not_prev():
+    from vpr_bench.query import _FrameClock
+
+    # POS_MSEC (ms): 2000, 800, 1900. The 800 is behind the first good raw
+    # (2000) and correctly falls back to idx/fps. The 1900 is *also* behind
+    # that same good raw (2000) — it must not be accepted just because it is
+    # ahead of the previous frame's fallback value (0.1s); anchoring to the
+    # last *good raw* timestamp (2000ms=2.0s) catches it too.
+    clock = _FrameClock(fps=10.0)
+    assert clock.next(0, 2000) == pytest.approx(2.0)
+    assert clock.next(1, 800) == pytest.approx(0.1)  # idx/fps = 1/10
+    assert clock.next(2, 1900) == pytest.approx(0.2)  # idx/fps = 2/10, not 1.9
+
+
+def test_extract_catches_up_after_timestamp_gap_without_bursting(monkeypatch, tmp_path, wide_track):
+    # A ~4s gap between frame 1 (t=1.0s) and frame 2 (t=5.0s), then frames
+    # every 0.1s up to t=5.8s.
+    times_ms = [0, 1000, 5000, 5100, 5200, 5300, 5400, 5500, 5600, 5700, 5800]
+    fake = FakeCapture(times_ms)
+    monkeypatch.setattr("vpr_bench.query.cv2.VideoCapture", lambda path: fake)
+
+    places = extract_query_frames(
+        tmp_path / "gap.avi", wide_track, T0, every_s=0.5, out_dir=tmp_path / "q"
+    )
+
+    # Without catch-up, next_sample_t would sit at 1.5 after the t=1.0 frame,
+    # and every one of the seven frames from 5.1s to 5.7s (all >= 1.5) would
+    # be kept in a burst. With catch-up, next_sample_t jumps past the gap to
+    # 5.5 as soon as the t=5.0 frame is sampled, so only one frame per every_s
+    # interval survives: t = 0.0, 1.0, 5.0, 5.8.
+    expected_t = [0.0, 1.0, 5.0, 5.8]
+    assert len(places) == len(expected_t)
+    for place, t in zip(places, expected_t):
+        assert place.lat == pytest.approx(55.7500 + t * 0.0001)
 
 
 def test_extract_drops_stationary_frames(tmp_path):
