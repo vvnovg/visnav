@@ -9,7 +9,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from vpr_bench.db_builder import ViewConfig, build_reference_db
+from vpr_bench.db_builder import Corridor, ViewConfig, build_reference_db
 from vpr_bench.geo import BBox
 from vpr_bench.mapillary import MapillaryClient
 from vpr_bench.models import pick_device
@@ -22,11 +22,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vpr-bench")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    f = sub.add_parser("fetch-refs", help="скачать эталоны Mapillary в bbox")
-    f.add_argument("--bbox", required=True, help="min_lon,min_lat,max_lon,max_lat")
+    f = sub.add_parser("fetch-refs", help="скачать эталоны Mapillary в bbox или вдоль треков")
+    f.add_argument("--bbox", default=None, help="min_lon,min_lat,max_lon,max_lat")
+    f.add_argument(
+        "--gpx", action="append", default=[], type=Path, help="GPX-трек (можно несколько раз)"
+    )
+    f.add_argument("--buffer-m", type=float, default=600.0, help="буфер коридора вокруг треков, м")
     f.add_argument("--out", required=True, type=Path)
     f.add_argument("--views", type=int, default=8)
     f.add_argument("--fov", type=float, default=90.0)
+    f.add_argument("--width", type=int, default=640)
+    f.add_argument("--height", type=int, default=480)
+    f.add_argument("--workers", type=int, default=8)
 
     q = sub.add_parser("extract-queries", help="нарезать видео поездки в кадры-запросы")
     q.add_argument("--video", required=True, type=Path)
@@ -52,9 +59,19 @@ def main(argv: list[str] | None = None) -> int:
         if not token:
             print("error: set MAPILLARY_TOKEN environment variable", file=sys.stderr)
             return 2
+        if not args.bbox and not args.gpx:
+            print("error: specify at least one of --bbox or --gpx", file=sys.stderr)
+            return 2
+        corridor = None
+        if args.gpx:
+            tracks = [parse_gpx(p) for p in args.gpx]
+            corridor = Corridor(tracks, args.buffer_m)
+        bbox = BBox.parse(args.bbox) if args.bbox else corridor.bbox()
         places = build_reference_db(
-            MapillaryClient(token), BBox.parse(args.bbox), args.out,
-            ViewConfig(n_views=args.views, fov_deg=args.fov),
+            MapillaryClient(token), bbox, args.out,
+            ViewConfig(n_views=args.views, fov_deg=args.fov, width=args.width, height=args.height),
+            corridor=corridor,
+            workers=args.workers,
         )
         print(f"{len(places)} reference images -> {args.out / 'refs.csv'}")
         return 0
