@@ -57,25 +57,65 @@ def embed_places_cached(
 def run_benchmark(
     model_names: list[str],
     refs_csv: Path,
-    queries_csv: Path,
+    queries: dict[str, Path],
+    pools: list[list[str]] | None = None,
     loader: Callable[[str, str], VprModel] = load_model,
     device: str = "cpu",
+    on_model_done: Callable[[list[EvalResult], dict[str, dict]], None] | None = None,
 ) -> tuple[list[EvalResult], dict[str, dict]]:
+    for pool in pools or []:
+        for session in pool:
+            if session not in queries:
+                raise ValueError(f"unknown session {session!r} in pool; known sessions: {sorted(queries)}")
+
     refs = read_places(refs_csv)
-    queries = read_places(queries_csv)
-    q_lats = np.array([p.lat for p in queries])
-    q_lons = np.array([p.lon for p in queries])
+    session_places = {session: read_places(path) for session, path in queries.items()}
+    refs_cache_dir = refs_csv.parent / "desc"
+
     results: list[EvalResult] = []
     meta: dict[str, dict] = {}
     for name in model_names:
         model = loader(name, device)
-        ref_desc, _ = embed_places(model, refs, refs_csv.parent)
-        q_desc, ms = embed_places(model, queries, queries_csv.parent)
+        ref_desc, _ = embed_places_cached(model, refs, refs_csv, refs_cache_dir)
         index = GeoIndex(ref_desc, [p.lat for p in refs], [p.lon for p in refs])
+
+        session_desc: dict[str, np.ndarray] = {}
+        session_lats: dict[str, np.ndarray] = {}
+        session_lons: dict[str, np.ndarray] = {}
+        ms = 0.0
+        for session, places in session_places.items():
+            csv_path = queries[session]
+            cache_dir = csv_path.parent / "desc"
+            desc, ms = embed_places_cached(model, places, csv_path, cache_dir)
+            session_desc[session] = desc
+            session_lats[session] = np.array([p.lat for p in places])
+            session_lons[session] = np.array([p.lon for p in places])
+
         meta[name] = {"dim": int(ref_desc.shape[1]), "size_mb": model.size_mb(), "ms_per_image": ms}
-        for setting, radius, noise in SETTINGS:
-            results.append(
-                evaluate(index, q_desc, q_lats, q_lons, name, setting,
-                         prior_radius_m=radius, prior_noise_m=noise)
-            )
+
+        for session in session_places:
+            for setting, radius, noise in SETTINGS:
+                results.append(
+                    evaluate(
+                        index, session_desc[session], session_lats[session], session_lons[session],
+                        name, setting, prior_radius_m=radius, prior_noise_m=noise, session=session,
+                    )
+                )
+
+        for pool in pools or []:
+            pool_name = "+".join(pool)
+            pool_desc = np.concatenate([session_desc[s] for s in pool])
+            pool_lats = np.concatenate([session_lats[s] for s in pool])
+            pool_lons = np.concatenate([session_lons[s] for s in pool])
+            for setting, radius, noise in SETTINGS:
+                results.append(
+                    evaluate(
+                        index, pool_desc, pool_lats, pool_lons,
+                        name, setting, prior_radius_m=radius, prior_noise_m=noise, session=pool_name,
+                    )
+                )
+
+        if on_model_done is not None:
+            on_model_done(results, meta)
+
     return results, meta

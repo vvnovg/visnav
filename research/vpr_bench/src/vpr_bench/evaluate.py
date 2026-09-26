@@ -20,6 +20,7 @@ class EvalResult:
     recall: dict[int, float]
     median_err_m: float
     p95_err_m: float
+    session: str = ""
 
 
 def evaluate(
@@ -34,6 +35,7 @@ def evaluate(
     prior_radius_m: float | None = None,
     prior_noise_m: float = 0.0,
     seed: int = 0,
+    session: str = "",
 ) -> EvalResult:
     n = len(q_desc)
     if n == 0:
@@ -83,4 +85,5 @@ def evaluate(
         recall=recall,
         median_err_m=float(np.quantile(errs, 0.5, method="higher")),
         p95_err_m=float(np.quantile(errs, 0.95, method="higher")),
+        session=session,
     )

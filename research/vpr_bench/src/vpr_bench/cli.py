@@ -12,10 +12,22 @@ from pathlib import Path
 from vpr_bench.db_builder import Corridor, ViewConfig, build_reference_db
 from vpr_bench.geo import BBox
 from vpr_bench.mapillary import MapillaryClient
-from vpr_bench.models import pick_device
+from vpr_bench.models import MODEL_SPECS, pick_device
 from vpr_bench.pipeline import run_benchmark
 from vpr_bench.query import extract_query_frames, parse_gpx
 from vpr_bench.report import render_report
+
+
+def parse_queries(specs: list[str]) -> dict[str, Path]:
+    result: dict[str, Path] = {}
+    for spec in specs:
+        if "=" in spec:
+            name, _, path = spec.partition("=")
+        else:
+            path = spec
+            name = Path(spec).parent.name
+        result[name] = Path(path)
+    return result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,10 +56,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     b = sub.add_parser("bench", help="сравнить модели")
     b.add_argument("--refs", required=True, type=Path)
-    b.add_argument("--queries", required=True, type=Path)
+    b.add_argument(
+        "--queries", action="append", default=[], required=True,
+        help="NAME=PATH (можно несколько раз); голый PATH берёт имя из родительского каталога",
+    )
     b.add_argument("--models", required=True, help="через запятую, напр. eigenplaces-r50,salad-dinov2")
     b.add_argument("--out", required=True, type=Path)
     b.add_argument("--device", default=None)
+    b.add_argument(
+        "--pool", action="append", default=[],
+        help="SESSION,SESSION,... — объединить сессии для сводной оценки (можно несколько раз)",
+    )
+    b.add_argument("--decision-session", default=None, help="сессия для отметки решения M0 в отчёте")
     return parser
 
 
@@ -83,14 +103,44 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{len(places)} query frames -> {args.out / 'queries.csv'}")
         return 0
 
+    model_names = [m.strip() for m in args.models.split(",") if m.strip()]
+    unknown = [m for m in model_names if m not in MODEL_SPECS]
+    if not model_names or unknown:
+        if unknown:
+            print(
+                f"error: unknown model(s) {unknown}; known models: {sorted(MODEL_SPECS)}",
+                file=sys.stderr,
+            )
+        else:
+            print(f"error: no models given; known models: {sorted(MODEL_SPECS)}", file=sys.stderr)
+        return 2
+
+    queries = parse_queries(args.queries)
+    pools = [[s.strip() for s in p.split(",") if s.strip()] for p in args.pool]
+    decision_session = args.decision_session
+    if decision_session is None and pools:
+        decision_session = "+".join(pools[0])
+
+    def _on_model_done(results_so_far, meta_so_far):
+        args.out.mkdir(parents=True, exist_ok=True)
+        report_tmp = args.out / "report.md.tmp"
+        report_path = args.out / "report.md"
+        report_tmp.write_text(render_report(results_so_far, meta_so_far, decision_session=decision_session))
+        os.replace(report_tmp, report_path)
+
+        results_tmp = args.out / "results.json.tmp"
+        results_path = args.out / "results.json"
+        results_tmp.write_text(
+            json.dumps(
+                {"results": [asdict(r) for r in results_so_far], "meta": meta_so_far},
+                ensure_ascii=False, indent=2,
+            )
+        )
+        os.replace(results_tmp, results_path)
+
     results, meta = run_benchmark(
-        [m.strip() for m in args.models.split(",") if m.strip()],
-        args.refs, args.queries, device=args.device or pick_device(),
-    )
-    args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "report.md").write_text(render_report(results, meta))
-    (args.out / "results.json").write_text(
-        json.dumps({"results": [asdict(r) for r in results], "meta": meta}, ensure_ascii=False, indent=2)
+        model_names, args.refs, queries, pools=pools or None,
+        device=args.device or pick_device(), on_model_done=_on_model_done,
     )
     print(f"report -> {args.out / 'report.md'}")
     return 0

@@ -2,6 +2,7 @@ import json
 
 import cv2
 import numpy as np
+import pytest
 import torch
 
 from vpr_bench.dataset import Place, write_places
@@ -31,11 +32,59 @@ def _fake_loader(name, device):
 def test_run_benchmark_perfect_match(tmp_path):
     refs = _make_set(tmp_path / "refs", "refs.csv")
     queries = _make_set(tmp_path / "queries", "queries.csv")
-    results, meta = run_benchmark(["fake"], refs, queries, loader=_fake_loader)
+    results, meta = run_benchmark(["fake"], refs, {"S1": queries}, loader=_fake_loader)
     assert [r.setting for r in results] == [s[0] for s in SETTINGS]
     assert all(r.recall[1] == 1.0 for r in results)
+    assert all(r.session == "S1" for r in results)
     assert meta["fake"]["dim"] == 3
     assert meta["fake"]["ms_per_image"] > 0
+
+
+def test_run_benchmark_sessions_and_pool(tmp_path, monkeypatch):
+    refs = _make_set(tmp_path / "refs", "refs.csv")
+    q1 = _make_set(tmp_path / "q1", "queries.csv")
+    q2 = _make_set(tmp_path / "q2", "queries.csv")
+
+    read_counts = {"n": 0}
+    real_imread = cv2.imread
+
+    def _counting_imread(path, *a, **kw):
+        read_counts["n"] += 1
+        return real_imread(path, *a, **kw)
+
+    monkeypatch.setattr(cv2, "imread", _counting_imread)
+    results, meta = run_benchmark(
+        ["fake"], refs, {"S1": q1, "S2": q2}, pools=[["S1", "S2"]], loader=_fake_loader
+    )
+
+    sessions = {r.session for r in results}
+    assert sessions == {"S1", "S2", "S1+S2"}
+    for setting, _, _ in SETTINGS:
+        settings_for = {r.session for r in results if r.setting == setting}
+        assert settings_for == {"S1", "S2", "S1+S2"}
+    # 3 refs + 3 queries (S1) + 3 queries (S2) images read, exactly once each
+    # (refs embedded once regardless of number of sessions/pools).
+    assert read_counts["n"] == 9
+
+
+def test_run_benchmark_unknown_pool_session_raises(tmp_path):
+    refs = _make_set(tmp_path / "refs", "refs.csv")
+    q1 = _make_set(tmp_path / "q1", "queries.csv")
+    with pytest.raises(ValueError):
+        run_benchmark(["fake"], refs, {"S1": q1}, pools=[["S1", "S99"]], loader=_fake_loader)
+
+
+def test_run_benchmark_calls_on_model_done_once_per_model(tmp_path):
+    refs = _make_set(tmp_path / "refs", "refs.csv")
+    q1 = _make_set(tmp_path / "q1", "queries.csv")
+    calls = []
+
+    def _on_done(results_so_far, meta_so_far):
+        calls.append((len(results_so_far), set(meta_so_far)))
+
+    run_benchmark(["fake"], refs, {"S1": q1}, loader=_fake_loader, on_model_done=_on_done)
+    assert len(calls) == 1
+    assert calls[0][1] == {"fake"}
 
 
 def _fake_model():
