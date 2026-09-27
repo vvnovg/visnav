@@ -27,14 +27,11 @@ def quantize_int8(fp32_path: Path, out_path: Path, calib_images_bgr: list[np.nda
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         prepped = Path(tmp) / "prepped.onnx"
-        try:
-            quant_pre_process(str(fp32_path), str(prepped))
-            model_to_quantize = str(prepped)
-        except Exception:
-            # If quant_pre_process fails, use the model directly
-            model_to_quantize = str(fp32_path)
+        # Skip symbolic shape inference: our exported models have fully static shapes,
+        # and symbolic inference fails on the ImageNet-normalization broadcast in DeviceWrapper.
+        quant_pre_process(str(fp32_path), str(prepped), skip_symbolic_shape=True)
         quantize_static(
-            model_to_quantize, str(out_path), _CalibReader(batches),
+            str(prepped), str(out_path), _CalibReader(batches),
             quant_format=QuantFormat.QDQ, per_channel=True,
             weight_type=QuantType.QInt8, activation_type=QuantType.QUInt8,
         )
