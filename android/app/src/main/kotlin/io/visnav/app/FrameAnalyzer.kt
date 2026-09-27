@@ -14,7 +14,8 @@ class FrameAnalyzer(
     private val inputW: Int,
     private val inputH: Int,
 ) : ImageAnalysis.Analyzer {
-    @Volatile var onFrame: ((tMs: Long, rgb: ByteArray, preMs: Double) -> Unit)? = null
+    /** captureTsNs — ImageProxy.imageInfo.timestamp (нс, монотонные часы камеры) в момент кадра. */
+    @Volatile var onFrame: ((tMs: Long, rgb: ByteArray, preMs: Double, captureTsNs: Long) -> Unit)? = null
 
     /** Вызывается на любую необработанную ошибку внутри analyze() — кадр уже закрыт к этому моменту. */
     @Volatile var onError: ((Throwable) -> Unit)? = null
@@ -32,6 +33,7 @@ class FrameAnalyzer(
         val nowElapsed = SystemClock.elapsedRealtime()
         if (handler == null || nowElapsed - lastMs < intervalMs) { image.close(); return }
         lastMs = nowElapsed
+        val captureTsNs = image.imageInfo.timestamp
         try {
             val now = System.currentTimeMillis()
             val t0 = System.nanoTime()
@@ -70,7 +72,7 @@ class FrameAnalyzer(
                 upright?.takeIf { it !== bmp }?.recycle()
                 bmp?.recycle()
             }
-            handler(now, rgb, (System.nanoTime() - t0) / 1e6)
+            handler(now, rgb, (System.nanoTime() - t0) / 1e6, captureTsNs)
         } catch (t: Throwable) {
             // Кадр уже закрыт (finally выше отработал до того, как исключение долетело сюда) —
             // один плохой кадр на исполнителе анализа не должен ронять его целиком.

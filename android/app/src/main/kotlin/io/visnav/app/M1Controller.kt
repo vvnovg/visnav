@@ -13,12 +13,16 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import io.visnav.core.DescriptorLogWriter
+import io.visnav.core.FrameCaptureEvent
 import io.visnav.core.Geo
 import io.visnav.core.LocalizationPipeline
 import io.visnav.core.PriorMode
 import io.visnav.core.PriorPolicy
+import io.visnav.core.SensorLogger
 import io.visnav.core.SessionHeader
 import io.visnav.core.SessionLogger
+import java.io.Closeable
 import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -55,10 +59,13 @@ class M1Controller(private val context: Context) {
     private val logDir = File(filesDir, "logs")
     private val executor = Executors.newSingleThreadExecutor()
     private val gps = GpsSource(context)
+    private val sensors = SensorRecorder(context)
     private val analyzer = AtomicReference<FrameAnalyzer?>(null)
     private val runningFlag = AtomicBoolean(false)
     @Volatile private var bundle: LoadedBundle? = null
     @Volatile private var logger: SessionLogger? = null
+    @Volatile private var sensorLog: SensorLogger? = null
+    @Volatile private var descLog: DescriptorLogWriter? = null
 
     init {
         executor.execute {
@@ -125,20 +132,72 @@ class M1Controller(private val context: Context) {
                 return
             }
             val mode = _state.value.mode
-            val pipeline = LocalizationPipeline(b.pack, b.embedder, PriorPolicy(mode))
+            // Ставим running/status здесь, а не в конце: последующие предупреждения этого блока
+            // (обрыв заголовка датчиков через onFirstFailure, отсутствие гироскопа/акселерометра)
+            // дописываются к этому статусу через "it.status + ...", а не затираются им — раньше
+            // финальный _state.update шёл последним и стирал их целиком.
+            _state.update { it.copy(running = true, frames = 0, errors = 0, status = "Запись: ${mode.name}") }
             logDir.mkdirs()
             val startedMs = System.currentTimeMillis()
-            val log = SessionLogger(File(logDir, "session-$startedMs-${mode.name.lowercase()}.jsonl"))
+            val base = "session-$startedMs-${mode.name.lowercase()}"
+            val log = SessionLogger(File(logDir, "$base.jsonl"))
             logger = log
+            // Поле присваивается до header(): если header() всё же бросит исключение (обычные
+            // IOException уже перехватываются самим SensorLogger), файл всё равно должен закрыться
+            // через путь ошибки start() ниже, а не остаться висеть незакрытым.
+            val sLog = SensorLogger(File(logDir, "$base.sensors.jsonl"))
+            sensorLog = sLog
+            // Ставим обработчик до header(): если сам заголовок не запишется, это тоже первая
+            // (и единственная) поломка потока датчиков, и о ней тоже нужно сообщить.
+            sLog.onFirstFailure = { e ->
+                _state.update {
+                    it.copy(errors = it.errors + 1, status = "Ошибка записи датчиков: ${e.message} — остановите запись")
+                }
+            }
+            sLog.header(startedMs)
+            val dLog = DescriptorLogWriter(File(logDir, "$base.desc"), b.pack.dim)
+            descLog = dLog
+            var descriptorFailureReported = false
+            val pipeline = LocalizationPipeline(b.pack, b.embedder, PriorPolicy(mode), onDescriptor = { t, d ->
+                try {
+                    dLog.write(t, d)
+                } catch (e: Exception) {
+                    // Один плохой дескриптор не должен ронять кадр или сессию — считаем и продолжаем,
+                    // как и с остальными ошибками кадра. Статус выставляем только при первом сбое,
+                    // чтобы поток однотипных ошибок не забивал статус построчно; счётчик растёт всегда.
+                    if (!descriptorFailureReported) {
+                        descriptorFailureReported = true
+                        _state.update { it.copy(errors = it.errors + 1, status = "ошибка записи дескриптора: ${e.message}") }
+                    } else {
+                        _state.update { it.copy(errors = it.errors + 1) }
+                    }
+                }
+            })
             // Заголовок пишется не здесь, а при первом кадре: только тогда известно фактическое
             // разрешение анализа (device string включает "analysis WxH", см. C2), но первой строкой
             // журнала он всё равно останется — до первого кадра ничего больше не пишется.
             var headerWritten = false
+            gps.onLoc = { sLog.event(it) }
+            gps.onGnss = { sLog.event(it) }
             gps.start()
+            sensors.onWarning = { message -> _state.update { it.copy(status = it.status + " · $message") } }
+            val sensorsStarted = sensors.start { sLog.event(it) }
+            if (!sensorsStarted) {
+                _state.update { it.copy(status = it.status + " · нет гироскопа/акселерометра — датчики не пишутся") }
+            }
             frameAnalyzer.onError = { t ->
                 _state.update { it.copy(errors = it.errors + 1, status = "Ошибка кадра (анализ): ${t.message}") }
             }
-            frameAnalyzer.onFrame = onFrame@{ tMs, rgb, preMs ->
+            frameAnalyzer.onFrame = onFrame@{ tMs, rgb, preMs, captureTsNs ->
+                // t = tMs (the same wall-clock value as this frame's .jsonl t_ms) — NOT a conversion
+                // of captureTsNs: that raw camera timestamp isn't reliably on elapsedRealtimeNanos on
+                // every device, so offsetMs (calibrated against elapsedRealtimeNanos in SensorRecorder)
+                // would silently produce a wrong wall time. captureTsNs is kept as-is in cap_ns for
+                // later, source-aware correlation (see FrameCaptureEvent). Skipped entirely when the
+                // sensor thread never started — there is no SensorRecorder clock domain to relate it to.
+                if (captureTsNs > 0 && sensorsStarted) {
+                    sLog.event(FrameCaptureEvent(tMs.toDouble(), tMs, captureTsNs))
+                }
                 if (!headerWritten) {
                     try {
                         log.header(SessionHeader(
@@ -173,23 +232,38 @@ class M1Controller(private val context: Context) {
                     }
                 }
             }
-            _state.update { it.copy(running = true, frames = 0, errors = 0, status = "Запись: ${mode.name}") }
         } catch (e: Exception) {
             // Любой сбой после CAS (например, база выгружена или диск недоступен) не должен
             // оставить контроллер в состоянии "running=true" без реально работающей записи.
             runningFlag.set(false)
             analyzer.get()?.onFrame = null
             analyzer.get()?.onError = null
+            sensors.stop()
+            gps.onLoc = null
+            gps.onGnss = null
             gps.stop()
             val log = logger
             logger = null
+            val sLog = sensorLog
+            sensorLog = null
+            val dLog = descLog
+            descLog = null
+            val failedCount = sLog?.failed ?: 0
+            val closeErrors = mutableListOf<String>()
+            closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
+            closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
             try {
                 log?.close()
             } catch (closeError: Exception) {
-                _state.update { it.copy(status = "Ошибка запуска: ${e.message}; ошибка закрытия журнала: ${closeError.message}") }
-                return
+                closeErrors.add("ошибка закрытия журнала: ${closeError.message}")
             }
-            _state.update { it.copy(running = false, status = "Ошибка запуска: ${e.message}") }
+            // Один финальный _state.update: собираем все ошибки закрытия в статус разом, чтобы более
+            // ранняя (например, датчиков) не была затёрта более поздним присваиванием статуса.
+            val suffix = buildString {
+                if (failedCount > 0) append(" · ошибок записи датчиков: $failedCount")
+                for (err in closeErrors) append("; $err")
+            }
+            _state.update { it.copy(running = false, status = "Ошибка запуска: ${e.message}$suffix") }
         }
     }
 
@@ -197,18 +271,37 @@ class M1Controller(private val context: Context) {
         if (!runningFlag.compareAndSet(true, false)) return
         analyzer.get()?.onFrame = null
         analyzer.get()?.onError = null
+        sensors.stop()
+        gps.onLoc = null
+        gps.onGnss = null
         gps.stop()
         val log = logger
         logger = null
-        // Закрываем на потоке анализа — после кадра, который, возможно, ещё обрабатывается.
+        val sLog = sensorLog
+        sensorLog = null
+        val dLog = descLog
+        descLog = null
+        val skipped = sLog?.skipped ?: 0
+        val failedCount = sLog?.failed ?: 0
+        // Закрываем и формируем финальный статус на потоке анализа — после кадра, который, возможно,
+        // ещё обрабатывается, и одним _state.update, чтобы ошибка закрытия (обнаруженная здесь, на
+        // executor) не была затёрта более ранним присваиванием статуса с потока вызывающего stop().
         executor.execute {
+            val closeErrors = mutableListOf<String>()
             try {
                 log?.close()
             } catch (e: Exception) {
-                _state.update { it.copy(status = it.status + " · ошибка закрытия журнала: ${e.message}") }
+                closeErrors.add("ошибка закрытия журнала: ${e.message}")
             }
+            closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
+            closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
+            val suffix = buildString {
+                if (skipped > 0) append(" · пропущено датчиков: $skipped")
+                if (failedCount > 0) append(" · журнал датчиков прерван после ошибки записи")
+                for (err in closeErrors) append(" · $err")
+            }
+            _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}$suffix") }
         }
-        _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}") }
     }
 
     /**
@@ -221,34 +314,71 @@ class M1Controller(private val context: Context) {
         if (!runningFlag.compareAndSet(true, false)) return
         frameAnalyzer.onFrame = null
         frameAnalyzer.onError = null
+        sensors.stop()
+        gps.onLoc = null
+        gps.onGnss = null
         gps.stop()
         if (logger === log) logger = null
+        val sLog = sensorLog
+        sensorLog = null
+        val dLog = descLog
+        descLog = null
+        val failedCount = sLog?.failed ?: 0
+        val closeErrors = mutableListOf<String>()
+        closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
+        closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
         try {
             log.close()
         } catch (closeError: Exception) {
-            _state.update { it.copy(running = false, status = "$message; ошибка закрытия журнала: ${closeError.message}") }
-            return
+            closeErrors.add("ошибка закрытия журнала: ${closeError.message}")
         }
-        _state.update { it.copy(running = false, status = message) }
+        val suffix = buildString {
+            if (failedCount > 0) append(" · ошибок записи датчиков: $failedCount")
+            for (err in closeErrors) append("; $err")
+        }
+        _state.update { it.copy(running = false, status = "$message$suffix") }
     }
 
     /** Освобождает камеру/GPS/логгер/модель. Вызывать один раз при уничтожении владельца. */
     fun close() {
         if (runningFlag.get()) stop()
-        gps.stop()
+        sensors.stop()
+        gps.close()
         val log = logger
         logger = null
+        val sLog = sensorLog
+        sensorLog = null
+        val dLog = descLog
+        descLog = null
         // bundle читаем внутри задачи на том же executor, а не здесь: если close() позвали, пока
         // init ещё грузит бандл на этом же executor, эта задача выполнится после неё и увидит уже
         // присвоенный bundle — иначе только что созданный OrtEmbedder не закрылся бы никогда.
+        val failedCount = sLog?.failed ?: 0
         executor.execute {
+            val closeErrors = mutableListOf<String>()
             try {
                 log?.close()
             } catch (e: Exception) {
-                _state.update { it.copy(status = it.status + " · ошибка закрытия журнала: ${e.message}") }
+                closeErrors.add("ошибка закрытия журнала: ${e.message}")
+            }
+            closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
+            closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
+            if (failedCount > 0 || closeErrors.isNotEmpty()) {
+                val suffix = buildString {
+                    if (failedCount > 0) append(" · ошибок записи датчиков: $failedCount")
+                    for (err in closeErrors) append(" · $err")
+                }
+                _state.update { it.copy(status = it.status + suffix) }
             }
             bundle?.embedder?.close()
         }
         executor.shutdown()
+    }
+
+    private fun closeQuietly(label: String, closeable: Closeable?): String? = try {
+        closeable?.close()
+        null
+    } catch (e: Exception) {
+        "ошибка закрытия $label: ${e.message}"
     }
 }

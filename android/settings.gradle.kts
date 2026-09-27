@@ -6,4 +6,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "visnav"
-include(":core", ":app")
+include(":core", ":app", ":replay")
