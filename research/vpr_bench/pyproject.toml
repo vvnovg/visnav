@@ -9,6 +9,9 @@ dependencies = [
     "requests>=2.31",
     "torch>=2.2",
     "torchvision>=0.17",
+    "onnx>=1.17",
+    "onnxscript>=0.2",
+    "onnxruntime>=1.20",
 ]
 
 [project.optional-dependencies]
@@ -16,6 +19,7 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 vpr-bench = "vpr_bench.cli:main"
+vpr-m1 = "vpr_bench.m1cli:main"
 
 [build-system]
 requires = ["hatchling"]

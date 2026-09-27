@@ -147,7 +147,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     model_names = [m.strip() for m in args.models.split(",") if m.strip()]
-    unknown = [m for m in model_names if m not in MODEL_SPECS]
+    unknown = [
+        m for m in model_names
+        if m not in MODEL_SPECS and not (m.startswith("onnx:") and Path(m[len("onnx:"):]).is_file())
+    ]
     if not model_names or unknown:
         if unknown:
             print(

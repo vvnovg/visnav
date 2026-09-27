@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -78,7 +79,11 @@ def pick_device() -> str:
     return "cpu"
 
 
-def load_model(name: str, device: str = "cpu") -> VprModel:
+def load_model(name: str, device: str = "cpu"):
+    if name.startswith("onnx:"):
+        from vpr_bench.onnx_export import OnnxEmbedder
+
+        return OnnxEmbedder(Path(name[len("onnx:"):]))
     if name not in MODEL_SPECS:
         raise KeyError(f"unknown model {name!r}; known: {sorted(MODEL_SPECS)}")
     spec = MODEL_SPECS[name]
