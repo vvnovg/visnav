@@ -147,3 +147,88 @@ def test_parser_fetch_refs_defaults():
     assert args.workers == 8
     assert args.buffer_m == 600.0
     assert args.gpx == []
+
+
+def test_parser_extract_queries_defaults():
+    args = build_parser().parse_args(
+        [
+            "extract-queries", "--video", "v.mp4", "--gpx", "t.gpx",
+            "--video-start", "2026-09-20T10:00:03.250+03:00", "--out", "out",
+        ]
+    )
+    assert args.max_gap_s == 3.0
+    assert args.max_speed == 70.0
+    assert args.max_hdop == 5.0
+
+
+def test_extract_queries_non_positive_max_gap_s_exits_2(tmp_path, capsys):
+    code = main(
+        [
+            "extract-queries",
+            "--video", "v.mp4",
+            "--gpx", "t.gpx",
+            "--video-start", "2026-09-20T10:00:03.250+03:00",
+            "--max-gap-s", "0",
+            "--out", str(tmp_path / "out"),
+        ]
+    )
+    assert code == 2
+    assert "--max-gap-s must be > 0" in capsys.readouterr().err
+
+
+def test_extract_queries_non_positive_max_speed_exits_2(tmp_path, capsys):
+    code = main(
+        [
+            "extract-queries",
+            "--video", "v.mp4",
+            "--gpx", "t.gpx",
+            "--video-start", "2026-09-20T10:00:03.250+03:00",
+            "--max-speed", "-1",
+            "--out", str(tmp_path / "out"),
+        ]
+    )
+    assert code == 2
+    assert "--max-speed must be > 0" in capsys.readouterr().err
+
+
+def test_extract_queries_prints_track_and_frame_summary(tmp_path, capsys):
+    import cv2
+    import numpy as np
+
+    gpx = """<?xml version="1.0"?>
+<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
+<trk><trkseg>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:00Z</time><hdop>1.0</hdop></trkpt>
+<trkpt lat="55.7502" lon="37.6000"><time>2026-09-20T10:00:02Z</time><hdop>1.0</hdop></trkpt>
+<trkpt lat="55.7504" lon="37.6000"><time>2026-09-20T10:00:04Z</time><hdop>9.0</hdop></trkpt>
+<trkpt lat="55.7506" lon="37.6000"><time>2026-09-20T10:00:06Z</time><hdop>1.0</hdop></trkpt>
+<trkpt lat="55.7508" lon="37.6000"><time>2026-09-20T10:00:08Z</time><hdop>1.0</hdop></trkpt>
+<trkpt lat="55.7510" lon="37.6000"><time>2026-09-20T10:00:10Z</time><hdop>1.0</hdop></trkpt>
+</trkseg></trk></gpx>
+"""
+    gpx_path = tmp_path / "track.gpx"
+    gpx_path.write_text(gpx)
+
+    video_path = tmp_path / "drive.avi"
+    w = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"MJPG"), 10, (64, 48))
+    for i in range(100):
+        w.write(np.full((48, 64, 3), i % 255, np.uint8))
+    w.release()
+
+    out_dir = tmp_path / "out"
+    code = main(
+        [
+            "extract-queries",
+            "--video", str(video_path),
+            "--gpx", str(gpx_path),
+            "--video-start", "2026-09-20T10:00:00+00:00",
+            "--every", "2",
+            "--out", str(out_dir),
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "query frames ->" in out
+    assert "track: removed hdop=1 spoof=0 detached=0; frames: kept=" in out
+    for reason in ("kept=", "no_pose=", "gap=", "stationary="):
+        assert reason in out
