@@ -33,7 +33,12 @@ class GpsSource(context: Context) : LocationListener {
     }
 
     override fun onLocationChanged(l: Location) {
-        latest = TimedFix(GpsFix(l.latitude, l.longitude, l.accuracy, l.time), l.elapsedRealtimeNanos)
+        // l.time (wall clock, set by the GPS provider) can drift from the phone's own wall clock
+        // or jump around; reconstruct the fix's wall-clock time from the phone's own clocks
+        // instead, so frame.t_ms and gps.t_ms in the log are on the same clock (see C1).
+        val nowElapsedNanos = SystemClock.elapsedRealtimeNanos()
+        val tMs = System.currentTimeMillis() - (nowElapsedNanos - l.elapsedRealtimeNanos) / 1_000_000
+        latest = TimedFix(GpsFix(l.latitude, l.longitude, l.accuracy, tMs), l.elapsedRealtimeNanos)
     }
 
     // На API 29 эти методы ещё абстрактные — реализуем явно.

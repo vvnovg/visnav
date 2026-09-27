@@ -6,6 +6,7 @@ import android.util.Size
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -37,6 +38,7 @@ data class UiState(
     val lastErrM: Double? = null,
     val lastInfMs: Double? = null,
     val gpsAccM: Float? = null,
+    val frameSize: String? = null,
 )
 
 /**
@@ -55,8 +57,8 @@ class M1Controller(private val context: Context) {
     private val gps = GpsSource(context)
     private val analyzer = AtomicReference<FrameAnalyzer?>(null)
     private val runningFlag = AtomicBoolean(false)
-    private var bundle: LoadedBundle? = null
-    private var logger: SessionLogger? = null
+    @Volatile private var bundle: LoadedBundle? = null
+    @Volatile private var logger: SessionLogger? = null
 
     init {
         executor.execute {
@@ -95,9 +97,14 @@ class M1Controller(private val context: Context) {
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setResolutionSelector(
-                    ResolutionSelector.Builder().setResolutionStrategy(
-                        ResolutionStrategy(Size(1280, 720), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER)
-                    ).build()
+                    ResolutionSelector.Builder()
+                        .setResolutionStrategy(
+                            ResolutionStrategy(Size(1280, 720), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER)
+                        )
+                        // M0 — эталоны сняты под 16:9 (см. docs/research/drive-protocol.md «Геометрия
+                        // камеры»); без этого CameraX может подобрать формат ближе к 4:3 на части устройств.
+                        .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                        .build()
                 )
                 .build()
             analysis.setAnalyzer(executor) { image -> analyzer.get()?.analyze(image) ?: image.close() }
@@ -110,51 +117,89 @@ class M1Controller(private val context: Context) {
         // CAS, не значение StateFlow: два быстрых нажатия/повторный вызов с разных потоков не
         // должны создать вторую сессию записи и второй SessionLogger поверх первого.
         if (!runningFlag.compareAndSet(false, true)) return
-        val b = bundle
-        val frameAnalyzer = analyzer.get()
-        if (b == null || frameAnalyzer == null) {
-            runningFlag.set(false)
-            return
-        }
-        val mode = _state.value.mode
-        val pipeline = LocalizationPipeline(b.pack, b.embedder, PriorPolicy(mode))
-        logDir.mkdirs()
-        val startedMs = System.currentTimeMillis()
-        val log = SessionLogger(File(logDir, "session-$startedMs-${mode.name.lowercase()}.jsonl"))
-        log.header(SessionHeader(
-            model = b.meta.model, refpackCreatedAt = b.meta.createdAt,
-            device = "${Build.MANUFACTURER} ${Build.MODEL}", startedMs = startedMs, mode = mode.name.lowercase(),
-        ))
-        logger = log
-        gps.start()
-        frameAnalyzer.onFrame = { tMs, rgb, preMs ->
-            try {
-                val fix = gps.fresh()
-                val rec = pipeline.process(tMs, rgb, b.meta.inputW, b.meta.inputH, fix, preMs)
-                log.frame(rec)
-                val err = if (fix != null && rec.fix != null) Geo.haversineM(fix.lat, fix.lon, rec.fix!!.lat, rec.fix!!.lon) else null
-                _state.update {
-                    it.copy(frames = it.frames + 1, lastSim = rec.fix?.sim, lastErrM = err,
-                        lastInfMs = rec.latMs.inf, gpsAccM = fix?.accM)
-                }
-            } catch (e: Exception) {
-                // Один плохой кадр не должен останавливать сессию — считаем и продолжаем.
-                _state.update {
-                    it.copy(frames = it.frames + 1, errors = it.errors + 1, status = "Ошибка кадра: ${e.message}")
+        try {
+            val b = bundle
+            val frameAnalyzer = analyzer.get()
+            if (b == null || frameAnalyzer == null) {
+                runningFlag.set(false)
+                return
+            }
+            val mode = _state.value.mode
+            val pipeline = LocalizationPipeline(b.pack, b.embedder, PriorPolicy(mode))
+            logDir.mkdirs()
+            val startedMs = System.currentTimeMillis()
+            val log = SessionLogger(File(logDir, "session-$startedMs-${mode.name.lowercase()}.jsonl"))
+            logger = log
+            // Заголовок пишется не здесь, а при первом кадре: только тогда известно фактическое
+            // разрешение анализа (device string включает "analysis WxH", см. C2), но первой строкой
+            // журнала он всё равно останется — до первого кадра ничего больше не пишется.
+            var headerWritten = false
+            gps.start()
+            frameAnalyzer.onError = { t ->
+                _state.update { it.copy(errors = it.errors + 1, status = "Ошибка кадра (анализ): ${t.message}") }
+            }
+            frameAnalyzer.onFrame = { tMs, rgb, preMs ->
+                try {
+                    if (!headerWritten) {
+                        headerWritten = true
+                        log.header(SessionHeader(
+                            model = b.meta.model, refpackCreatedAt = b.meta.createdAt,
+                            device = "${Build.MANUFACTURER} ${Build.MODEL}; " +
+                                "analysis ${frameAnalyzer.lastFrameW}x${frameAnalyzer.lastFrameH}",
+                            startedMs = startedMs, mode = mode.name.lowercase(),
+                        ))
+                    }
+                    val fix = gps.fresh()
+                    val rec = pipeline.process(tMs, rgb, b.meta.inputW, b.meta.inputH, fix, preMs)
+                    log.frame(rec)
+                    val err = if (fix != null && rec.fix != null) Geo.haversineM(fix.lat, fix.lon, rec.fix!!.lat, rec.fix!!.lon) else null
+                    _state.update {
+                        it.copy(frames = it.frames + 1, lastSim = rec.fix?.sim, lastErrM = err,
+                            lastInfMs = rec.latMs.inf, gpsAccM = fix?.accM,
+                            frameSize = "${frameAnalyzer.lastFrameW}x${frameAnalyzer.lastFrameH}")
+                    }
+                } catch (e: Exception) {
+                    // Один плохой кадр не должен останавливать сессию — считаем и продолжаем.
+                    _state.update {
+                        it.copy(frames = it.frames + 1, errors = it.errors + 1, status = "Ошибка кадра: ${e.message}")
+                    }
                 }
             }
+            _state.update { it.copy(running = true, frames = 0, errors = 0, status = "Запись: ${mode.name}") }
+        } catch (e: Exception) {
+            // Любой сбой после CAS (например, база выгружена или диск недоступен) не должен
+            // оставить контроллер в состоянии "running=true" без реально работающей записи.
+            runningFlag.set(false)
+            analyzer.get()?.onFrame = null
+            analyzer.get()?.onError = null
+            gps.stop()
+            val log = logger
+            logger = null
+            try {
+                log?.close()
+            } catch (closeError: Exception) {
+                _state.update { it.copy(status = "Ошибка запуска: ${e.message}; ошибка закрытия журнала: ${closeError.message}") }
+                return
+            }
+            _state.update { it.copy(running = false, status = "Ошибка запуска: ${e.message}") }
         }
-        _state.update { it.copy(running = true, frames = 0, errors = 0, status = "Запись: ${mode.name}") }
     }
 
     fun stop() {
         if (!runningFlag.compareAndSet(true, false)) return
         analyzer.get()?.onFrame = null
+        analyzer.get()?.onError = null
         gps.stop()
         val log = logger
         logger = null
         // Закрываем на потоке анализа — после кадра, который, возможно, ещё обрабатывается.
-        executor.execute { log?.close() }
+        executor.execute {
+            try {
+                log?.close()
+            } catch (e: Exception) {
+                _state.update { it.copy(status = it.status + " · ошибка закрытия журнала: ${e.message}") }
+            }
+        }
         _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}") }
     }
 
@@ -168,7 +213,11 @@ class M1Controller(private val context: Context) {
         // init ещё грузит бандл на этом же executor, эта задача выполнится после неё и увидит уже
         // присвоенный bundle — иначе только что созданный OrtEmbedder не закрылся бы никогда.
         executor.execute {
-            log?.close()
+            try {
+                log?.close()
+            } catch (e: Exception) {
+                _state.update { it.copy(status = it.status + " · ошибка закрытия журнала: ${e.message}") }
+            }
             bundle?.embedder?.close()
         }
         executor.shutdown()
