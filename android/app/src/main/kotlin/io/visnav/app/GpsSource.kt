@@ -49,6 +49,12 @@ class GpsSource(context: Context) : LocationListener {
         lm.unregisterGnssStatusCallback(gnssCallback)
     }
 
+    /** Останавливает GPS/GNSS и освобождает поток gnssExecutor. Вызывать один раз при уничтожении владельца. */
+    fun close() {
+        stop()
+        gnssExecutor.shutdown()
+    }
+
     /**
      * Последняя GPS-фиксация не старше maxAgeMs, иначе null. Свежесть считается по монотонным
      * часам устройства (elapsedRealtimeNanos), а не по Location.time (может прыгать/рассинхронизироваться).

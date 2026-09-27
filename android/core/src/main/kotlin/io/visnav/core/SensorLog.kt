@@ -69,29 +69,59 @@ object SensorLogFormat {
     }
 }
 
-/** Пишется из потоков датчиков и GPS одновременно, поэтому методы синхронизированы. */
-class SensorLogger(file: File) : Closeable {
-    private val writer = file.bufferedWriter()
+/**
+ * Пишется из потоков датчиков и GPS одновременно, поэтому методы синхронизированы.
+ *
+ * После close() или после первой IOException при записи (`broken`) все дальнейшие вызовы
+ * header()/event() — no-op: одна сбойная запись (например, диск отключён на середине сессии) не
+ * должна ронять поток датчиков/GPS исключением.
+ */
+class SensorLogger internal constructor(private val writer: java.io.Writer) : Closeable {
+    constructor(file: File) : this(file.bufferedWriter())
+
     private var count = 0
     private var _skipped = 0
+    private var _failed = 0
+    private var closed = false
+    private var broken = false
 
     val skipped: Int
         @Synchronized get() = _skipped
 
+    val failed: Int
+        @Synchronized get() = _failed
+
     @Synchronized fun header(startedMs: Long) {
-        writer.write(SensorLogFormat.header(startedMs)); writer.newLine(); writer.flush()
+        if (closed || broken) return
+        try {
+            writer.write(SensorLogFormat.header(startedMs)); writer.write("\n"); writer.flush()
+        } catch (e: java.io.IOException) {
+            _failed++
+            broken = true
+        }
     }
 
     @Synchronized fun event(e: SensorEvent) {
+        if (closed || broken) return
         if (!SensorLogFormat.isWritable(e)) {
             _skipped++
             return
         }
-        writer.write(SensorLogFormat.line(e)); writer.newLine()
-        if (++count % 200 == 0) writer.flush()
+        try {
+            writer.write(SensorLogFormat.line(e)); writer.write("\n")
+            if (++count % 200 == 0) writer.flush()
+        } catch (ex: java.io.IOException) {
+            _failed++
+            broken = true
+        }
     }
 
-    @Synchronized override fun close() { writer.flush(); writer.close() }
+    @Synchronized override fun close() {
+        if (closed) return
+        closed = true
+        writer.flush()
+        writer.close()
+    }
 }
 
 fun readSensorLog(file: File): List<SensorEvent> {

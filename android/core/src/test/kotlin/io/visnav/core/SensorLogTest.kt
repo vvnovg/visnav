@@ -67,4 +67,30 @@ class SensorLogTest {
         val read = readSensorLog(f)
         assertEquals(listOf(10.0, 20.0), read.map { it.tMs })
     }
+
+    @Test fun eventAfterCloseIsIgnoredWithoutException() {
+        val f = File.createTempFile("sen", ".sensors.jsonl")
+        val log = SensorLogger(f)
+        log.header(1)
+        log.close()
+        log.event(GyroEvent(10.0, 0f, 0f, 0f)) // no exception, no-op
+        assertEquals(0, log.failed)
+        // Closing again is also a no-op (idempotent).
+        log.close()
+    }
+
+    private class ThrowingWriter : java.io.Writer() {
+        override fun write(cbuf: CharArray, off: Int, len: Int) = throw java.io.IOException("boom")
+        override fun flush() = throw java.io.IOException("boom")
+        override fun close() = Unit
+    }
+
+    @Test fun ioExceptionDuringWriteIsCountedNotThrown() {
+        val log = SensorLogger(ThrowingWriter())
+        log.event(AccelEvent(1.0, 0f, 0f, 9.8f))
+        assertEquals(1, log.failed)
+        // Further events are no-ops once broken.
+        log.event(AccelEvent(2.0, 0f, 0f, 9.8f))
+        assertEquals(1, log.failed)
+    }
 }

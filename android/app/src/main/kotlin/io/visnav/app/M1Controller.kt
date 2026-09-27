@@ -136,11 +136,23 @@ class M1Controller(private val context: Context) {
             val base = "session-$startedMs-${mode.name.lowercase()}"
             val log = SessionLogger(File(logDir, "$base.jsonl"))
             logger = log
-            val sLog = SensorLogger(File(logDir, "$base.sensors.jsonl")).also { it.header(startedMs) }
+            // Поле присваивается до header(): если header() всё же бросит исключение (обычные
+            // IOException уже перехватываются самим SensorLogger), файл всё равно должен закрыться
+            // через путь ошибки start() ниже, а не остаться висеть незакрытым.
+            val sLog = SensorLogger(File(logDir, "$base.sensors.jsonl"))
             sensorLog = sLog
+            sLog.header(startedMs)
             val dLog = DescriptorLogWriter(File(logDir, "$base.desc"), b.pack.dim)
             descLog = dLog
-            val pipeline = LocalizationPipeline(b.pack, b.embedder, PriorPolicy(mode), onDescriptor = { t, d -> dLog.write(t, d) })
+            val pipeline = LocalizationPipeline(b.pack, b.embedder, PriorPolicy(mode), onDescriptor = { t, d ->
+                try {
+                    dLog.write(t, d)
+                } catch (e: Exception) {
+                    // Один плохой дескриптор не должен ронять кадр или сессию — считаем и продолжаем,
+                    // как и с остальными ошибками кадра.
+                    _state.update { it.copy(errors = it.errors + 1, status = "ошибка записи дескриптора: ${e.message}") }
+                }
+            })
             // Заголовок пишется не здесь, а при первом кадре: только тогда известно фактическое
             // разрешение анализа (device string включает "analysis WxH", см. C2), но первой строкой
             // журнала он всё равно останется — до первого кадра ничего больше не пишется.
@@ -206,15 +218,18 @@ class M1Controller(private val context: Context) {
             sensorLog = null
             val dLog = descLog
             descLog = null
-            closeQuietly("журнала датчиков", sLog)
-            closeQuietly("журнала дескрипторов", dLog)
+            val closeErrors = mutableListOf<String>()
+            closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
+            closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
             try {
                 log?.close()
             } catch (closeError: Exception) {
-                _state.update { it.copy(status = "Ошибка запуска: ${e.message}; ошибка закрытия журнала: ${closeError.message}") }
-                return
+                closeErrors.add("ошибка закрытия журнала: ${closeError.message}")
             }
-            _state.update { it.copy(running = false, status = "Ошибка запуска: ${e.message}") }
+            // Один финальный _state.update: собираем все ошибки закрытия в статус разом, чтобы более
+            // ранняя (например, датчиков) не была затёрта более поздним присваиванием статуса.
+            val suffix = closeErrors.joinToString(separator = "") { "; $it" }
+            _state.update { it.copy(running = false, status = "Ошибка запуска: ${e.message}$suffix") }
         }
     }
 
@@ -233,19 +248,23 @@ class M1Controller(private val context: Context) {
         val dLog = descLog
         descLog = null
         val skipped = sLog?.skipped ?: 0
-        // Закрываем на потоке анализа — после кадра, который, возможно, ещё обрабатывается.
+        // Закрываем и формируем финальный статус на потоке анализа — после кадра, который, возможно,
+        // ещё обрабатывается, и одним _state.update, чтобы ошибка закрытия (обнаруженная здесь, на
+        // executor) не была затёрта более ранним присваиванием статуса с потока вызывающего stop().
         executor.execute {
+            val closeErrors = mutableListOf<String>()
             try {
                 log?.close()
             } catch (e: Exception) {
-                _state.update { it.copy(status = it.status + " · ошибка закрытия журнала: ${e.message}") }
+                closeErrors.add("ошибка закрытия журнала: ${e.message}")
             }
-            closeQuietly("журнала датчиков", sLog)
-            closeQuietly("журнала дескрипторов", dLog)
-        }
-        _state.update {
-            it.copy(running = false, status = "Остановлено, кадров: ${it.frames}" +
-                if (skipped > 0) " · пропущено датчиков: $skipped" else "")
+            closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
+            closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
+            val suffix = buildString {
+                if (skipped > 0) append(" · пропущено датчиков: $skipped")
+                for (err in closeErrors) append(" · $err")
+            }
+            _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}$suffix") }
         }
     }
 
@@ -268,24 +287,23 @@ class M1Controller(private val context: Context) {
         sensorLog = null
         val dLog = descLog
         descLog = null
-        closeQuietly("журнала датчиков", sLog)
-        closeQuietly("журнала дескрипторов", dLog)
+        val closeErrors = mutableListOf<String>()
+        closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
+        closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
         try {
             log.close()
         } catch (closeError: Exception) {
-            _state.update { it.copy(running = false, status = "$message; ошибка закрытия журнала: ${closeError.message}") }
-            return
+            closeErrors.add("ошибка закрытия журнала: ${closeError.message}")
         }
-        _state.update { it.copy(running = false, status = message) }
+        val suffix = closeErrors.joinToString(separator = "") { "; $it" }
+        _state.update { it.copy(running = false, status = "$message$suffix") }
     }
 
     /** Освобождает камеру/GPS/логгер/модель. Вызывать один раз при уничтожении владельца. */
     fun close() {
         if (runningFlag.get()) stop()
         sensors.stop()
-        gps.onLoc = null
-        gps.onGnss = null
-        gps.stop()
+        gps.close()
         val log = logger
         logger = null
         val sLog = sensorLog
@@ -296,23 +314,27 @@ class M1Controller(private val context: Context) {
         // init ещё грузит бандл на этом же executor, эта задача выполнится после неё и увидит уже
         // присвоенный bundle — иначе только что созданный OrtEmbedder не закрылся бы никогда.
         executor.execute {
+            val closeErrors = mutableListOf<String>()
             try {
                 log?.close()
             } catch (e: Exception) {
-                _state.update { it.copy(status = it.status + " · ошибка закрытия журнала: ${e.message}") }
+                closeErrors.add("ошибка закрытия журнала: ${e.message}")
             }
-            closeQuietly("журнала датчиков", sLog)
-            closeQuietly("журнала дескрипторов", dLog)
+            closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
+            closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
+            if (closeErrors.isNotEmpty()) {
+                val suffix = closeErrors.joinToString(separator = "") { " · $it" }
+                _state.update { it.copy(status = it.status + suffix) }
+            }
             bundle?.embedder?.close()
         }
         executor.shutdown()
     }
 
-    private fun closeQuietly(label: String, closeable: Closeable?) {
-        try {
-            closeable?.close()
-        } catch (e: Exception) {
-            _state.update { it.copy(status = it.status + " · ошибка закрытия $label: ${e.message}") }
-        }
+    private fun closeQuietly(label: String, closeable: Closeable?): String? = try {
+        closeable?.close()
+        null
+    } catch (e: Exception) {
+        "ошибка закрытия $label: ${e.message}"
     }
 }

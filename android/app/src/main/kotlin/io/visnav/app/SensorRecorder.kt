@@ -31,8 +31,10 @@ class SensorRecorder(context: Context) : SensorEventListener {
         val t = HandlerThread("sensors").also { it.start() }
         thread = t
         val handler = Handler(t.looper)
-        sm.registerListener(this, gyro, 10_000, handler)
-        sm.registerListener(this, accel, 10_000, handler)
+        // maxReportLatencyUs = 100 мс — разрешаем системе батчить события (экономия энергии);
+        // на метки времени (SensorEvent.timestamp) это не влияет, только на задержку доставки.
+        sm.registerListener(this, gyro, 10_000, 100_000, handler)
+        sm.registerListener(this, accel, 10_000, 100_000, handler)
         return true
     }
 
