@@ -246,11 +246,23 @@ def test_extract_catches_up_after_timestamp_gap_without_bursting(monkeypatch, tm
 
 
 def test_extract_drops_stationary_frames(tmp_path):
-    # GPX with stationary object (same location at t=0 and t=20)
+    # GPX with a stationary object: same location every 2 s from t=-2 to
+    # t=20 (dense enough to stay within the default max_gap_s=3.0 gap guard,
+    # so the stationary-speed check is what actually rejects every frame).
     stationary_gpx = """<?xml version="1.0"?>
 <gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
 <trk><trkseg>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T09:59:58Z</time></trkpt>
 <trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:00Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:02Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:04Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:06Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:08Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:10Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:12Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:14Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:16Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:18Z</time></trkpt>
 <trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:20Z</time></trkpt>
 </trkseg></trk></gpx>
 """
@@ -260,10 +272,21 @@ def test_extract_drops_stationary_frames(tmp_path):
 
     video = tmp_path / "stationary.avi"
     _write_video(video, n_frames=200, fps=10)
-    places = extract_query_frames(video, track, T0, every_s=2.0, out_dir=tmp_path / "q")
+    from collections import Counter
+
+    stats = Counter()
+    places = extract_query_frames(
+        video, track, T0, every_s=2.0, out_dir=tmp_path / "q", stats=stats
+    )
 
     assert len(places) == 0  # All frames filtered due to zero speed
     assert read_places(tmp_path / "q" / "queries.csv") == []
+    # Every sampled frame has a pose (the track covers the whole window) and
+    # none touch a gap; the stationary-speed check is what rejects them all.
+    assert stats["no_pose"] == 0
+    assert stats["gap"] == 0
+    assert stats["stationary"] == 10
+    assert sum(stats.values()) == 10
 
 
 def test_parse_gpx_reads_hdop(tmp_path):
@@ -416,3 +439,28 @@ def test_extract_query_frames_stats_none_is_a_no_op(tmp_path, track):
     # Just confirms passing stats=None (the default) doesn't raise.
     places = extract_query_frames(video, track, T0, every_s=2.0, out_dir=tmp_path / "q")
     assert len(places) == 9
+
+
+def test_clean_track_two_consecutive_spoof_excursions_both_removed():
+    real_before = [_pt(float(i), 55.7500 + i * 0.0002) for i in range(5)]  # t=0..4
+    spoof1 = [_pt(10.0 + i, 55.0000) for i in range(5)]  # far-away #1, t=10..14
+    spoof2 = [_pt(20.0 + i, 54.0000) for i in range(5)]  # far-away #2, t=20..24
+    last_lat = real_before[-1].lat
+    real_after = [_pt(30.0 + i, last_lat + i * 0.0002) for i in range(5)]  # t=30..34
+    track = real_before + spoof1 + spoof2 + real_after
+
+    cleaned, counts = clean_track(track)
+
+    assert [p.t for p in cleaned] == [p.t for p in real_before + real_after]
+    assert counts == {"hdop": 0, "spoof": len(spoof1) + len(spoof2), "detached": 0}
+
+
+def test_clean_track_spoof_at_end_is_detached():
+    real = [_pt(float(i), 55.7500 + i * 0.0002) for i in range(20)]  # t=0..19, ~22 m/s
+    spoof = [_pt(30.0 + i, 40.0000) for i in range(3)]  # far away, t=30..32
+    track = real + spoof
+
+    cleaned, counts = clean_track(track)
+
+    assert [p.t for p in cleaned] == [p.t for p in real]
+    assert counts == {"hdop": 0, "spoof": 0, "detached": 3}
