@@ -260,3 +260,82 @@ def test_parse_gpx_unparsable_hdop_is_none(tmp_path):
     p.write_text(gpx)
     track = parse_gpx(p)
     assert track[0].hdop is None
+
+
+from vpr_bench.geo import TrackPoint
+from vpr_bench.query import clean_track
+
+
+def _pt(t, lat, lon=37.6, hdop=None):
+    return TrackPoint(t, lat, lon, hdop)
+
+
+def test_clean_track_empty():
+    assert clean_track([]) == ([], {"hdop": 0, "spoof": 0, "detached": 0})
+
+
+def test_clean_track_unchanged_when_clean():
+    track = [_pt(float(i), 55.7500 + i * 0.0002) for i in range(10)]  # ~22 m/s
+    cleaned, counts = clean_track(track)
+    assert cleaned == track
+    assert counts == {"hdop": 0, "spoof": 0, "detached": 0}
+
+
+def test_clean_track_hdop_filter():
+    track = [
+        _pt(0.0, 55.7500, hdop=1.0),
+        _pt(1.0, 55.7502, hdop=8.0),  # dropped: hdop > 5.0
+        _pt(2.0, 55.7504, hdop=2.0),
+    ]
+    cleaned, counts = clean_track(track)
+    assert [p.t for p in cleaned] == [0.0, 2.0]
+    assert counts == {"hdop": 1, "spoof": 0, "detached": 0}
+
+
+def test_clean_track_hdop_filter_disabled_when_none():
+    track = [
+        _pt(0.0, 55.7500, hdop=1.0),
+        _pt(1.0, 55.7502, hdop=8.0),
+        _pt(2.0, 55.7504, hdop=2.0),
+    ]
+    cleaned, counts = clean_track(track, max_hdop=None)
+    assert len(cleaned) == 3
+    assert counts["hdop"] == 0
+
+
+def test_clean_track_single_point_spike_is_spoof():
+    # A, spike, C: A and C are mutually plausible (continuation of the real
+    # track), but the spike in between is not plausible with either.
+    track = [
+        _pt(0.0, 55.7500),
+        _pt(1.0, 56.7500),  # ~111 km away in 1s -> huge speed
+        _pt(2.0, 55.7504),
+    ]
+    cleaned, counts = clean_track(track)
+    assert [p.t for p in cleaned] == [0.0, 2.0]
+    assert counts == {"hdop": 0, "spoof": 1, "detached": 0}
+
+
+def test_clean_track_multi_point_static_spoof_excursion():
+    real_before = [_pt(float(i), 55.7500 + i * 0.0002) for i in range(5)]  # t=0..4
+    spoof = [_pt(10.0 + i, 55.0000) for i in range(20)]  # far-away static, t=10..29
+    real_after_start_lat = real_before[-1].lat
+    real_after = [
+        _pt(30.0 + i, real_after_start_lat + i * 0.0002) for i in range(5)
+    ]  # t=30..34, continues from real_before's last position
+    track = real_before + spoof + real_after
+    cleaned, counts = clean_track(track)
+    assert [p.t for p in cleaned] == [p.t for p in real_before + real_after]
+    assert counts == {"hdop": 0, "spoof": 20, "detached": 0}
+
+
+def test_clean_track_spoofed_start_is_detached():
+    # Spoof block at the very start, with no real point before it to bracket
+    # it as an interior segment -> the whole real continuation wins (longer
+    # duration) and the spoof start is counted as "detached", not "spoof".
+    spoof = [_pt(float(i), 40.0000) for i in range(3)]  # t=0..2, far away
+    real = [_pt(10.0 + i, 55.7500 + i * 0.0002) for i in range(20)]  # t=10..29
+    track = spoof + real
+    cleaned, counts = clean_track(track)
+    assert [p.t for p in cleaned] == [p.t for p in real]
+    assert counts == {"hdop": 0, "spoof": 0, "detached": 3}

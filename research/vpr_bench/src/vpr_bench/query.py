@@ -33,6 +33,76 @@ def parse_gpx(path: Path) -> list[TrackPoint]:
     return points
 
 
+def _implied_speed_mps(a: TrackPoint, b: TrackPoint) -> float:
+    dt = b.t - a.t
+    if dt <= 0:
+        return float("inf")
+    return haversine_m(a.lat, a.lon, b.lat, b.lon) / dt
+
+
+def _split_segments(points: list[TrackPoint], max_speed_mps: float) -> list[list[TrackPoint]]:
+    if not points:
+        return []
+    segments: list[list[TrackPoint]] = [[points[0]]]
+    for a, b in zip(points, points[1:]):
+        if _implied_speed_mps(a, b) > max_speed_mps:
+            segments.append([b])
+        else:
+            segments[-1].append(b)
+    return segments
+
+
+def clean_track(
+    track: list[TrackPoint],
+    max_speed_mps: float = 70.0,
+    max_hdop: float | None = 5.0,
+) -> tuple[list[TrackPoint], dict[str, int]]:
+    """Remove untrustworthy GPX points before they reach the benchmark.
+
+    Points with poor HDOP are dropped outright; the remaining points are cut
+    into segments wherever the implied speed between consecutive points is
+    physically impossible, interior segments bracketed by two mutually
+    plausible neighbours are merged away as GPS-spoofing excursions, and if
+    more than one segment survives only the longest-duration one is kept
+    (the rest are "detached" fragments, e.g. a spoof block with no real
+    point before it).
+    """
+    counts = {"hdop": 0, "spoof": 0, "detached": 0}
+    if not track:
+        return [], counts
+
+    ordered = sorted(track, key=lambda p: p.t)
+    if max_hdop is not None:
+        kept = [p for p in ordered if not (p.hdop is not None and p.hdop > max_hdop)]
+        counts["hdop"] = len(ordered) - len(kept)
+    else:
+        kept = ordered
+
+    segments = _split_segments(kept, max_speed_mps)
+
+    changed = True
+    while changed and len(segments) > 2:
+        changed = False
+        for i in range(1, len(segments) - 1):
+            if _implied_speed_mps(segments[i - 1][-1], segments[i + 1][0]) <= max_speed_mps:
+                counts["spoof"] += len(segments[i])
+                segments[i - 1 : i + 2] = [segments[i - 1] + segments[i + 1]]
+                changed = True
+                break
+
+    if len(segments) > 1:
+        def _duration(seg: list[TrackPoint]) -> float:
+            return seg[-1].t - seg[0].t
+
+        best = max(segments, key=lambda seg: (_duration(seg), len(seg)))
+        for seg in segments:
+            if seg is not best:
+                counts["detached"] += len(seg)
+        segments = [best]
+
+    return (segments[0] if segments else []), counts
+
+
 class _FrameClock:
     """Turns a video container's (possibly unreliable) per-frame timestamp into
     a monotonic frame time, falling back to idx / fps when the container's
