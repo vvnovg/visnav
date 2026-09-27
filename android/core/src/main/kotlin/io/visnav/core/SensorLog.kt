@@ -85,6 +85,9 @@ class SensorLogger internal constructor(private val writer: java.io.Writer) : Cl
     private var closed = false
     private var broken = false
 
+    /** Вызывается ровно один раз — когда логгер впервые ломается (IOException при header()/event()). */
+    @Volatile var onFirstFailure: ((java.io.IOException) -> Unit)? = null
+
     val skipped: Int
         @Synchronized get() = _skipped
 
@@ -96,8 +99,7 @@ class SensorLogger internal constructor(private val writer: java.io.Writer) : Cl
         try {
             writer.write(SensorLogFormat.header(startedMs)); writer.write("\n"); writer.flush()
         } catch (e: java.io.IOException) {
-            _failed++
-            broken = true
+            fail(e)
         }
     }
 
@@ -111,16 +113,25 @@ class SensorLogger internal constructor(private val writer: java.io.Writer) : Cl
             writer.write(SensorLogFormat.line(e)); writer.write("\n")
             if (++count % 200 == 0) writer.flush()
         } catch (ex: java.io.IOException) {
-            _failed++
-            broken = true
+            fail(ex)
         }
+    }
+
+    private fun fail(e: java.io.IOException) {
+        _failed++
+        val firstFailure = !broken
+        broken = true
+        if (firstFailure) onFirstFailure?.invoke(e)
     }
 
     @Synchronized override fun close() {
         if (closed) return
         closed = true
-        writer.flush()
-        writer.close()
+        try {
+            writer.flush()
+        } finally {
+            writer.close()
+        }
     }
 }
 

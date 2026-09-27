@@ -80,9 +80,10 @@ class SensorLogTest {
     }
 
     private class ThrowingWriter : java.io.Writer() {
+        var closeCalled = false
         override fun write(cbuf: CharArray, off: Int, len: Int) = throw java.io.IOException("boom")
         override fun flush() = throw java.io.IOException("boom")
-        override fun close() = Unit
+        override fun close() { closeCalled = true }
     }
 
     @Test fun ioExceptionDuringWriteIsCountedNotThrown() {
@@ -92,5 +93,33 @@ class SensorLogTest {
         // Further events are no-ops once broken.
         log.event(AccelEvent(2.0, 0f, 0f, 9.8f))
         assertEquals(1, log.failed)
+    }
+
+    @Test fun onFirstFailureFiresOnceOnFirstIOException() {
+        val log = SensorLogger(ThrowingWriter())
+        val seen = mutableListOf<String?>()
+        log.onFirstFailure = { e -> seen.add(e.message) }
+        log.event(AccelEvent(1.0, 0f, 0f, 9.8f))
+        log.event(AccelEvent(2.0, 0f, 0f, 9.8f)) // already broken — event() is a no-op, no second callback
+        assertEquals(listOf<String?>("boom"), seen)
+        assertEquals(1, log.failed)
+    }
+
+    @Test fun headerFailureAlsoCountsAndFiresOnFirstFailure() {
+        val log = SensorLogger(ThrowingWriter())
+        var fired = false
+        log.onFirstFailure = { fired = true }
+        log.header(1)
+        assertEquals(true, fired)
+        assertEquals(1, log.failed)
+    }
+
+    @Test fun closeReleasesWriterEvenIfFlushThrowsAfterFailure() {
+        val w = ThrowingWriter()
+        val log = SensorLogger(w)
+        log.event(AccelEvent(1.0, 0f, 0f, 9.8f)) // marks the logger broken via an IOException
+        assertEquals(1, log.failed)
+        assertFailsWith<java.io.IOException> { log.close() }
+        assertEquals(true, w.closeCalled)
     }
 }

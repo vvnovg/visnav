@@ -141,16 +141,30 @@ class M1Controller(private val context: Context) {
             // через путь ошибки start() ниже, а не остаться висеть незакрытым.
             val sLog = SensorLogger(File(logDir, "$base.sensors.jsonl"))
             sensorLog = sLog
+            // Ставим обработчик до header(): если сам заголовок не запишется, это тоже первая
+            // (и единственная) поломка потока датчиков, и о ней тоже нужно сообщить.
+            sLog.onFirstFailure = { e ->
+                _state.update {
+                    it.copy(errors = it.errors + 1, status = "Ошибка записи датчиков: ${e.message} — остановите запись")
+                }
+            }
             sLog.header(startedMs)
             val dLog = DescriptorLogWriter(File(logDir, "$base.desc"), b.pack.dim)
             descLog = dLog
+            var descriptorFailureReported = false
             val pipeline = LocalizationPipeline(b.pack, b.embedder, PriorPolicy(mode), onDescriptor = { t, d ->
                 try {
                     dLog.write(t, d)
                 } catch (e: Exception) {
                     // Один плохой дескриптор не должен ронять кадр или сессию — считаем и продолжаем,
-                    // как и с остальными ошибками кадра.
-                    _state.update { it.copy(errors = it.errors + 1, status = "ошибка записи дескриптора: ${e.message}") }
+                    // как и с остальными ошибками кадра. Статус выставляем только при первом сбое,
+                    // чтобы поток однотипных ошибок не забивал статус построчно; счётчик растёт всегда.
+                    if (!descriptorFailureReported) {
+                        descriptorFailureReported = true
+                        _state.update { it.copy(errors = it.errors + 1, status = "ошибка записи дескриптора: ${e.message}") }
+                    } else {
+                        _state.update { it.copy(errors = it.errors + 1) }
+                    }
                 }
             })
             // Заголовок пишется не здесь, а при первом кадре: только тогда известно фактическое
@@ -218,6 +232,7 @@ class M1Controller(private val context: Context) {
             sensorLog = null
             val dLog = descLog
             descLog = null
+            val failedCount = sLog?.failed ?: 0
             val closeErrors = mutableListOf<String>()
             closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
             closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
@@ -228,7 +243,10 @@ class M1Controller(private val context: Context) {
             }
             // Один финальный _state.update: собираем все ошибки закрытия в статус разом, чтобы более
             // ранняя (например, датчиков) не была затёрта более поздним присваиванием статуса.
-            val suffix = closeErrors.joinToString(separator = "") { "; $it" }
+            val suffix = buildString {
+                if (failedCount > 0) append(" · ошибок записи датчиков: $failedCount")
+                for (err in closeErrors) append("; $err")
+            }
             _state.update { it.copy(running = false, status = "Ошибка запуска: ${e.message}$suffix") }
         }
     }
@@ -248,6 +266,7 @@ class M1Controller(private val context: Context) {
         val dLog = descLog
         descLog = null
         val skipped = sLog?.skipped ?: 0
+        val failedCount = sLog?.failed ?: 0
         // Закрываем и формируем финальный статус на потоке анализа — после кадра, который, возможно,
         // ещё обрабатывается, и одним _state.update, чтобы ошибка закрытия (обнаруженная здесь, на
         // executor) не была затёрта более ранним присваиванием статуса с потока вызывающего stop().
@@ -262,6 +281,7 @@ class M1Controller(private val context: Context) {
             closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
             val suffix = buildString {
                 if (skipped > 0) append(" · пропущено датчиков: $skipped")
+                if (failedCount > 0) append(" · ошибок записи датчиков: $failedCount")
                 for (err in closeErrors) append(" · $err")
             }
             _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}$suffix") }
@@ -287,6 +307,7 @@ class M1Controller(private val context: Context) {
         sensorLog = null
         val dLog = descLog
         descLog = null
+        val failedCount = sLog?.failed ?: 0
         val closeErrors = mutableListOf<String>()
         closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
         closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
@@ -295,7 +316,10 @@ class M1Controller(private val context: Context) {
         } catch (closeError: Exception) {
             closeErrors.add("ошибка закрытия журнала: ${closeError.message}")
         }
-        val suffix = closeErrors.joinToString(separator = "") { "; $it" }
+        val suffix = buildString {
+            if (failedCount > 0) append(" · ошибок записи датчиков: $failedCount")
+            for (err in closeErrors) append("; $err")
+        }
         _state.update { it.copy(running = false, status = "$message$suffix") }
     }
 
@@ -313,6 +337,7 @@ class M1Controller(private val context: Context) {
         // bundle читаем внутри задачи на том же executor, а не здесь: если close() позвали, пока
         // init ещё грузит бандл на этом же executor, эта задача выполнится после неё и увидит уже
         // присвоенный bundle — иначе только что созданный OrtEmbedder не закрылся бы никогда.
+        val failedCount = sLog?.failed ?: 0
         executor.execute {
             val closeErrors = mutableListOf<String>()
             try {
@@ -322,8 +347,11 @@ class M1Controller(private val context: Context) {
             }
             closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
             closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
-            if (closeErrors.isNotEmpty()) {
-                val suffix = closeErrors.joinToString(separator = "") { " · $it" }
+            if (failedCount > 0 || closeErrors.isNotEmpty()) {
+                val suffix = buildString {
+                    if (failedCount > 0) append(" · ошибок записи датчиков: $failedCount")
+                    for (err in closeErrors) append(" · $err")
+                }
                 _state.update { it.copy(status = it.status + suffix) }
             }
             bundle?.embedder?.close()
