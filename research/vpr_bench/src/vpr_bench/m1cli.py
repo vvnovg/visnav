@@ -23,6 +23,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--onnx", required=True, type=Path)
     p.add_argument("--image", required=True, type=Path)
     p.add_argument("--out", required=True, type=Path)
+
+    qz = sub.add_parser("quantize-onnx", help="статическая INT8-квантизация по снимкам-эталонам")
+    qz.add_argument("--onnx", required=True, type=Path)
+    qz.add_argument("--calib", required=True, type=Path, help="refs.csv, из которого берутся снимки для калибровки")
+    qz.add_argument("--n", type=int, default=200)
+    qz.add_argument("--out", required=True, type=Path)
     return parser
 
 
@@ -50,6 +56,30 @@ def _noise(seed: int):
     return np.random.default_rng(seed).integers(0, 255, (480, 640, 3), dtype=np.uint8)
 
 
+def _quantize(args) -> int:
+    from vpr_bench.dataset import read_places
+    from vpr_bench.quantize import cosine_parity, quantize_int8
+
+    places = read_places(args.calib)
+    if not places or args.n <= 0:
+        print("error: need a non-empty --calib and --n > 0", file=sys.stderr)
+        return 2
+    step = max(1, len(places) // args.n)
+    chosen = places[::step][: args.n]
+    images = [cv2.imread(str(args.calib.parent / p.path)) for p in chosen]
+    if any(img is None for img in images):
+        print("error: some calibration images could not be read", file=sys.stderr)
+        return 2
+    calib, check = images[::2], images[1::2] or images
+    quantize_int8(args.onnx, args.out, calib)
+    parity = cosine_parity(args.onnx, args.out, check)
+    print(
+        f"int8 -> {args.out} ({args.out.stat().st_size / 1e6:.1f} MB, fp32 "
+        f"{args.onnx.stat().st_size / 1e6:.1f} MB); cosine mean={parity['mean']:.4f} min={parity['min']:.4f}"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "export-onnx":
@@ -62,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
         out = make_parity(args.onnx, img, args.out)
         print(f"parity fixture -> {out}")
         return 0
+    if args.command == "quantize-onnx":
+        return _quantize(args)
     return 2
 
 
