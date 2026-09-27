@@ -1,6 +1,8 @@
 """Кадры-запросы: видео поездки + GPX-трек → изображения с истинной позицией и курсом."""
 from __future__ import annotations
 
+import bisect
+import collections
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
@@ -134,6 +136,20 @@ def pose_at(track: list[TrackPoint], t: float) -> tuple[float, float, float, flo
     return here[0], here[1], heading, speed
 
 
+def _has_gap(times: list[float], t: float, max_gap_s: float) -> bool:
+    """True if the track points bracketing [t-1, t+1] are too sparse to trust
+    the straight-line interpolation across them (e.g. a tunnel GPS outage)."""
+    lo, hi = t - 1.0, t + 1.0
+    i_before = bisect.bisect_right(times, lo) - 1
+    i_after = bisect.bisect_left(times, hi)
+    if i_before < 0 or i_after >= len(times):
+        return True
+    for i in range(i_before, i_after):
+        if times[i + 1] - times[i] > max_gap_s:
+            return True
+    return False
+
+
 def extract_query_frames(
     video: Path,
     track: list[TrackPoint],
@@ -141,6 +157,8 @@ def extract_query_frames(
     every_s: float,
     out_dir: Path,
     min_speed_mps: float = 2.0,
+    max_gap_s: float = 3.0,
+    stats: collections.Counter | None = None,
 ) -> list[Place]:
     if every_s <= 0:
         raise ValueError(f"every_s must be > 0, got {every_s!r}")
@@ -149,6 +167,7 @@ def extract_query_frames(
         raise ValueError(f"cannot open video: {video}")
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     (out_dir / "images").mkdir(parents=True, exist_ok=True)
+    times = [p.t for p in track]
 
     places: list[Place] = []
     try:
@@ -163,8 +182,20 @@ def extract_query_frames(
             # so take each frame's time from the container and sample by time.
             frame_t = clock.next(idx, cap.get(cv2.CAP_PROP_POS_MSEC))
             if frame_t >= next_sample_t:
-                pose = pose_at(track, video_start_epoch + frame_t)
-                if pose is not None and pose[3] >= min_speed_mps:
+                t = video_start_epoch + frame_t
+                pose = pose_at(track, t)
+                if pose is None:
+                    if stats is not None:
+                        stats["no_pose"] += 1
+                elif _has_gap(times, t, max_gap_s):
+                    if stats is not None:
+                        stats["gap"] += 1
+                elif pose[3] < min_speed_mps:
+                    if stats is not None:
+                        stats["stationary"] += 1
+                else:
+                    if stats is not None:
+                        stats["kept"] += 1
                     rel = f"images/q_{idx:06d}.jpg"
                     cv2.imwrite(str(out_dir / rel), frame)
                     places.append(Place(rel, pose[0], pose[1], pose[2]))
