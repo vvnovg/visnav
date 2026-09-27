@@ -1,0 +1,139 @@
+package io.visnav.core
+
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.max
+import kotlin.math.sin
+import kotlin.math.sqrt
+
+/** Угол в (−π, π]. */
+fun wrapAngle(a: Double): Double {
+    var r = a % (2 * PI)
+    if (r <= -PI) r += 2 * PI
+    if (r > PI) r -= 2 * PI
+    return r
+}
+
+data class FilterConfig(
+    val accelNoise: Double = 1.0,      // м/с² — насколько быстро может меняться скорость
+    val gyroNoise: Double = 0.01,      // рад/с — шум скорости поворота
+    val gyroBiasWalk: Double = 1e-4,   // рад/с/√с — дрейф смещения гироскопа
+    val posNoise: Double = 0.1,        // м/√с — немоделируемые боковые смещения
+    val gateChi2Pos: Double = 13.8,    // χ², 2 степени свободы, 99.9 %
+    val gateChi2Scalar: Double = 10.8, // χ², 1 степень свободы, 99.9 %
+)
+
+/**
+ * Расширенный фильтр Калмана на плоскости. Состояние x = [e, n, ψ, v, b_g]:
+ * позиция (м), курс (рад, от севера по часовой), скорость (м/с), смещение гироскопа (рад/с).
+ * Модель: e' = v·sin ψ, n' = v·cos ψ, ψ' = ω − b_g, v и b_g — случайное блуждание.
+ */
+class Ekf2d(val config: FilterConfig = FilterConfig()) {
+    val x = DoubleArray(N)
+    val p = DoubleArray(N * N)
+    var initialized = false
+        private set
+
+    fun init(e: Double, n: Double, psi: Double, v: Double, posSigma: Double, psiSigma: Double, vSigma: Double) {
+        x[0] = e; x[1] = n; x[2] = wrapAngle(psi); x[3] = v; x[4] = 0.0
+        p.fill(0.0)
+        p[idx(0, 0)] = posSigma * posSigma
+        p[idx(1, 1)] = posSigma * posSigma
+        p[idx(2, 2)] = psiSigma * psiSigma
+        p[idx(3, 3)] = vSigma * vSigma
+        p[idx(4, 4)] = 0.01 * 0.01
+        initialized = true
+    }
+
+    fun predict(dt: Double, omega: Double) {
+        check(initialized) { "filter not initialized" }
+        require(dt >= 0) { "dt must be >= 0" }
+        if (dt == 0.0) return
+        val psi = x[2]; val v = x[3]
+        val s = sin(psi); val c = cos(psi)
+        x[0] += v * s * dt
+        x[1] += v * c * dt
+        x[2] = wrapAngle(psi + (omega - x[4]) * dt)
+
+        val f = identity()
+        f[idx(0, 2)] = v * c * dt; f[idx(0, 3)] = s * dt
+        f[idx(1, 2)] = -v * s * dt; f[idx(1, 3)] = c * dt
+        f[idx(2, 4)] = -dt
+        val fp = mul(f, p)
+        val next = mulT(fp, f)
+        val q = config
+        next[idx(0, 0)] += q.posNoise * q.posNoise * dt
+        next[idx(1, 1)] += q.posNoise * q.posNoise * dt
+        next[idx(2, 2)] += q.gyroNoise * q.gyroNoise * dt
+        next[idx(3, 3)] += q.accelNoise * q.accelNoise * dt
+        next[idx(4, 4)] += q.gyroBiasWalk * q.gyroBiasWalk * dt
+        next.copyInto(p)
+    }
+
+    fun updatePosition(e: Double, n: Double, sigma: Double): Boolean = update(
+        arrayOf(unit(0), unit(1)), doubleArrayOf(e - x[0], n - x[1]),
+        doubleArrayOf(sigma * sigma, sigma * sigma), config.gateChi2Pos,
+    )
+
+    fun updateSpeed(v: Double, sigma: Double): Boolean =
+        update(arrayOf(unit(3)), doubleArrayOf(v - x[3]), doubleArrayOf(sigma * sigma), config.gateChi2Scalar)
+
+    fun updateHeading(psi: Double, sigma: Double): Boolean =
+        update(arrayOf(unit(2)), doubleArrayOf(wrapAngle(psi - x[2])), doubleArrayOf(sigma * sigma), config.gateChi2Scalar)
+
+    fun posSigma(): Double = sqrt(max(p[idx(0, 0)], p[idx(1, 1)]))
+
+    /** Общее обновление: H — строки (m ≤ 2), y — невязка, r — дисперсии шума (диагональ). */
+    private fun update(h: Array<DoubleArray>, y: DoubleArray, r: DoubleArray, gate: Double): Boolean {
+        check(initialized) { "filter not initialized" }
+        val m = h.size
+        // PHᵀ (N×m)
+        val pht = Array(N) { i -> DoubleArray(m) { k -> (0 until N).sumOf { j -> p[idx(i, j)] * h[k][j] } } }
+        // S = H P Hᵀ + R (m×m)
+        val s = Array(m) { a -> DoubleArray(m) { b -> (0 until N).sumOf { j -> h[a][j] * pht[j][b] } + if (a == b) r[a] else 0.0 } }
+        val sInv = when (m) {
+            1 -> arrayOf(doubleArrayOf(1.0 / s[0][0]))
+            2 -> {
+                val det = s[0][0] * s[1][1] - s[0][1] * s[1][0]
+                arrayOf(doubleArrayOf(s[1][1] / det, -s[0][1] / det), doubleArrayOf(-s[1][0] / det, s[0][0] / det))
+            }
+            else -> error("measurement dimension $m not supported")
+        }
+        var d2 = 0.0
+        for (a in 0 until m) for (b in 0 until m) d2 += y[a] * sInv[a][b] * y[b]
+        if (d2 > gate) return false
+        // K = PHᵀ S⁻¹ (N×m)
+        val k = Array(N) { i -> DoubleArray(m) { b -> (0 until m).sumOf { a -> pht[i][a] * sInv[a][b] } } }
+        for (i in 0 until N) x[i] += (0 until m).sumOf { a -> k[i][a] * y[a] }
+        x[2] = wrapAngle(x[2])
+        // Форма Джозефа: P = (I − KH) P (I − KH)ᵀ + K R Kᵀ
+        val ikh = identity()
+        for (i in 0 until N) for (j in 0 until N) ikh[idx(i, j)] -= (0 until m).sumOf { a -> k[i][a] * h[a][j] }
+        val next = mulT(mul(ikh, p), ikh)
+        for (i in 0 until N) for (j in 0 until N) next[idx(i, j)] += (0 until m).sumOf { a -> k[i][a] * r[a] * k[j][a] }
+        next.copyInto(p)
+        return true
+    }
+
+    private companion object {
+        const val N = 5
+        fun idx(i: Int, j: Int) = i * N + j
+        fun identity() = DoubleArray(N * N).also { for (i in 0 until N) it[idx(i, i)] = 1.0 }
+        fun unit(i: Int) = DoubleArray(N).also { it[i] = 1.0 }
+        fun mul(a: DoubleArray, b: DoubleArray) = DoubleArray(N * N).also { out ->
+            for (i in 0 until N) for (j in 0 until N) {
+                var s = 0.0
+                for (k in 0 until N) s += a[idx(i, k)] * b[idx(k, j)]
+                out[idx(i, j)] = s
+            }
+        }
+        /** a · bᵀ */
+        fun mulT(a: DoubleArray, b: DoubleArray) = DoubleArray(N * N).also { out ->
+            for (i in 0 until N) for (j in 0 until N) {
+                var s = 0.0
+                for (k in 0 until N) s += a[idx(i, k)] * b[idx(j, k)]
+                out[idx(i, j)] = s
+            }
+        }
+    }
+}
