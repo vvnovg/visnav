@@ -17,15 +17,17 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.visnav.core.PriorMode
 
 @Composable
 fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
     val s by controller.state.collectAsState()
+    val lifecycleOwner = LocalLifecycleOwner.current
     Row(Modifier.fillMaxSize()) {
         if (permissionsGranted) {
             AndroidView(
-                factory = { ctx -> PreviewView(ctx).also { controller.bindCamera(it) } },
+                factory = { ctx -> PreviewView(ctx).also { controller.bindCamera(it, lifecycleOwner) } },
                 modifier = Modifier.weight(1f).fillMaxHeight(),
             )
         } else {
@@ -34,6 +36,7 @@ fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
         Column(Modifier.width(280.dp).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(s.status)
             Text("Кадров: ${s.frames}")
+            Text("Ошибок: ${s.errors}")
             Text("Сходство: ${s.lastSim?.let { "%.3f".format(it) } ?: "—"}")
             Text("Ошибка к GPS: ${s.lastErrM?.let { "%.0f м".format(it) } ?: "—"}")
             Text("Инференс: ${s.lastInfMs?.let { "%.0f мс".format(it) } ?: "—"}")

@@ -14,6 +14,7 @@ object ParityCheck {
         val exp = File(dir, "parity/expected.f32")
         if (!png.isFile || !exp.isFile) return null
         val bmp = BitmapFactory.decodeFile(png.absolutePath)
+            ?: error("не удалось декодировать ${png.absolutePath}")
         check(bmp.width == embedder.inputW && bmp.height == embedder.inputH) { "parity image size mismatch" }
         val px = IntArray(bmp.width * bmp.height)
         bmp.getPixels(px, 0, bmp.width, 0, 0, bmp.width, bmp.height)

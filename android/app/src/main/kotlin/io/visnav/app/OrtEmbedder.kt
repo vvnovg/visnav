@@ -13,10 +13,8 @@ import java.nio.ByteOrder
 /** ONNX-модель с контрактом M1: "image" uint8 [1,H,W,3] RGB → "descriptor" float32 [1,D]. */
 class OrtEmbedder(modelFile: File, override val name: String) : Embedder, AutoCloseable {
     private val env = OrtEnvironment.getEnvironment()
-    private val session: OrtSession = env.createSession(
-        modelFile.absolutePath,
-        OrtSession.SessionOptions().apply { setIntraOpNumThreads(4) },
-    )
+    private val options = OrtSession.SessionOptions().apply { setIntraOpNumThreads(4) }
+    private val session: OrtSession = env.createSession(modelFile.absolutePath, options)
     val inputH: Int
     val inputW: Int
 
@@ -39,5 +37,8 @@ class OrtEmbedder(modelFile: File, override val name: String) : Embedder, AutoCl
             }
     }
 
-    override fun close() = session.close()
+    override fun close() {
+        session.close()
+        options.close()
+    }
 }

@@ -7,23 +7,33 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Bundle
 import android.os.Looper
+import android.os.SystemClock
 import io.visnav.core.GpsFix
 
 class GpsSource(context: Context) : LocationListener {
     private val lm = context.getSystemService(LocationManager::class.java)
-    @Volatile var latest: GpsFix? = null
-        private set
+
+    private data class TimedFix(val fix: GpsFix, val elapsedNanos: Long)
+
+    @Volatile private var latest: TimedFix? = null
 
     @SuppressLint("MissingPermission") // разрешение проверяет MainActivity до start()
     fun start() = lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this, Looper.getMainLooper())
 
     fun stop() = lm.removeUpdates(this)
 
-    /** Последний GPS не старше maxAgeMs, иначе null. */
-    fun fresh(nowMs: Long, maxAgeMs: Long = 3000): GpsFix? = latest?.takeIf { nowMs - it.tMs <= maxAgeMs }
+    /**
+     * Последняя GPS-фиксация не старше maxAgeMs, иначе null. Свежесть считается по монотонным
+     * часам устройства (elapsedRealtimeNanos), а не по Location.time (может прыгать/рассинхронизироваться).
+     */
+    fun fresh(maxAgeMs: Long = 3000): GpsFix? {
+        val f = latest ?: return null
+        val deltaNanos = SystemClock.elapsedRealtimeNanos() - f.elapsedNanos
+        return f.fix.takeIf { deltaNanos in 0..maxAgeMs * 1_000_000 }
+    }
 
     override fun onLocationChanged(l: Location) {
-        latest = GpsFix(l.latitude, l.longitude, l.accuracy, l.time)
+        latest = TimedFix(GpsFix(l.latitude, l.longitude, l.accuracy, l.time), l.elapsedRealtimeNanos)
     }
 
     // На API 29 эти методы ещё абстрактные — реализуем явно.

@@ -17,8 +17,19 @@ object BundleLoader {
         val meta = RefPackMeta.parse(json.readText())
         val pack = RefPack.parse(ByteBuffer.wrap(bin.readBytes()))
         val embedder = OrtEmbedder(model, meta.model)
-        check(embedder.inputH == meta.inputH && embedder.inputW == meta.inputW) {
-            "модель ${embedder.inputW}x${embedder.inputH} не совпадает с refpack ${meta.inputW}x${meta.inputH}"
+        try {
+            check(embedder.inputH == meta.inputH && embedder.inputW == meta.inputW) {
+                "модель ${embedder.inputW}x${embedder.inputH} не совпадает с refpack ${meta.inputW}x${meta.inputH}"
+            }
+            val probe = embedder.embed(
+                ByteArray(embedder.inputW * embedder.inputH * 3), embedder.inputW, embedder.inputH,
+            )
+            check(probe.size == pack.dim) {
+                "модель выдаёт дескриптор размерности ${probe.size}, а refpack ожидает ${pack.dim}"
+            }
+        } catch (e: Exception) {
+            embedder.close()
+            throw e
         }
         return LoadedBundle(pack, meta, embedder)
     }
