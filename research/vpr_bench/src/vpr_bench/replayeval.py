@@ -19,6 +19,7 @@ class TrajRow:
     lat: float
     lon: float
     sigma_m: float
+    outage: bool
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,14 @@ class ReplayResult:
     p95_m: float
     outages: list[OutageResult]
 
+    def has_data(self, min_outage_dist_m: float = 200.0) -> bool:
+        """Check if there is data to evaluate: visual mode needs n_points > 0;
+        DR mode needs at least one outage with distance >= threshold and finite drift."""
+        if self.visual:
+            return self.n_points > 0
+        else:
+            return any(o.distance_m >= min_outage_dist_m and not math.isnan(o.drift_pct) for o in self.outages)
+
 
 def read_trajectory(path: Path) -> tuple[dict, list[TrajRow]]:
     lines = [l for l in path.read_text().splitlines() if l.strip()]
@@ -52,7 +61,7 @@ def read_trajectory(path: Path) -> tuple[dict, list[TrajRow]]:
             continue
         # Treat null sigma_m as NaN
         sigma_m = r["sigma_m"] if r["sigma_m"] is not None else float("nan")
-        rows.append(TrajRow(int(r["t_ms"]), r["lat"], r["lon"], sigma_m))
+        rows.append(TrajRow(int(r["t_ms"]), r["lat"], r["lon"], sigma_m, bool(r["outage"])))
     # Sort rows by t_ms
     rows.sort(key=lambda row: row.t_ms)
     return header, rows
@@ -100,32 +109,31 @@ def evaluate_replay(
 
 def render_replay_report(r: ReplayResult, min_outage_dist_m: float = 200.0) -> str:
     lines = ["# Replay M2a", ""]
-    if r.visual:
-        if r.n_points == 0:
+    if not r.has_data(min_outage_dist_m):
+        if r.visual:
             lines += [
                 f"Режим: визуальные фиксации. NFR-1: P50 ≤ 5 м, P95 ≤ 15 м — "
                 f"⚠️ нет данных для проверки",
             ]
         else:
-            ok = r.p50_m <= 5.0 and r.p95_m <= 15.0
             lines += [
-                f"Режим: визуальные фиксации. NFR-1: P50 ≤ 5 м, P95 ≤ 15 м — "
-                f"P50 = {r.p50_m:.1f} м, P95 = {r.p95_m:.1f} м, точек {r.n_points} {'✅' if ok else '❌'}",
+                f"Режим: счисление пути без визуальных фиксаций. NFR-5: дрейф ≤ 3 % пути — "
+                f"⚠️ нет данных для проверки",
             ]
+    elif r.visual:
+        ok = r.p50_m <= 5.0 and r.p95_m <= 15.0
+        lines += [
+            f"Режим: визуальные фиксации. NFR-1: P50 ≤ 5 м, P95 ≤ 15 м — "
+            f"P50 = {r.p50_m:.1f} м, P95 = {r.p95_m:.1f} м, точек {r.n_points} {'✅' if ok else '❌'}",
+        ]
     else:
         long = [o for o in r.outages if o.distance_m >= min_outage_dist_m and not math.isnan(o.drift_pct)]
-        if not long:
-            lines += [
-                f"Режим: счисление пути без визуальных фиксаций. NFR-5: дрейф ≤ 3 % пути — "
-                f"⚠️ нет данных для проверки",
-            ]
-        else:
-            worst = max((o.drift_pct for o in long), default=float("nan"))
-            ok = worst <= 3.0
-            lines += [
-                f"Режим: счисление пути без визуальных фиксаций. NFR-5: дрейф ≤ 3 % пути — "
-                f"худший {worst:.2f} % по {len(long)} пропаданиям ≥ {min_outage_dist_m:.0f} м {'✅' if ok else '❌'}",
-            ]
+        worst = max((o.drift_pct for o in long), default=float("nan"))
+        ok = worst <= 3.0
+        lines += [
+            f"Режим: счисление пути без визуальных фиксаций. NFR-5: дрейф ≤ 3 % пути — "
+            f"худший {worst:.2f} % по {len(long)} пропаданиям ≥ {min_outage_dist_m:.0f} м {'✅' if ok else '❌'}",
+        ]
     lines += [
         "",
         "| Пропадание, с | Точек | Путь, м | Ошибка в конце, м | Дрейф, % |",

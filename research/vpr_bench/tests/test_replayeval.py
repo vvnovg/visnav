@@ -28,7 +28,7 @@ def _traj(tmp_path, err_m, visual=True, outage=(30, 90)):
     for s in range(1, 119):
         lat, lon = offset_m(LAT0, LON0, err_m(s), 10.0 * s)
         lines.append(json.dumps({"t_ms": T0 + 1000 * s, "lat": lat, "lon": lon, "sigma_m": 5.0,
-                                 "vis_sim": None, "vis_ok": None}))
+                                 "outage": outage[0] <= s < outage[1], "vis_sim": None, "vis_ok": None}))
     p = tmp_path / "traj.jsonl"
     p.write_text("\n".join(lines) + "\n")
     return p
@@ -83,16 +83,16 @@ def test_read_trajectory_skips_null_lat_lon(tmp_path):
     lines = [json.dumps(header)]
     # Row with null lon should be skipped
     lines.append(json.dumps({"t_ms": T0 + 2000, "lat": 55.75, "lon": None, "sigma_m": 5.0,
-                             "vis_sim": None, "vis_ok": None}))
+                             "outage": False, "vis_sim": None, "vis_ok": None}))
     # Row with null sigma_m should be kept but sigma_m should be NaN
     lines.append(json.dumps({"t_ms": T0 + 3000, "lat": 55.75, "lon": 37.6, "sigma_m": None,
-                             "vis_sim": None, "vis_ok": None}))
+                             "outage": False, "vis_sim": None, "vis_ok": None}))
     # Row with null lat should be skipped
     lines.append(json.dumps({"t_ms": T0 + 1000, "lat": None, "lon": 37.6, "sigma_m": 5.0,
-                             "vis_sim": None, "vis_ok": None}))
+                             "outage": False, "vis_sim": None, "vis_ok": None}))
     # Normal row should be kept
     lines.append(json.dumps({"t_ms": T0 + 4000, "lat": 55.751, "lon": 37.601, "sigma_m": 5.0,
-                             "vis_sim": None, "vis_ok": None}))
+                             "outage": False, "vis_sim": None, "vis_ok": None}))
     p = tmp_path / "traj.jsonl"
     p.write_text("\n".join(lines) + "\n")
 
@@ -145,7 +145,7 @@ def test_cli_mismatched_sessions(tmp_path):
     for s in range(1, 119):
         lat, lon = offset_m(LAT0, LON0, 3.0, 10.0 * s)
         lines.append(json.dumps({"t_ms": T0 + 1000 * s, "lat": lat, "lon": lon, "sigma_m": 5.0,
-                                 "vis_sim": None, "vis_ok": None}))
+                                 "outage": 30 <= s < 90, "vis_sim": None, "vis_ok": None}))
     traj = tmp_path / "traj.jsonl"
     traj.write_text("\n".join(lines) + "\n")
 

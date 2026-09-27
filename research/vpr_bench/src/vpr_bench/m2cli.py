@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from pathlib import Path
 
@@ -31,14 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(render_replay_report(result))
 
-    # Check if there's no data to evaluate
-    has_data = False
-    if result.visual:
-        has_data = result.n_points > 0
-    else:
-        has_data = any(o.distance_m >= 200.0 and not math.isnan(o.drift_pct) for o in result.outages)
-
-    if not has_data:
+    if not result.has_data():
         print("warning: no data to evaluate", file=sys.stderr)
 
     print(f"P50={result.p50_m:.1f} m P95={result.p95_m:.1f} m over {result.n_points} points -> {args.out}")
