@@ -23,7 +23,7 @@ data class MonitorConfig(
     val relockOkMs: Double = 10_000.0,
     val relockMaxSigmaM: Double = 30.0,
     val relockMaxDistM: Double = 30.0,
-    val visualAgreeMs: Double = 5_000.0,
+    val visualAgreeMs: Double = 2_000.0,
     val visualAgreeM: Double = 30.0,
     val uniformCn0StdDb: Float = 1.5f,  // у подменного сигнала все спутники почти одной силы
     val uniformMinUsed: Int = 6,
@@ -62,6 +62,8 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
     private var reinit = false
 
     fun onStatus(e: GnssStatusEvent) {
+        val prev = lastStatus
+        if (prev != null && e.tMs - prev.tMs > config.statusStaleMs) uniformFlags.clear()
         lastStatus = e
         val std = e.cn0Std
         uniformFlags.addLast(std != null && e.used >= config.uniformMinUsed && std < config.uniformCn0StdDb)
@@ -110,7 +112,9 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
         lastFix = e
         if (!latched) {
             if (innovationD2 == null) { badInnovations = 0; return }
-            badInnovations = if (innovationD2 <= config.innovationGate) 0 else badInnovations + 1
+            val bad = innovationD2 > config.innovationGate &&
+                distToFilterM != null && distToFilterM > config.relockMaxDistM
+            badInnovations = if (bad) badInnovations + 1 else 0
             if (badInnovations >= config.innovationCount) {
                 latched = true; okSince = null; okNeededVisual = false; reinit = false
             }
