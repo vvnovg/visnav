@@ -25,12 +25,31 @@ data class GnssStatusEvent(override val tMs: Double, val sats: Int, val used: In
 object SensorLogFormat {
     fun header(startedMs: Long): String = "{\"v\":1,\"type\":\"sensors\",\"started_ms\":$startedMs}"
 
+    fun isWritable(e: SensorEvent): Boolean {
+        if (!e.tMs.isFinite()) return false
+        return when (e) {
+            is GyroEvent -> e.x.isFinite() && e.y.isFinite() && e.z.isFinite()
+            is AccelEvent -> e.x.isFinite() && e.y.isFinite() && e.z.isFinite()
+            is LocEvent -> e.lat.isFinite() && e.lon.isFinite() && e.accM.isFinite()
+            is GnssStatusEvent -> true
+        }
+    }
+
     fun line(e: SensorEvent): String = when (e) {
         is GyroEvent -> "{\"t\":${e.tMs},\"k\":\"g\",\"x\":${e.x},\"y\":${e.y},\"z\":${e.z}}"
         is AccelEvent -> "{\"t\":${e.tMs},\"k\":\"a\",\"x\":${e.x},\"y\":${e.y},\"z\":${e.z}}"
-        is LocEvent -> "{\"t\":${e.tMs},\"k\":\"loc\",\"lat\":${e.lat},\"lon\":${e.lon},\"acc\":${e.accM}," +
-            "\"spd\":${e.speedMps},\"spd_acc\":${e.speedAccMps},\"brg\":${e.bearingDeg},\"brg_acc\":${e.bearingAccDeg}}"
-        is GnssStatusEvent -> "{\"t\":${e.tMs},\"k\":\"gnss\",\"sats\":${e.sats},\"used\":${e.used},\"cn0\":${e.cn0Mean}}"
+        is LocEvent -> {
+            val spd = if (e.speedMps?.isFinite() == true) e.speedMps else null
+            val spdAcc = if (e.speedAccMps?.isFinite() == true) e.speedAccMps else null
+            val brg = if (e.bearingDeg?.isFinite() == true) e.bearingDeg else null
+            val brgAcc = if (e.bearingAccDeg?.isFinite() == true) e.bearingAccDeg else null
+            "{\"t\":${e.tMs},\"k\":\"loc\",\"lat\":${e.lat},\"lon\":${e.lon},\"acc\":${e.accM}," +
+                "\"spd\":$spd,\"spd_acc\":$spdAcc,\"brg\":$brg,\"brg_acc\":$brgAcc}"
+        }
+        is GnssStatusEvent -> {
+            val cn0 = if (e.cn0Mean?.isFinite() == true) e.cn0Mean else null
+            "{\"t\":${e.tMs},\"k\":\"gnss\",\"sats\":${e.sats},\"used\":${e.used},\"cn0\":$cn0}"
+        }
     }
 
     fun parse(line: String): SensorEvent? {
@@ -54,12 +73,20 @@ object SensorLogFormat {
 class SensorLogger(file: File) : Closeable {
     private val writer = file.bufferedWriter()
     private var count = 0
+    private var _skipped = 0
+
+    val skipped: Int
+        @Synchronized get() = _skipped
 
     @Synchronized fun header(startedMs: Long) {
         writer.write(SensorLogFormat.header(startedMs)); writer.newLine(); writer.flush()
     }
 
     @Synchronized fun event(e: SensorEvent) {
+        if (!SensorLogFormat.isWritable(e)) {
+            _skipped++
+            return
+        }
         writer.write(SensorLogFormat.line(e)); writer.newLine()
         if (++count % 200 == 0) writer.flush()
     }
@@ -74,8 +101,8 @@ fun readSensorLog(file: File): List<SensorEvent> {
         val e = try {
             SensorLogFormat.parse(line)
         } catch (ex: Exception) {
-            if (i == lines.lastIndex) null // обрезанная последняя строка после аварийной остановки
-            else throw IllegalArgumentException("${file.name}:${i + 1}: ${ex.message}", ex)
+            // Intentionally skip truncated last line (incomplete write after crash)
+            if (i == lines.lastIndex) null else throw IllegalArgumentException("${file.name}:${i + 1}: ${ex.message}", ex)
         }
         if (e != null) out.add(e)
     }

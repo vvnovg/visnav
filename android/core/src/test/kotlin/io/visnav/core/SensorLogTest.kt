@@ -38,4 +38,33 @@ class SensorLogTest {
         val read = readSensorLog(f)
         assertEquals(listOf(10.0, 20.0), read.map { it.tMs })
     }
+
+    @Test fun nanNullableFieldsWriteNull() {
+        val locWithNanSpeed = LocEvent(2000.0, 55.75, 37.6, 4.5f, Float.NaN, null, 90f, null)
+        val line = SensorLogFormat.line(locWithNanSpeed)
+        assertEquals("{\"t\":2000.0,\"k\":\"loc\",\"lat\":55.75,\"lon\":37.6,\"acc\":4.5,\"spd\":null,\"spd_acc\":null,\"brg\":90.0,\"brg_acc\":null}", line)
+        assertEquals(LocEvent(2000.0, 55.75, 37.6, 4.5f, null, null, 90f, null), SensorLogFormat.parse(line))
+    }
+
+    @Test fun isWritableRejectsNanInRequiredFields() {
+        assertEquals(true, SensorLogFormat.isWritable(GyroEvent(1.0, 0.1f, 0.2f, 0.3f)))
+        assertEquals(false, SensorLogFormat.isWritable(GyroEvent(1.0, Float.NaN, 0.2f, 0.3f)))
+        assertEquals(false, SensorLogFormat.isWritable(AccelEvent(1.0, 0f, 0f, Float.POSITIVE_INFINITY)))
+        assertEquals(true, SensorLogFormat.isWritable(LocEvent(1.0, 55.75, 37.6, 4.5f, Float.NaN, null, 90f, null)))
+        assertEquals(false, SensorLogFormat.isWritable(LocEvent(1.0, Double.NaN, 37.6, 4.5f, 10f, null, 90f, null)))
+        assertEquals(true, SensorLogFormat.isWritable(GnssStatusEvent(1.0, 20, 12, Float.NaN)))
+    }
+
+    @Test fun loggerSkipsNonWritableEvents() {
+        val f = File.createTempFile("sen", ".sensors.jsonl")
+        SensorLogger(f).use {
+            it.header(1)
+            it.event(GyroEvent(10.0, 0f, 0f, 0f))
+            it.event(GyroEvent(15.0, Float.NaN, 0f, 0f))
+            it.event(GyroEvent(20.0, 0f, 0f, 0f))
+            assertEquals(1, it.skipped)
+        }
+        val read = readSensorLog(f)
+        assertEquals(listOf(10.0, 20.0), read.map { it.tMs })
+    }
 }
