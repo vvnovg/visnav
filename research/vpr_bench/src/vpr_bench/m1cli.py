@@ -29,6 +29,13 @@ def build_parser() -> argparse.ArgumentParser:
     qz.add_argument("--calib", required=True, type=Path, help="refs.csv, из которого берутся снимки для калибровки")
     qz.add_argument("--n", type=int, default=200)
     qz.add_argument("--out", required=True, type=Path)
+
+    pk = sub.add_parser("pack-refs", help="посчитать дескрипторы эталонов моделью телефона и упаковать refpack")
+    pk.add_argument("--refs", required=True, type=Path)
+    pk.add_argument("--onnx", required=True, type=Path)
+    pk.add_argument("--out", required=True, type=Path)
+    pk.add_argument("--gpx", action="append", default=[], type=Path, help="ограничить базу коридором вдоль треков")
+    pk.add_argument("--buffer-m", type=float, default=600.0)
     return parser
 
 
@@ -80,6 +87,47 @@ def _quantize(args) -> int:
     return 0
 
 
+def _pack(args) -> int:
+    import json
+    import shutil
+    from datetime import datetime, timezone
+
+    from vpr_bench.dataset import read_places
+    from vpr_bench.db_builder import Corridor
+    from vpr_bench.onnx_export import onnx_sha256
+    from vpr_bench.pipeline import embed_places
+    from vpr_bench.query import parse_gpx
+    from vpr_bench.refpack import write_refpack
+
+    places = read_places(args.refs)
+    if args.gpx:
+        corridor = Corridor([parse_gpx(p) for p in args.gpx], args.buffer_m)
+        places = [p for p in places if corridor.contains(p.lat, p.lon)]
+    if not places:
+        print("error: no reference places to pack", file=sys.stderr)
+        return 2
+    emb = OnnxEmbedder(args.onnx)
+    desc, ms = embed_places(emb, places, args.refs.parent)
+    meta = {
+        "model": args.onnx.stem,
+        "onnx_sha256": onnx_sha256(args.onnx),
+        "input_h": emb.image_size[0],
+        "input_w": emb.image_size[1],
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source": "Mapillary (CC BY-SA 4.0)",
+    }
+    refs_meta = args.refs.parent / "meta.json"
+    if refs_meta.exists():
+        meta["refs_meta"] = json.loads(refs_meta.read_text())
+    write_refpack(
+        args.out, [p.lat for p in places], [p.lon for p in places], [p.heading for p in places], desc, meta,
+    )
+    shutil.copyfile(args.onnx, args.out / "model.onnx")
+    size_mb = (args.out / "refpack.bin").stat().st_size / 1e6
+    print(f"{len(places)} refs, dim {desc.shape[1]}, {size_mb:.1f} MB -> {args.out} ({ms:.0f} ms/image on PC)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "export-onnx":
@@ -94,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "quantize-onnx":
         return _quantize(args)
+    if args.command == "pack-refs":
+        return _pack(args)
     return 2
 
 
