@@ -13,10 +13,14 @@ object TrajectoryWriter {
                 "\"refpack_created_at\":${JsonPrimitive(session.header.refpackCreatedAt)}}")
             w.newLine()
             for (p in points) {
-                w.write("{\"t_ms\":${p.tMs},\"lat\":${p.lat},\"lon\":${p.lon},\"sigma_m\":${p.sigmaM}," +
-                    "\"outage\":${p.inOutage},\"vis_sim\":${p.visSim},\"vis_ok\":${p.visAccepted}}")
+                w.write("{\"t_ms\":${p.tMs},\"lat\":${num(p.lat)},\"lon\":${num(p.lon)},\"sigma_m\":${num(p.sigmaM)}," +
+                    "\"outage\":${p.inOutage},\"vis_sim\":${num(p.visSim)},\"vis_ok\":${p.visAccepted}}")
                 w.newLine()
             }
         }
     }
+
+    /** JSON has no NaN/Infinity literal; a non-finite value is written as `null` to keep every line valid JSON. */
+    private fun num(v: Double): String = if (v.isFinite()) v.toString() else "null"
+    private fun num(v: Float?): String = if (v != null && v.isFinite()) v.toString() else "null"
 }

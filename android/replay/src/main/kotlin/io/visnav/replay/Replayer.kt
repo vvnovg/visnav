@@ -33,13 +33,23 @@ data class TrajPoint(
 
 private const val MIN_POS_SIGMA_M = 3.0
 private const val MIN_SPEED_SIGMA_MPS = 0.1
-private val MIN_HEADING_SIGMA_RAD = Math.toRadians(1.0)
+private const val MIN_HEADING_SIGMA_DEG = 1.0
+private const val DEFAULT_HEADING_ACC_DEG_INIT = 10.0
+private const val DEFAULT_HEADING_ACC_DEG_UPDATE = 5.0
+private const val DEFAULT_SPEED_ACC_INIT = 1.0
+private const val DEFAULT_SPEED_ACC_UPDATE = 0.5
+
+/**
+ * Сигма из поля GNSS-точности: `null` или не-конечное значение заменяется значением по умолчанию
+ * (уже не меньше `floor`), иначе — значение поля, ограниченное снизу `floor`. Некоторые устройства
+ * сообщают точность GNSS равной 0 или (реже) NaN/Infinity — `Ekf2d.update*` требует `sigma > 0 &&
+ * sigma.isFinite()`, поэтому все сигмы, выведенные из полей GNSS, проходят через эту функцию.
+ */
+private fun sigma(v: Float?, default: Double, floor: Double): Double =
+    if (v != null && v.isFinite()) max(v.toDouble(), floor) else default
 
 /**
  * Прогон записанной сессии через фильтр с искусственными пропаданиями GPS. Алгоритм — в плане M2a, Task 7.
- *
- * Некоторые устройства сообщают точность GNSS равной 0 — `Ekf2d.update*` требует `sigma > 0 &&
- * sigma.isFinite()`, поэтому все сигмы, выведенные из полей GNSS, ограничены снизу.
  */
 class Replayer(private val pack: RefPack, private val config: ReplayConfig) {
     private val index = GeoIndex(pack)
@@ -83,9 +93,9 @@ class Replayer(private val pack: RefPack, private val config: ReplayConfig) {
                     if (!ekf.initialized) {
                         if (spd != null && spd >= 3f && brg != null) {
                             enu = Enu(ev.lat, ev.lon)
-                            val posSigma = max(ev.accM.toDouble(), MIN_POS_SIGMA_M)
-                            val psiSigma = max(Math.toRadians((ev.bearingAccDeg ?: 10f).toDouble()), MIN_HEADING_SIGMA_RAD)
-                            val vSigma = max((ev.speedAccMps ?: 1f).toDouble(), MIN_SPEED_SIGMA_MPS)
+                            val posSigma = sigma(ev.accM, MIN_POS_SIGMA_M, MIN_POS_SIGMA_M)
+                            val psiSigma = Math.toRadians(sigma(ev.bearingAccDeg, DEFAULT_HEADING_ACC_DEG_INIT, MIN_HEADING_SIGMA_DEG))
+                            val vSigma = sigma(ev.speedAccMps, DEFAULT_SPEED_ACC_INIT, MIN_SPEED_SIGMA_MPS)
                             ekf.init(0.0, 0.0, Math.toRadians(brg.toDouble()), spd.toDouble(), posSigma, psiSigma, vSigma)
                             lastT = t
                         }
@@ -93,13 +103,13 @@ class Replayer(private val pack: RefPack, private val config: ReplayConfig) {
                     }
                     predictTo(t)
                     val en = enu!!.toEn(ev.lat, ev.lon)
-                    ekf.updatePosition(en[0], en[1], max(ev.accM.toDouble(), MIN_POS_SIGMA_M))
+                    ekf.updatePosition(en[0], en[1], sigma(ev.accM, MIN_POS_SIGMA_M, MIN_POS_SIGMA_M))
                     if (spd != null) {
-                        val spdSigma = max((ev.speedAccMps ?: 0.5f).toDouble(), MIN_SPEED_SIGMA_MPS)
+                        val spdSigma = sigma(ev.speedAccMps, DEFAULT_SPEED_ACC_UPDATE, MIN_SPEED_SIGMA_MPS)
                         ekf.updateSpeed(spd.toDouble(), spdSigma)
                     }
                     if (brg != null && spd != null && spd >= 3f) {
-                        val brgSigma = max(Math.toRadians((ev.bearingAccDeg ?: 5f).toDouble()), MIN_HEADING_SIGMA_RAD)
+                        val brgSigma = Math.toRadians(sigma(ev.bearingAccDeg, DEFAULT_HEADING_ACC_DEG_UPDATE, MIN_HEADING_SIGMA_DEG))
                         ekf.updateHeading(Math.toRadians(brg.toDouble()), brgSigma)
                     }
                 }

@@ -40,7 +40,26 @@ class ReplayerTest {
         return RefPack(count, dim, lats, lons, FloatArray(count), desc)
     }
 
-    private fun session(dir: File): SessionData {
+    /**
+     * @param outage если задан, используется для двух вещей:
+     *   - `gpsShiftNDuringOutageM`: пропадание GPS во внутренних терминах означает, что телефон не
+     *     получает исправных сигналов; но иногда устройство продолжает сообщать устаревший/битый
+     *     фикс. Такие LocEvent'ы внутри окна `outage` намеренно сдвинуты на север — если `Replayer`
+     *     перестанет их игнорировать (`if (inOutage(t)) continue`), фильтр потянется за неверными
+     *     координатами и тест это поймает.
+     *   - `speedBiasFracBeforeOutage`: скорость в логе GPS завышена на эту долю до начала пропадания,
+     *     смещая скоростную составляющую состояния фильтра к началу счисления пути.
+     * @param gyroZBias постоянное смещение оси Z гироскопа (рад/с) — с учётом того, что телефон лежит
+     *   плоско и лишь вибрирует, эта ось почти совпадает с вертикалью, так что смещение почти целиком
+     *   просачивается в оценку скорости поворота курса.
+     */
+    private fun session(
+        dir: File,
+        outage: Outage? = null,
+        gpsShiftNDuringOutageM: Double = 0.0,
+        speedBiasFracBeforeOutage: Double = 0.0,
+        gyroZBias: Float = 0f,
+    ): SessionData {
         val t0 = 1_700_000_000_000L
         val sensors = mutableListOf<SensorEvent>()
         val frames = mutableListOf<FrameRecord>()
@@ -49,11 +68,15 @@ class ReplayerTest {
             for (step in 0..12_000) { // 100 Гц × 120 с
                 val tMs = t0 + step * 10.0
                 sensors += AccelEvent(tMs, 0f, 0f, 9.81f + 0.3f * kotlin.math.sin(step.toFloat())) // вибрация едущей машины
-                sensors += GyroEvent(tMs, 0f, 0f, 0f)
+                sensors += GyroEvent(tMs, 0f, 0f, gyroZBias)
                 val eMeters = step * 0.1
                 if (step % 100 == 0) {
-                    val ll = enu.toLatLon(eMeters, 0.0)
-                    sensors += LocEvent(tMs, ll[0], ll[1], 3f, 10f, 0.3f, 90f, 2f)
+                    val inOutageWindow = outage != null && outage.contains(tMs)
+                    val nOffset = if (inOutageWindow) gpsShiftNDuringOutageM else 0.0
+                    val ll = enu.toLatLon(eMeters, nOffset)
+                    val beforeOutage = outage == null || tMs < outage.startMs
+                    val speed = if (beforeOutage) (10.0 * (1.0 + speedBiasFracBeforeOutage)).toFloat() else 10f
+                    sensors += LocEvent(tMs, ll[0], ll[1], 3f, speed, 0.3f, 90f, 2f)
                 }
                 if (step % 50 == 0) {
                     val t = t0 + step * 10L
@@ -73,28 +96,77 @@ class ReplayerTest {
         return Geo.haversineM(ll[0], ll[1], p.lat, p.lon)
     }
 
+    private fun p95(errors: List<Double>): Double {
+        val sorted = errors.sorted()
+        return sorted[sorted.size * 95 / 100]
+    }
+
     @Test fun visualReplayTracksThroughGpsOutage() {
         val dir = createTempDir()
-        val s = session(dir)
+        val outage = Outage(1_700_000_000_000L + 30_000, 1_700_000_000_000L + 110_000)
+        // GPS logged during the outage is shifted 200 m north of the truth: a real device that keeps
+        // reporting a stale/bad fix while it has no real signal. Replayer must ignore it (`inOutage`
+        // skip) — if that guard were removed, the filter would snap to the shifted fix and the
+        // in-outage error below would spike far past 15 m.
+        val s = session(dir, outage = outage, gpsShiftNDuringOutageM = 200.0)
         val t0 = s.header.startedMs
-        val outage = Outage(t0 + 30_000, t0 + 110_000)
         val points = Replayer(pack(), ReplayConfig()).run(s, listOf(outage))
         val inOutage = points.filter { it.inOutage }
         assertTrue(inOutage.size > 100)
-        val errors = inOutage.map { truthErrorM(it, t0) }.sorted()
-        assertTrue(errors[errors.size * 95 / 100] <= 15.0, "P95=${errors[errors.size * 95 / 100]}")
+        val errors = inOutage.map { truthErrorM(it, t0) }
+        val p95Err = p95(errors)
+        assertTrue(p95Err <= 15.0, "P95=$p95Err (shifted-GPS-during-outage guard failed if this is ~200 m)")
         assertTrue(inOutage.count { it.visAccepted == true } > inOutage.size / 2)
     }
 
     @Test fun deadReckoningWithoutVisualKeepsHeadingOnStraightRoad() {
         val dir = createTempDir()
-        val s = session(dir)
+        val outage = Outage(1_700_000_000_000L + 30_000, 1_700_000_000_000L + 110_000)
+        val s = session(dir, outage = outage)
         val t0 = s.header.startedMs
-        val points = Replayer(pack(), ReplayConfig(visual = false)).run(s, listOf(Outage(t0 + 30_000, t0 + 110_000)))
+        val points = Replayer(pack(), ReplayConfig(visual = false)).run(s, listOf(outage))
+        val beforeOutage = points.last { !it.inOutage && it.tMs < outage.startMs }
         val last = points.last { it.inOutage }
-        val dist = (last.tMs - (t0 + 30_000)) / 1000.0 * 10.0
+        val dist = (last.tMs - outage.startMs) / 1000.0 * 10.0
         assertTrue(truthErrorM(last, t0) / dist * 100 <= 3.0)
         assertTrue(points.filter { it.inOutage }.all { it.visSim == null })
+        // Losing GPS for tens of seconds must inflate the filter's own uncertainty a lot: no position
+        // update landed since `outage.startMs`, so sigma should have grown well past its pre-outage
+        // value (guards against a Replayer that silently keeps predicting P as if still fixed).
+        assertTrue(
+            last.sigmaM >= 3 * beforeOutage.sigmaM,
+            "last in-outage sigma=${last.sigmaM} should be >= 3x pre-outage sigma=${beforeOutage.sigmaM}",
+        )
+    }
+
+    @Test fun visualCorrectsBiasedDeadReckoningWhileDeadReckoningAloneExceedsNfr1() {
+        val dir = createTempDir()
+        val outage = Outage(1_700_000_000_000L + 30_000, 1_700_000_000_000L + 110_000)
+        // A modest, realistic double bias that a real receiver/IMU pair can produce: GPS speed
+        // reported 5% high right up to the outage, plus a small constant gyro-Z bias throughout.
+        // Pure dead reckoning has nothing to correct either with, so error should grow past NFR-1's
+        // 15 m P95 bound by the end of the outage; visual re-localization must pull it back under.
+        val s = session(dir, outage = outage, speedBiasFracBeforeOutage = 0.05, gyroZBias = 0.005f)
+        val t0 = s.header.startedMs
+
+        val visualPoints = Replayer(pack(), ReplayConfig(visual = true)).run(s, listOf(outage))
+        val visualInOutage = visualPoints.filter { it.inOutage }
+        val visualP95 = p95(visualInOutage.map { truthErrorM(it, t0) })
+
+        val drPoints = Replayer(pack(), ReplayConfig(visual = false)).run(s, listOf(outage))
+        val drLast = drPoints.last { it.inOutage }
+        val drEndError = truthErrorM(drLast, t0)
+
+        assertTrue(visualP95 <= 15.0, "visual=true P95=$visualP95 (NFR-1 must hold even with the injected bias)")
+        assertTrue(
+            drEndError > 15.0,
+            "visual=false end-of-outage error=$drEndError should exceed 15 m " +
+                "(bias too small to separate visual from dead-reckoning-only; increase it)",
+        )
+        println(
+            "visualCorrectsBiasedDeadReckoningWhileDeadReckoningAloneExceedsNfr1: " +
+                "visual P95=$visualP95 m, dead-reckoning end-of-outage error=$drEndError m",
+        )
     }
 
     @Test fun loadsSessionFilesAndWritesTrajectory() {
@@ -117,27 +189,58 @@ class ReplayerTest {
         assertEquals("{\"t_ms\":5,\"lat\":55.75,\"lon\":37.6,\"sigma_m\":4.0,\"outage\":false,\"vis_sim\":null,\"vis_ok\":null}", lines[1])
     }
 
+    @Test fun nonFiniteFieldsAreWrittenAsNullSoEveryLineStaysValidJson() {
+        val dir = createTempDir()
+        val header = SessionHeader(model = "m", refpackCreatedAt = "c", device = "d", startedMs = 1, mode = "gps")
+        val s = SessionData(header, emptyList(), emptyList(), DescriptorLog.read(File(dir, "empty.desc").also {
+            DescriptorLogWriter(it, 1).close()
+        }))
+        val out = File(dir, "traj.jsonl")
+        val points = listOf(
+            TrajPoint(1, Double.NaN, 37.6, 4.0, false, Float.NaN, null),
+            TrajPoint(2, 55.75, Double.POSITIVE_INFINITY, Double.NaN, true, null, false),
+        )
+        TrajectoryWriter.write(out, s, ReplayConfig(), emptyList(), points)
+        val lines = out.readLines()
+        // Every line must parse as JSON (no bare NaN/Infinity tokens) and non-finite fields are null.
+        assertEquals("{\"t_ms\":1,\"lat\":null,\"lon\":37.6,\"sigma_m\":4.0,\"outage\":false,\"vis_sim\":null,\"vis_ok\":null}", lines[1])
+        assertEquals("{\"t_ms\":2,\"lat\":55.75,\"lon\":null,\"sigma_m\":null,\"outage\":true,\"vis_sim\":null,\"vis_ok\":false}", lines[2])
+        for (line in lines) assertTrue(!line.contains("NaN") && !line.contains("Infinity"), line)
+    }
+
     @Test fun zeroGnssAccuracyFieldsAreFlooredNotThrown() {
         val dir = createTempDir()
         val t0 = 1_700_000_000_000L
         val sensors = mutableListOf<SensorEvent>()
-        for (step in 0..2000) { // 100 Гц × 20 с
-            val tMs = t0 + step * 10.0
-            sensors += AccelEvent(tMs, 0f, 0f, 9.81f)
-            sensors += GyroEvent(tMs, 0f, 0f, 0f)
-            if (step % 100 == 0) {
+        val frames = mutableListOf<FrameRecord>()
+        val descFile = File(dir, "z.desc")
+        DescriptorLogWriter(descFile, dim).use { w ->
+            for (step in 0..2000) { // 100 Гц × 20 с
+                val tMs = t0 + step * 10.0
+                // Vibration in the accelerometer, same as the main synthetic session, so the
+                // StationaryDetector/YawRate path is exercised the same way as a real drive.
+                sensors += AccelEvent(tMs, 0f, 0f, 9.81f + 0.3f * kotlin.math.sin(step.toFloat()))
+                sensors += GyroEvent(tMs, 0f, 0f, 0f)
                 val eMeters = step * 0.1
-                val ll = enu.toLatLon(eMeters, 0.0)
-                // spd_acc = 0 and brg_acc = 0: devices sometimes report zero accuracy.
-                sensors += LocEvent(tMs, ll[0], ll[1], 3f, 10f, 0f, 90f, 0f)
+                if (step % 100 == 0) {
+                    val ll = enu.toLatLon(eMeters, 0.0)
+                    // spd_acc = 0 and brg_acc = 0: devices sometimes report zero accuracy.
+                    sensors += LocEvent(tMs, ll[0], ll[1], 3f, 10f, 0f, 90f, 0f)
+                }
+                if (step % 50 == 0 && step >= 100) { // a couple of frames once the filter is initialized
+                    val t = t0 + step * 10L
+                    frames += FrameRecord(tMs = t, mode = "gps", gps = null, prior = null, top = emptyList(),
+                        fix = null, latMs = LatencyJson(0.0, 0.0, 0.0))
+                    w.write(t, oneHot(minOf(n, (eMeters / 10.0).toInt())))
+                }
             }
         }
-        val descFile = File(dir, "z.desc")
-        DescriptorLogWriter(descFile, dim).use { }
         val header = SessionHeader(model = "m", refpackCreatedAt = "c", device = "d", startedMs = t0, mode = "gps")
-        val s = SessionData(header, emptyList(), sensors.sortedBy { it.tMs }, DescriptorLog.read(descFile))
+        val s = SessionData(header, frames, sensors.sortedBy { it.tMs }, DescriptorLog.read(descFile))
         // Must not throw Ekf2d's require(sigma > 0 && sigma.isFinite()).
-        Replayer(pack(), ReplayConfig()).run(s, emptyList())
+        val points = Replayer(pack(), ReplayConfig()).run(s, emptyList())
+        assertTrue(points.isNotEmpty())
+        assertTrue(points.all { it.sigmaM.isFinite() }, "all sigmaM must be finite: ${points.map { it.sigmaM }}")
     }
 
     private fun createTempDir(): File = kotlin.io.path.createTempDirectory("replay").toFile()
