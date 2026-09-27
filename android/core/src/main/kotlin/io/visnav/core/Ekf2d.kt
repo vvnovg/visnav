@@ -93,6 +93,16 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
 
     fun posSigma(): Double = sqrt(max(p[idx(0, 0)], p[idx(1, 1)]))
 
+    /** χ²-расстояние фикса позиции до прогноза (как в гейте updatePosition), без изменения состояния. */
+    fun positionD2(e: Double, n: Double, sigma: Double): Double {
+        require(sigma > 0 && sigma.isFinite()) { "sigma must be positive and finite" }
+        val r = sigma * sigma
+        val s00 = p[idx(0, 0)] + r; val s01 = p[idx(0, 1)]; val s10 = p[idx(1, 0)]; val s11 = p[idx(1, 1)] + r
+        val det = s00 * s11 - s01 * s10
+        val ye = e - x[0]; val yn = n - x[1]
+        return (ye * (s11 * ye - s01 * yn) + yn * (-s10 * ye + s00 * yn)) / det
+    }
+
     /** Общее обновление: H — строки (m ≤ 2), y — невязка, r — дисперсии шума (диагональ). */
     private fun update(h: Array<DoubleArray>, y: DoubleArray, r: DoubleArray, gate: Double): Boolean {
         check(initialized) { "filter not initialized" }

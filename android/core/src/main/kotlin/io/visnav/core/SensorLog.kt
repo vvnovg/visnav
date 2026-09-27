@@ -9,6 +9,7 @@ import kotlinx.serialization.json.double
 import kotlinx.serialization.json.float
 import kotlinx.serialization.json.floatOrNull
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
@@ -21,7 +22,14 @@ data class LocEvent(
     override val tMs: Double, val lat: Double, val lon: Double, val accM: Float,
     val speedMps: Float?, val speedAccMps: Float?, val bearingDeg: Float?, val bearingAccDeg: Float?,
 ) : SensorEvent
-data class GnssStatusEvent(override val tMs: Double, val sats: Int, val used: Int, val cn0Mean: Float?) : SensorEvent
+data class GnssStatusEvent(
+    override val tMs: Double, val sats: Int, val used: Int, val cn0Mean: Float?,
+    val cn0Std: Float? = null, val cn0Max: Float? = null,
+    val usedGps: Int? = null, val usedGlo: Int? = null, val usedGal: Int? = null, val usedBds: Int? = null,
+) : SensorEvent
+
+/** Средний уровень автоматической регулировки усиления приёмника GNSS (дБ) по n измерениям. */
+data class AgcEvent(override val tMs: Double, val agcDb: Float, val n: Int) : SensorEvent
 
 /** Синхронизация часов: настенное время, elapsedRealtimeNanos и System.nanoTime() для того же
  * момента — monoNs позволяет позже перевести метки, снятые по System.nanoTime() (например, часть
@@ -58,6 +66,7 @@ object SensorLogFormat {
             is AccelEvent -> e.x.isFinite() && e.y.isFinite() && e.z.isFinite()
             is LocEvent -> e.lat.isFinite() && e.lon.isFinite() && e.accM.isFinite()
             is GnssStatusEvent -> true
+            is AgcEvent -> e.agcDb.isFinite()
             is ClockEvent -> true
             is GyroUncalEvent -> e.x.isFinite() && e.y.isFinite() && e.z.isFinite() &&
                 e.bx.isFinite() && e.by.isFinite() && e.bz.isFinite()
@@ -77,9 +86,12 @@ object SensorLogFormat {
                 "\"spd\":$spd,\"spd_acc\":$spdAcc,\"brg\":$brg,\"brg_acc\":$brgAcc}"
         }
         is GnssStatusEvent -> {
-            val cn0 = if (e.cn0Mean?.isFinite() == true) e.cn0Mean else null
-            "{\"t\":${e.tMs},\"k\":\"gnss\",\"sats\":${e.sats},\"used\":${e.used},\"cn0\":$cn0}"
+            fun f(v: Float?) = if (v?.isFinite() == true) v else null
+            "{\"t\":${e.tMs},\"k\":\"gnss\",\"sats\":${e.sats},\"used\":${e.used},\"cn0\":${f(e.cn0Mean)}," +
+                "\"cn0_std\":${f(e.cn0Std)},\"cn0_max\":${f(e.cn0Max)},\"used_gps\":${e.usedGps}," +
+                "\"used_glo\":${e.usedGlo},\"used_gal\":${e.usedGal},\"used_bds\":${e.usedBds}}"
         }
+        is AgcEvent -> "{\"t\":${e.tMs},\"k\":\"agc\",\"agc_db\":${e.agcDb},\"n\":${e.n}}"
         is ClockEvent -> "{\"t\":${e.tMs},\"k\":\"clk\",\"wall_ms\":${e.wallMs}," +
             "\"elapsed_ns\":${e.elapsedNs},\"mono_ns\":${e.monoNs}}"
         is GyroUncalEvent -> "{\"t\":${e.tMs},\"k\":\"gu\",\"x\":${e.x},\"y\":${e.y},\"z\":${e.z}," +
@@ -93,13 +105,17 @@ object SensorLogFormat {
         val t = o.getValue("t").jsonPrimitive.double
         fun f(key: String) = o.getValue(key).jsonPrimitive.float
         fun fOrNull(key: String) = (o[key] as? JsonPrimitive)?.floatOrNull
+        fun iOrNull(key: String) = (o[key] as? JsonPrimitive)?.intOrNull
         fun l(key: String) = o.getValue(key).jsonPrimitive.long
         return when (o.getValue("k").jsonPrimitive.content) {
             "g" -> GyroEvent(t, f("x"), f("y"), f("z"))
             "a" -> AccelEvent(t, f("x"), f("y"), f("z"))
             "loc" -> LocEvent(t, o.getValue("lat").jsonPrimitive.double, o.getValue("lon").jsonPrimitive.double,
                 f("acc"), fOrNull("spd"), fOrNull("spd_acc"), fOrNull("brg"), fOrNull("brg_acc"))
-            "gnss" -> GnssStatusEvent(t, o.getValue("sats").jsonPrimitive.int, o.getValue("used").jsonPrimitive.int, fOrNull("cn0"))
+            "gnss" -> GnssStatusEvent(t, o.getValue("sats").jsonPrimitive.int, o.getValue("used").jsonPrimitive.int,
+                fOrNull("cn0"), fOrNull("cn0_std"), fOrNull("cn0_max"),
+                iOrNull("used_gps"), iOrNull("used_glo"), iOrNull("used_gal"), iOrNull("used_bds"))
+            "agc" -> AgcEvent(t, f("agc_db"), o.getValue("n").jsonPrimitive.int)
             "clk" -> ClockEvent(t, l("wall_ms"), l("elapsed_ns"), l("mono_ns"))
             "gu" -> GyroUncalEvent(t, f("x"), f("y"), f("z"), f("bx"), f("by"), f("bz"))
             "frame" -> FrameCaptureEvent(t, l("frame_t_ms"), l("cap_ns"))
