@@ -76,7 +76,12 @@ class ReplayerTest {
                     val ll = enu.toLatLon(eMeters, nOffset)
                     val beforeOutage = outage == null || tMs < outage.startMs
                     val speed = if (beforeOutage) (10.0 * (1.0 + speedBiasFracBeforeOutage)).toFloat() else 10f
-                    sensors += LocEvent(tMs, ll[0], ll[1], 3f, speed, 0.3f, 90f, 2f)
+                    // The shifted fix is logged with a plausible (not tiny) accuracy — a real device
+                    // reporting a stale/bad fix rarely also reports millimetre-grade accuracy for it.
+                    // Chosen so the residual would pass Ekf2d's chi-square gate (and so actually pull
+                    // the filter 200 m north) if the replayer failed to skip it as an outage sample.
+                    val accM = if (inOutageWindow) 60f else 3f
+                    sensors += LocEvent(tMs, ll[0], ll[1], accM, speed, 0.3f, 90f, 2f)
                 }
                 if (step % 50 == 0) {
                     val t = t0 + step * 10L
@@ -104,32 +109,42 @@ class ReplayerTest {
     @Test fun visualReplayTracksThroughGpsOutage() {
         val dir = createTempDir()
         val outage = Outage(1_700_000_000_000L + 30_000, 1_700_000_000_000L + 110_000)
-        // GPS logged during the outage is shifted 200 m north of the truth: a real device that keeps
-        // reporting a stale/bad fix while it has no real signal. Replayer must ignore it (`inOutage`
-        // skip) — if that guard were removed, the filter would snap to the shifted fix and the
-        // in-outage error below would spike far past 15 m.
-        val s = session(dir, outage = outage, gpsShiftNDuringOutageM = 200.0)
+        val s = session(dir, outage = outage)
         val t0 = s.header.startedMs
         val points = Replayer(pack(), ReplayConfig()).run(s, listOf(outage))
         val inOutage = points.filter { it.inOutage }
         assertTrue(inOutage.size > 100)
-        val errors = inOutage.map { truthErrorM(it, t0) }
-        val p95Err = p95(errors)
-        assertTrue(p95Err <= 15.0, "P95=$p95Err (shifted-GPS-during-outage guard failed if this is ~200 m)")
+        val errors = inOutage.map { truthErrorM(it, t0) }.sorted()
+        assertTrue(errors[errors.size * 95 / 100] <= 15.0, "P95=${errors[errors.size * 95 / 100]}")
         assertTrue(inOutage.count { it.visAccepted == true } > inOutage.size / 2)
     }
 
     @Test fun deadReckoningWithoutVisualKeepsHeadingOnStraightRoad() {
         val dir = createTempDir()
         val outage = Outage(1_700_000_000_000L + 30_000, 1_700_000_000_000L + 110_000)
-        val s = session(dir, outage = outage)
+        // GPS logged during the outage is shifted 200 m north of the truth: a real device that keeps
+        // reporting a stale/bad fix while it has no real signal. It is also logged with a plausible
+        // (not tiny) accuracy — a device reporting a bad fix rarely also reports millimetre-grade
+        // accuracy for it — so the residual would pass Ekf2d's chi-square gate and actually pull the
+        // filter 200 m north if `Replayer` failed to skip it as an outage sample. With `visual = false`
+        // there is nothing else in this test to mask that pull, so it is the strongest check that
+        // `if (inOutage(t)) continue` is intact.
+        val s = session(dir, outage = outage, gpsShiftNDuringOutageM = 200.0)
         val t0 = s.header.startedMs
         val points = Replayer(pack(), ReplayConfig(visual = false)).run(s, listOf(outage))
         val beforeOutage = points.last { !it.inOutage && it.tMs < outage.startMs }
         val last = points.last { it.inOutage }
         val dist = (last.tMs - outage.startMs) / 1000.0 * 10.0
+        val inOutageErrors = points.filter { it.inOutage }.map { truthErrorM(it, t0) }
         assertTrue(truthErrorM(last, t0) / dist * 100 <= 3.0)
         assertTrue(points.filter { it.inOutage }.all { it.visSim == null })
+        // Stays near truth despite the shifted GPS logged during the outage: a hard absolute cap, well
+        // under the ~200 m the filter would snap to if the shifted fix were consumed instead of skipped.
+        assertTrue(
+            inOutageErrors.max() <= 30.0,
+            "max in-outage error=${inOutageErrors.max()} should stay near truth, not follow the " +
+                "200 m-shifted GPS logged during the outage",
+        )
         // Losing GPS for tens of seconds must inflate the filter's own uncertainty a lot: no position
         // update landed since `outage.startMs`, so sigma should have grown well past its pre-outage
         // value (guards against a Replayer that silently keeps predicting P as if still fixed).
