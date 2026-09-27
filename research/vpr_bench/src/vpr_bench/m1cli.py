@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--out", required=True, type=Path)
     pk.add_argument("--gpx", action="append", default=[], type=Path, help="ограничить базу коридором вдоль треков")
     pk.add_argument("--buffer-m", type=float, default=600.0)
+
+    fe = sub.add_parser("field-eval", help="оценить журнал поездки с телефона")
+    fe.add_argument("--log", required=True, type=Path)
+    fe.add_argument("--refpack", required=True, type=Path)
+    fe.add_argument("--out", required=True, type=Path)
     return parser
 
 
@@ -128,6 +133,25 @@ def _pack(args) -> int:
     return 0
 
 
+def _field_eval(args) -> int:
+    from vpr_bench.fieldlog import evaluate_field, read_log, render_field_report
+    from vpr_bench.refpack import read_refpack
+
+    header, frames = read_log(args.log)
+    if not frames:
+        print("error: log has no frames", file=sys.stderr)
+        return 2
+    rp = read_refpack(args.refpack)
+    results = evaluate_field(frames, rp.lats, rp.lons)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(render_field_report(header, results))
+    for r in results:
+        print(f"{r.mode}: {r.frac_within * 100:.1f}% within {r.threshold_m:g} m "
+              f"(covered {r.n_covered}/{r.n_with_gt}, coverage {r.coverage * 100:.1f}%)")
+    print(f"report -> {args.out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "export-onnx":
@@ -144,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
         return _quantize(args)
     if args.command == "pack-refs":
         return _pack(args)
+    if args.command == "field-eval":
+        return _field_eval(args)
     return 2
 
 
