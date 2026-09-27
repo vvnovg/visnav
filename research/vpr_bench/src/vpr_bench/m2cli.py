@@ -33,7 +33,12 @@ def main(argv: list[str] | None = None) -> int:
     if not result.has_data():
         print("warning: no data to evaluate", file=sys.stderr)
 
-    print(f"P50={result.p50_m:.1f} m P95={result.p95_m:.1f} m over {result.n_points} points -> {args.out}")
+    if result.visual:
+        print(f"P50={result.p50_m:.1f} m P95={result.p95_m:.1f} m over {result.n_points} points -> {args.out}")
+    else:
+        worst = result.worst_drift_pct()
+        weighted = result.weighted_drift_pct()
+        print(f"worst={worst:.2f} % weighted={weighted:.2f} % -> {args.out}")
     return 0
 
 

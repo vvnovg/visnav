@@ -1,4 +1,5 @@
 import json
+import math
 
 import pytest
 
@@ -21,14 +22,15 @@ def _frames(n=120):
     return out
 
 
-def _traj(tmp_path, err_m, visual=True, outage=(30, 90)):
+def _traj(tmp_path, err_m, visual=True, outage=(30, 90), vis_state=lambda s: None, stationary=lambda s: None):
     header = {"type": "replay", "visual": visual, "outages": [[T0 + outage[0] * 1000, T0 + outage[1] * 1000]],
               "session_started_ms": T0, "refpack_created_at": "c"}
     lines = [json.dumps(header)]
     for s in range(1, 119):
         lat, lon = offset_m(LAT0, LON0, err_m(s), 10.0 * s)
         lines.append(json.dumps({"t_ms": T0 + 1000 * s, "lat": lat, "lon": lon, "sigma_m": 5.0,
-                                 "outage": outage[0] <= s < outage[1], "vis_sim": None, "vis_ok": None}))
+                                 "outage": outage[0] <= s < outage[1], "vis_sim": None, "vis_ok": None,
+                                 "vis_state": vis_state(s), "stationary": stationary(s)}))
     p = tmp_path / "traj.jsonl"
     p.write_text("\n".join(lines) + "\n")
     return p
@@ -50,14 +52,135 @@ def test_nfr1_fail_with_large_errors(tmp_path):
 
 
 def test_nfr5_drift_percent(tmp_path):
-    # ошибка растёт линейно: 0.2 м на секунду пропадания → 2 % от 10 м/с
-    header, rows = read_trajectory(_traj(tmp_path, lambda s: 0.2 * max(0, s - 30), visual=False))
+    # Owner decision: the NFR-5 verdict only counts outages >= 1000 m of distance (see
+    # replayeval.VERDICT_MIN_OUTAGE_DIST_M), so this outage runs long enough (105 s at 10 m/s
+    # = 1050 m) to qualify. Error grows 0.2 m per second of outage -> 2 % drift, same as before.
+    header, rows = read_trajectory(_traj(tmp_path, lambda s: 0.2 * max(0, s - 10), visual=False, outage=(10, 115)))
     r = evaluate_replay(header, rows, _frames())
     [o] = r.outages
-    assert o.distance_m == pytest.approx(590.0, rel=0.01)  # 59 интервалов по 10 м
+    assert o.distance_m == pytest.approx(1040.0, rel=0.01)  # 104 интервала по 10 м
     assert o.drift_pct == pytest.approx(2.0, rel=0.05)
     report = render_replay_report(r)
     assert "NFR-5" in report and "✅" in report
+    assert "(ориентир.)" not in report  # 1040 m clears the 1000 m verdict threshold
+
+
+def test_vis_state_counts_and_report_line(tmp_path):
+    # 30 rows in the outage: split ok/gated/below/empty_window/no_desc so each is exactly 20 %.
+    states = ["ok", "gated", "below", "empty_window", "no_desc"]
+
+    def vis_state(s):
+        return states[(s - 30) % 5] if 30 <= s < 90 else None
+
+    header, rows = read_trajectory(_traj(tmp_path, lambda s: 4.0, outage=(30, 90), vis_state=vis_state))
+    r = evaluate_replay(header, rows, _frames())
+    [o] = r.outages
+    assert o.vis_counts == {"ok": 12, "gated": 12, "below": 12, "empty_window": 12, "no_desc": 12}
+    assert r.vis_counts == o.vis_counts
+    report = render_replay_report(r)
+    assert "ok 20 %" in report and "gated 20 %" in report and "no_desc 20 %" in report
+
+
+def test_vis_state_counts_absent_in_dr_mode(tmp_path):
+    """visual=false: vis_counts stay empty (no vis_state line in the DR-mode report)."""
+    header, rows = read_trajectory(_traj(tmp_path, lambda s: 4.0, visual=False, outage=(10, 115)))
+    r = evaluate_replay(header, rows, _frames())
+    assert r.vis_counts == {}
+    assert "визуальные фиксации" not in render_replay_report(r)
+
+
+def test_zupt_false_and_missed_stationary(tmp_path):
+    # Rows in the outage move at 10 m/s (see _frames/GT), so a moving row reporting stationary=True
+    # is a false stop; _frames has no slow/stopped GT here, so we only exercise false-stationary,
+    # and rows without the field (None) must not be counted at all.
+    def stationary(s):
+        if not (30 <= s < 90):
+            return None
+        return s < 60  # first half falsely reports stationary, second half correctly does not
+
+    header, rows = read_trajectory(_traj(tmp_path, lambda s: 4.0, outage=(30, 90), stationary=stationary))
+    r = evaluate_replay(header, rows, _frames())
+    [o] = r.outages
+    assert o.false_stationary_pct == pytest.approx(50.0, abs=1.0)
+
+
+def test_zupt_stats_are_nan_when_stationary_field_is_absent(tmp_path):
+    header, rows = read_trajectory(_traj(tmp_path, lambda s: 4.0, outage=(30, 90)))
+    r = evaluate_replay(header, rows, _frames())
+    [o] = r.outages
+    assert math.isnan(o.false_stationary_pct)
+    assert math.isnan(o.missed_stationary_pct)
+
+
+def test_p95_second_half_of_outage(tmp_path):
+    # Error is 1 m in the first half of the outage, 10 m in the second half: P95 of the whole
+    # outage would blend both, but the second-half-only column must reflect only the 10 m rows.
+    def err_m(s):
+        if not (30 <= s < 90):
+            return 0.0
+        return 1.0 if s < 60 else 10.0
+
+    header, rows = read_trajectory(_traj(tmp_path, err_m, visual=False, outage=(30, 90)))
+    r = evaluate_replay(header, rows, _frames())
+    [o] = r.outages
+    assert o.p95_second_half_m == pytest.approx(10.0, abs=0.5)
+
+
+def test_weighted_drift_pct_combines_outages_by_distance(tmp_path):
+    # Two long (>=1000 m) outages with different drift: the weighted figure must fall strictly
+    # between the two, not just average them unweighted (distances differ 2x).
+    def err_m(s):
+        if 10 <= s < 115:  # 105 s ~ 1050 m, drift 1 %
+            return 0.1 * (s - 10)
+        if 200 <= s < 260:  # 60 s ~ 600 m... too short to qualify; use a second >=1000 m outage instead
+            return 0.0
+        return 0.0
+
+    header = {"type": "replay", "visual": False,
+              "outages": [[T0 + 10_000, T0 + 115_000], [T0 + 130_000, T0 + 245_000]],
+              "session_started_ms": T0, "refpack_created_at": "c"}
+    lines = [json.dumps(header)]
+    for s in range(1, 250):
+        if 10 <= s < 115:
+            err = 0.1 * (s - 10)  # -> 1 % drift over ~1050 m
+        elif 130 <= s < 245:
+            err = 0.4 * (s - 130)  # -> 4 % drift over ~1150 m
+        else:
+            err = 0.0
+        lat, lon = offset_m(LAT0, LON0, err, 10.0 * s)
+        lines.append(json.dumps({"t_ms": T0 + 1000 * s, "lat": lat, "lon": lon, "sigma_m": 5.0,
+                                 "outage": (10 <= s < 115) or (130 <= s < 245),
+                                 "vis_sim": None, "vis_ok": None, "vis_state": None, "stationary": None}))
+    p = tmp_path / "traj.jsonl"
+    p.write_text("\n".join(lines) + "\n")
+
+    header_out, rows = read_trajectory(p)
+    r = evaluate_replay(header_out, rows, _frames(n=250))
+    worst = r.worst_drift_pct()
+    weighted = r.weighted_drift_pct()
+    assert worst == pytest.approx(4.0, rel=0.1)
+    assert weighted < worst
+    assert weighted > 1.0
+
+
+def test_read_trajectory_empty_file_raises(tmp_path):
+    p = tmp_path / "empty.jsonl"
+    p.write_text("")
+    with pytest.raises(ValueError, match="empty"):
+        read_trajectory(p)
+
+
+def test_nfr5_short_outage_is_indicative_only(tmp_path):
+    """An outage under 1000 m still appears in the table (marked "(ориентир.)") but is excluded
+    from the pass/fail verdict — the pre-2026-09-27 200 m threshold would have graded it."""
+    header, rows = read_trajectory(_traj(tmp_path, lambda s: 0.2 * max(0, s - 30), visual=False))  # 590 m, outage=(30, 90)
+    r = evaluate_replay(header, rows, _frames())
+    [o] = r.outages
+    assert o.distance_m == pytest.approx(590.0, rel=0.01)
+    report = render_replay_report(r)
+    assert "нет пропаданий" in report
+    assert "✅" not in report and "❌" not in report
+    assert "(ориентир.)" in report
 
 
 def test_cli_writes_report(tmp_path):
