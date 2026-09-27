@@ -21,7 +21,14 @@ def parse_gpx(path: Path) -> list[TrackPoint]:
         if time_el is None or not time_el.text:
             continue
         t = datetime.fromisoformat(time_el.text.strip().replace("Z", "+00:00")).timestamp()
-        points.append(TrackPoint(t, float(el.get("lat")), float(el.get("lon"))))
+        hdop_el = next((c for c in el if c.tag.endswith("hdop")), None)
+        hdop: float | None = None
+        if hdop_el is not None and hdop_el.text:
+            try:
+                hdop = float(hdop_el.text.strip())
+            except ValueError:
+                hdop = None
+        points.append(TrackPoint(t, float(el.get("lat")), float(el.get("lon")), hdop))
     points.sort(key=lambda p: p.t)
     return points
 

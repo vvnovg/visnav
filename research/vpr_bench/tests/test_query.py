@@ -232,3 +232,31 @@ def test_extract_drops_stationary_frames(tmp_path):
 
     assert len(places) == 0  # All frames filtered due to zero speed
     assert read_places(tmp_path / "q" / "queries.csv") == []
+
+
+def test_parse_gpx_reads_hdop(tmp_path):
+    gpx = """<?xml version="1.0"?>
+<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
+<trk><trkseg>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:00Z</time><hdop>1.5</hdop></trkpt>
+<trkpt lat="55.7510" lon="37.6000"><time>2026-09-20T10:00:10Z</time></trkpt>
+</trkseg></trk></gpx>
+"""
+    p = tmp_path / "hdop.gpx"
+    p.write_text(gpx)
+    track = parse_gpx(p)
+    assert track[0].hdop == pytest.approx(1.5)
+    assert track[1].hdop is None
+
+
+def test_parse_gpx_unparsable_hdop_is_none(tmp_path):
+    gpx = """<?xml version="1.0"?>
+<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
+<trk><trkseg>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:00Z</time><hdop>bad</hdop></trkpt>
+</trkseg></trk></gpx>
+"""
+    p = tmp_path / "hdop_bad.gpx"
+    p.write_text(gpx)
+    track = parse_gpx(p)
+    assert track[0].hdop is None
