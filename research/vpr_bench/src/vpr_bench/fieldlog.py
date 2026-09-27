@@ -180,7 +180,7 @@ def render_field_report(header: dict, results: list[FieldResult], target: float 
     if any(gps_lag_warnings(results)):
         lines.append("")
     lines += [
-        "| Режим | Кадров | С GPS | Стоп | Покрытие, % | ≤ порога, % | Медиана, м | P95, м "
+        "| Режим | Кадров | С GPS, в движении | Стоп | Покрытие, % | ≤ порога, % | Медиана, м | P95, м "
         "| Инференс p50/p95, мс | Всего p50/p95, мс | Лаг GPS p50/p95, мс | Критерий |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]

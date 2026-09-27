@@ -26,8 +26,8 @@ adb shell mkdir -p /sdcard/Android/data/io.visnav.app/files/refpack
 adb push /Users/vvnovg/navigator/research/vpr_bench/data/m1/bundle/. /sdcard/Android/data/io.visnav.app/files/refpack/
 ```
 Запустить приложение: в статусе должно быть «База: N эталонов … parity cos=0.99xx».
-Проверка: `adb pull /sdcard/Android/data/io.visnav.app/files/logs/parity.json` — `cosine` ≥ 0.98
-(расхождение только из-за различий ресайза и float16 не должно быть больше).
+Проверка: `adb pull /sdcard/Android/data/io.visnav.app/files/logs/parity.json` — смотреть `cosine`
+по критерию ниже (в зависимости от того, FP32 модель или INT8).
 
 Что именно сверяет parity: ORT на ARM (телефон) против ORT на x86 (ПК, `make-parity`) на одном и том же
 `input.png` (уже приведённом к размеру входа модели — ресайз не участвует в сравнении) — то есть только

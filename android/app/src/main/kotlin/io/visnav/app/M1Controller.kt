@@ -138,17 +138,25 @@ class M1Controller(private val context: Context) {
             frameAnalyzer.onError = { t ->
                 _state.update { it.copy(errors = it.errors + 1, status = "Ошибка кадра (анализ): ${t.message}") }
             }
-            frameAnalyzer.onFrame = { tMs, rgb, preMs ->
-                try {
-                    if (!headerWritten) {
-                        headerWritten = true
+            frameAnalyzer.onFrame = onFrame@{ tMs, rgb, preMs ->
+                if (!headerWritten) {
+                    try {
                         log.header(SessionHeader(
                             model = b.meta.model, refpackCreatedAt = b.meta.createdAt,
                             device = "${Build.MANUFACTURER} ${Build.MODEL}; " +
                                 "analysis ${frameAnalyzer.lastFrameW}x${frameAnalyzer.lastFrameH}",
                             startedMs = startedMs, mode = mode.name.lowercase(),
                         ))
+                        headerWritten = true
+                    } catch (e: Exception) {
+                        // Заголовок — первая строка журнала; если его не удалось записать, сессию
+                        // нельзя продолжать (журнал без заголовка бесполезен для field-eval) —
+                        // останавливаем её тем же путём, что и сбой в start().
+                        failSession(frameAnalyzer, log, "Ошибка записи заголовка сессии: ${e.message}")
+                        return@onFrame
                     }
+                }
+                try {
                     val fix = gps.fresh()
                     val rec = pipeline.process(tMs, rgb, b.meta.inputW, b.meta.inputH, fix, preMs)
                     log.frame(rec)
@@ -201,6 +209,27 @@ class M1Controller(private val context: Context) {
             }
         }
         _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}") }
+    }
+
+    /**
+     * Тот же путь остановки, что и сбой в start() после CAS, но вызываемый уже из-под onFrame —
+     * когда сессия technically "running", но продолжать её нельзя (например, не удалось записать
+     * заголовок журнала). Мы уже на потоке анализа (executor), поэтому log.close() можно вызвать
+     * напрямую, без дополнительного execute{}.
+     */
+    private fun failSession(frameAnalyzer: FrameAnalyzer, log: SessionLogger, message: String) {
+        if (!runningFlag.compareAndSet(true, false)) return
+        frameAnalyzer.onFrame = null
+        frameAnalyzer.onError = null
+        gps.stop()
+        if (logger === log) logger = null
+        try {
+            log.close()
+        } catch (closeError: Exception) {
+            _state.update { it.copy(running = false, status = "$message; ошибка закрытия журнала: ${closeError.message}") }
+            return
+        }
+        _state.update { it.copy(running = false, status = message) }
     }
 
     /** Освобождает камеру/GPS/логгер/модель. Вызывать один раз при уничтожении владельца. */
