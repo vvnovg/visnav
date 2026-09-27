@@ -13,6 +13,7 @@ class LocalizationPipeline(
     private val priorPolicy: PriorPolicy,
     private val k: Int = 5,
     private val nanoTime: () -> Long = System::nanoTime,
+    private val onDescriptor: ((tMs: Long, desc: FloatArray) -> Unit)? = null,
 ) {
     private val index = GeoIndex(pack)
 
@@ -21,6 +22,7 @@ class LocalizationPipeline(
         val t0 = nanoTime()
         val desc = embedder.embed(rgb, width, height)
         val t1 = nanoTime()
+        onDescriptor?.invoke(tMs, desc)
         val prior = priorPolicy.prior(tMs)
         val hits = index.search(desc, k, prior?.lat, prior?.lon, prior?.radiusM)
         val t2 = nanoTime()

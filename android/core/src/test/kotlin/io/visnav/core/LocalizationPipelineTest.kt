@@ -52,4 +52,12 @@ class LocalizationPipelineTest {
         assertEquals(55.7518, prior.lat)
         assertEquals(530.0, prior.radiusM, 1e-9) // 500 м + 30 м/с × 1 с
     }
+
+    @Test fun reportsDescriptorOfEveryFrame() {
+        val seen = mutableListOf<Pair<Long, List<Float>>>()
+        val p = LocalizationPipeline(pack, FakeEmbedder(floatArrayOf(0f, 1f, 0f)), PriorPolicy(PriorMode.GPS),
+            nanoTime = clock(0, 0, 0), onDescriptor = { t, d -> seen.add(t to d.toList()) })
+        p.process(1_000, ByteArray(12), 2, 2, gps = null, preMs = 0.0)
+        assertEquals(listOf(1_000L to listOf(0f, 1f, 0f)), seen)
+    }
 }

@@ -17,10 +17,37 @@ class GpsSource(context: Context) : LocationListener {
 
     @Volatile private var latest: TimedFix? = null
 
-    @SuppressLint("MissingPermission") // разрешение проверяет MainActivity до start()
-    fun start() = lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this, Looper.getMainLooper())
+    @Volatile var onLoc: ((io.visnav.core.LocEvent) -> Unit)? = null
+    @Volatile var onGnss: ((io.visnav.core.GnssStatusEvent) -> Unit)? = null
+    private val gnssExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val gnssCallback = object : android.location.GnssStatus.Callback() {
+        override fun onSatelliteStatusChanged(status: android.location.GnssStatus) {
+            val cb = onGnss ?: return
+            var used = 0
+            var cn0Sum = 0.0
+            for (i in 0 until status.satelliteCount) {
+                if (status.usedInFix(i)) { used++; cn0Sum += status.getCn0DbHz(i) }
+            }
+            cb(io.visnav.core.GnssStatusEvent(System.currentTimeMillis().toDouble(), status.satelliteCount, used,
+                if (used > 0) (cn0Sum / used).toFloat() else null))
+        }
+    }
 
-    fun stop() = lm.removeUpdates(this)
+    @SuppressLint("MissingPermission") // разрешение проверяет MainActivity до start()
+    fun start() {
+        lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this, Looper.getMainLooper())
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            lm.registerGnssStatusCallback(gnssExecutor, gnssCallback)
+        } else {
+            @Suppress("DEPRECATION")
+            lm.registerGnssStatusCallback(gnssCallback, android.os.Handler(Looper.getMainLooper()))
+        }
+    }
+
+    fun stop() {
+        lm.removeUpdates(this)
+        lm.unregisterGnssStatusCallback(gnssCallback)
+    }
 
     /**
      * Последняя GPS-фиксация не старше maxAgeMs, иначе null. Свежесть считается по монотонным
@@ -39,6 +66,13 @@ class GpsSource(context: Context) : LocationListener {
         val nowElapsedNanos = SystemClock.elapsedRealtimeNanos()
         val tMs = System.currentTimeMillis() - (nowElapsedNanos - l.elapsedRealtimeNanos) / 1_000_000
         latest = TimedFix(GpsFix(l.latitude, l.longitude, l.accuracy, tMs), l.elapsedRealtimeNanos)
+        onLoc?.invoke(io.visnav.core.LocEvent(
+            tMs.toDouble(), l.latitude, l.longitude, l.accuracy,
+            if (l.hasSpeed()) l.speed else null,
+            if (l.hasSpeedAccuracy()) l.speedAccuracyMetersPerSecond else null,
+            if (l.hasBearing()) l.bearing else null,
+            if (l.hasBearingAccuracy()) l.bearingAccuracyDegrees else null,
+        ))
     }
 
     // На API 29 эти методы ещё абстрактные — реализуем явно.

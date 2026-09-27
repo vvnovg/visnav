@@ -13,12 +13,15 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import io.visnav.core.DescriptorLogWriter
 import io.visnav.core.Geo
 import io.visnav.core.LocalizationPipeline
 import io.visnav.core.PriorMode
 import io.visnav.core.PriorPolicy
+import io.visnav.core.SensorLogger
 import io.visnav.core.SessionHeader
 import io.visnav.core.SessionLogger
+import java.io.Closeable
 import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -55,10 +58,13 @@ class M1Controller(private val context: Context) {
     private val logDir = File(filesDir, "logs")
     private val executor = Executors.newSingleThreadExecutor()
     private val gps = GpsSource(context)
+    private val sensors = SensorRecorder(context)
     private val analyzer = AtomicReference<FrameAnalyzer?>(null)
     private val runningFlag = AtomicBoolean(false)
     @Volatile private var bundle: LoadedBundle? = null
     @Volatile private var logger: SessionLogger? = null
+    @Volatile private var sensorLog: SensorLogger? = null
+    @Volatile private var descLog: DescriptorLogWriter? = null
 
     init {
         executor.execute {
@@ -125,16 +131,26 @@ class M1Controller(private val context: Context) {
                 return
             }
             val mode = _state.value.mode
-            val pipeline = LocalizationPipeline(b.pack, b.embedder, PriorPolicy(mode))
             logDir.mkdirs()
             val startedMs = System.currentTimeMillis()
-            val log = SessionLogger(File(logDir, "session-$startedMs-${mode.name.lowercase()}.jsonl"))
+            val base = "session-$startedMs-${mode.name.lowercase()}"
+            val log = SessionLogger(File(logDir, "$base.jsonl"))
             logger = log
+            val sLog = SensorLogger(File(logDir, "$base.sensors.jsonl")).also { it.header(startedMs) }
+            sensorLog = sLog
+            val dLog = DescriptorLogWriter(File(logDir, "$base.desc"), b.pack.dim)
+            descLog = dLog
+            val pipeline = LocalizationPipeline(b.pack, b.embedder, PriorPolicy(mode), onDescriptor = { t, d -> dLog.write(t, d) })
             // Заголовок пишется не здесь, а при первом кадре: только тогда известно фактическое
             // разрешение анализа (device string включает "analysis WxH", см. C2), но первой строкой
             // журнала он всё равно останется — до первого кадра ничего больше не пишется.
             var headerWritten = false
+            gps.onLoc = { sLog.event(it) }
+            gps.onGnss = { sLog.event(it) }
             gps.start()
+            if (!sensors.start { sLog.event(it) }) {
+                _state.update { it.copy(status = it.status + " · нет гироскопа/акселерометра — датчики не пишутся") }
+            }
             frameAnalyzer.onError = { t ->
                 _state.update { it.copy(errors = it.errors + 1, status = "Ошибка кадра (анализ): ${t.message}") }
             }
@@ -180,9 +196,18 @@ class M1Controller(private val context: Context) {
             runningFlag.set(false)
             analyzer.get()?.onFrame = null
             analyzer.get()?.onError = null
+            sensors.stop()
+            gps.onLoc = null
+            gps.onGnss = null
             gps.stop()
             val log = logger
             logger = null
+            val sLog = sensorLog
+            sensorLog = null
+            val dLog = descLog
+            descLog = null
+            closeQuietly("журнала датчиков", sLog)
+            closeQuietly("журнала дескрипторов", dLog)
             try {
                 log?.close()
             } catch (closeError: Exception) {
@@ -197,9 +222,17 @@ class M1Controller(private val context: Context) {
         if (!runningFlag.compareAndSet(true, false)) return
         analyzer.get()?.onFrame = null
         analyzer.get()?.onError = null
+        sensors.stop()
+        gps.onLoc = null
+        gps.onGnss = null
         gps.stop()
         val log = logger
         logger = null
+        val sLog = sensorLog
+        sensorLog = null
+        val dLog = descLog
+        descLog = null
+        val skipped = sLog?.skipped ?: 0
         // Закрываем на потоке анализа — после кадра, который, возможно, ещё обрабатывается.
         executor.execute {
             try {
@@ -207,8 +240,13 @@ class M1Controller(private val context: Context) {
             } catch (e: Exception) {
                 _state.update { it.copy(status = it.status + " · ошибка закрытия журнала: ${e.message}") }
             }
+            closeQuietly("журнала датчиков", sLog)
+            closeQuietly("журнала дескрипторов", dLog)
         }
-        _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}") }
+        _state.update {
+            it.copy(running = false, status = "Остановлено, кадров: ${it.frames}" +
+                if (skipped > 0) " · пропущено датчиков: $skipped" else "")
+        }
     }
 
     /**
@@ -221,8 +259,17 @@ class M1Controller(private val context: Context) {
         if (!runningFlag.compareAndSet(true, false)) return
         frameAnalyzer.onFrame = null
         frameAnalyzer.onError = null
+        sensors.stop()
+        gps.onLoc = null
+        gps.onGnss = null
         gps.stop()
         if (logger === log) logger = null
+        val sLog = sensorLog
+        sensorLog = null
+        val dLog = descLog
+        descLog = null
+        closeQuietly("журнала датчиков", sLog)
+        closeQuietly("журнала дескрипторов", dLog)
         try {
             log.close()
         } catch (closeError: Exception) {
@@ -235,9 +282,16 @@ class M1Controller(private val context: Context) {
     /** Освобождает камеру/GPS/логгер/модель. Вызывать один раз при уничтожении владельца. */
     fun close() {
         if (runningFlag.get()) stop()
+        sensors.stop()
+        gps.onLoc = null
+        gps.onGnss = null
         gps.stop()
         val log = logger
         logger = null
+        val sLog = sensorLog
+        sensorLog = null
+        val dLog = descLog
+        descLog = null
         // bundle читаем внутри задачи на том же executor, а не здесь: если close() позвали, пока
         // init ещё грузит бандл на этом же executor, эта задача выполнится после неё и увидит уже
         // присвоенный bundle — иначе только что созданный OrtEmbedder не закрылся бы никогда.
@@ -247,8 +301,18 @@ class M1Controller(private val context: Context) {
             } catch (e: Exception) {
                 _state.update { it.copy(status = it.status + " · ошибка закрытия журнала: ${e.message}") }
             }
+            closeQuietly("журнала датчиков", sLog)
+            closeQuietly("журнала дескрипторов", dLog)
             bundle?.embedder?.close()
         }
         executor.shutdown()
+    }
+
+    private fun closeQuietly(label: String, closeable: Closeable?) {
+        try {
+            closeable?.close()
+        } catch (e: Exception) {
+            _state.update { it.copy(status = it.status + " · ошибка закрытия $label: ${e.message}") }
+        }
     }
 }
