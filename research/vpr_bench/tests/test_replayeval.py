@@ -163,6 +163,33 @@ def test_weighted_drift_pct_combines_outages_by_distance(tmp_path):
     assert weighted > 1.0
 
 
+def test_whole_trajectory_diagnostics_shown_with_no_outages(tmp_path):
+    """No outages at all -> has_data() is False (nothing to grade for NFR-1/5), but the
+    whole-trajectory vis_state and ZUPT shares must still be computed and always printed —
+    they're useful diagnostics for the very first drive, before any outage is even replayed."""
+    header = {"type": "replay", "visual": True, "outages": [], "session_started_ms": T0, "refpack_created_at": "c"}
+    lines = [json.dumps(header)]
+    states = ["ok", "gated", "below", "empty_window", "no_desc"]
+    for s in range(1, 119):
+        lat, lon = offset_m(LAT0, LON0, 3.0, 10.0 * s)
+        lines.append(json.dumps({"t_ms": T0 + 1000 * s, "lat": lat, "lon": lon, "sigma_m": 5.0,
+                                 "outage": False, "vis_sim": None, "vis_ok": None,
+                                 "vis_state": states[s % 5], "stationary": s % 2 == 0}))
+    p = tmp_path / "traj.jsonl"
+    p.write_text("\n".join(lines) + "\n")
+
+    header_out, rows = read_trajectory(p)
+    r = evaluate_replay(header_out, rows, _frames())
+    assert not r.has_data()  # no outages -> nothing to grade
+    assert sum(r.vis_counts.values()) == 118  # every row counted, not just in-outage ones
+    assert not math.isnan(r.false_stationary_pct) or not math.isnan(r.missed_stationary_pct)
+
+    report = render_replay_report(r)
+    assert "нет данных для проверки" in report  # still no NFR verdict
+    assert "визуальные фиксации:" in report  # but the whole-trajectory shares are printed anyway
+    assert "ZUPT по всей траектории" in report
+
+
 def test_read_trajectory_empty_file_raises(tmp_path):
     p = tmp_path / "empty.jsonl"
     p.write_text("")

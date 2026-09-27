@@ -51,7 +51,13 @@ class ReplayResult:
     p50_m: float
     p95_m: float
     outages: list[OutageResult]
-    vis_counts: dict[str, int] = field(default_factory=dict)
+    # Whole-trajectory diagnostics (not just within outage windows) — always computed and always
+    # shown in the report, independent of has_data(): a trajectory can have "no data" for the NFR
+    # verdict (e.g. no outages at all) while still being worth checking for a sane no_desc rate or
+    # ZUPT behavior on the very first drive (see docs/research/m2a-replay.md "Первый прогон").
+    vis_counts: dict[str, int] = field(default_factory=dict)  # only populated when visual
+    false_stationary_pct: float = float("nan")
+    missed_stationary_pct: float = float("nan")
 
     def has_data(self, min_outage_dist_m: float = TABLE_MIN_OUTAGE_DIST_M) -> bool:
         """Check if there is data to evaluate: visual mode needs n_points > 0;
@@ -109,7 +115,7 @@ def read_trajectory(path: Path) -> tuple[dict, list[TrajRow]]:
     return header, rows
 
 
-def _outage_zupt_stats(
+def _zupt_stats(
     rows: list[TrajRow],
     track,
     times: list[float],
@@ -118,7 +124,9 @@ def _outage_zupt_stats(
 ) -> tuple[float, float]:
     """Ложная стоянка: доля движущихся (GT >= min_speed_mps) строк с stationary=true.
     Пропущенная стоянка: доля строк с GT < 0.5 м/с и stationary=false. Строки без поля
-    `stationary` (старые траектории) пропускаются из обеих статистик."""
+    `stationary` (старые траектории) пропускаются из обеих статистик. `rows` может быть как всей
+    траекторией, так и подмножеством (например, только строки одного пропадания) — вызывающий код
+    решает, над каким подмножением считать."""
     n_moving = n_moving_false_stationary = 0
     n_slow = n_slow_missed = 0
     for r in rows:
@@ -156,7 +164,6 @@ def evaluate_replay(
     times = [p.t for p in track]
     all_errors: list[float] = []
     outages: list[OutageResult] = []
-    overall_vis_counts: dict[str, int] = {s: 0 for s in VIS_STATES}
     for start_ms, end_ms in header["outages"]:
         mid_ms = (start_ms + end_ms) / 2.0
         rows_in_outage = [r for r in rows if start_ms <= r.t_ms < end_ms]
@@ -186,8 +193,7 @@ def evaluate_replay(
             for r in rows_in_outage:
                 if r.vis_state in vis_counts:
                     vis_counts[r.vis_state] += 1
-                    overall_vis_counts[r.vis_state] += 1
-        false_pct, missed_pct = _outage_zupt_stats(rows_in_outage, track, times, max_gap_s, min_speed_mps)
+        false_pct, missed_pct = _zupt_stats(rows_in_outage, track, times, max_gap_s, min_speed_mps)
         outages.append(OutageResult(
             start_ms, end_ms, len(errors), distance, final, drift,
             p95_second_half_m=p95_second_half, vis_counts=vis_counts,
@@ -195,13 +201,25 @@ def evaluate_replay(
         ))
         all_errors.extend(errors)
     arr = np.array(all_errors) if all_errors else np.array([float("nan")])
+
+    # Whole-trajectory diagnostics — over every row, not just those inside an outage window (and
+    # regardless of whether there are any outages at all).
+    whole_vis_counts = {s: 0 for s in VIS_STATES}
+    if visual:
+        for r in rows:
+            if r.vis_state in whole_vis_counts:
+                whole_vis_counts[r.vis_state] += 1
+    whole_false_pct, whole_missed_pct = _zupt_stats(rows, track, times, max_gap_s, min_speed_mps)
+
     return ReplayResult(
         visual=visual,
         n_points=len(all_errors),
         p50_m=float(np.quantile(arr, 0.5, method="higher")),
         p95_m=float(np.quantile(arr, 0.95, method="higher")),
         outages=outages,
-        vis_counts=overall_vis_counts if visual else {},
+        vis_counts=whole_vis_counts if visual else {},
+        false_stationary_pct=whole_false_pct,
+        missed_stationary_pct=whole_missed_pct,
     )
 
 
@@ -223,7 +241,6 @@ def render_replay_report(r: ReplayResult, min_outage_dist_m: float = TABLE_MIN_O
         lines += [
             f"Режим: визуальные фиксации. NFR-1: P50 ≤ 5 м, P95 ≤ 15 м — "
             f"P50 = {r.p50_m:.1f} м, P95 = {r.p95_m:.1f} м, точек {r.n_points} {'✅' if ok else '❌'}",
-            _vis_state_line(r.vis_counts),
         ]
     else:
         long = r._qualifying_outages(VERDICT_MIN_OUTAGE_DIST_M)
@@ -241,6 +258,15 @@ def render_replay_report(r: ReplayResult, min_outage_dist_m: float = TABLE_MIN_O
                 f"худший {worst:.2f} %, взвешенный {weighted:.2f} % по {len(long)} пропаданиям "
                 f"≥ {VERDICT_MIN_OUTAGE_DIST_M:.0f} м {'✅' if ok else '❌'}",
             ]
+    # Whole-trajectory diagnostics — always shown, independent of has_data() above: useful even when
+    # there's no NFR verdict yet (e.g. no outages replayed), see docs/research/m2a-replay.md.
+    lines.append("")
+    if r.visual:
+        lines.append(_vis_state_line(r.vis_counts))
+    lines.append(
+        f"ZUPT по всей траектории: ложная стоянка {r.false_stationary_pct:.1f} %, "
+        f"пропущенная стоянка {r.missed_stationary_pct:.1f} %"
+    )
     lines += [
         "",
         "| Пропадание, с | Точек | Путь, м | Ошибка в конце, м | Дрейф, % | P95 2-я половина, м "
