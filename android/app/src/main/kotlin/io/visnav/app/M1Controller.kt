@@ -164,10 +164,12 @@ class M1Controller(private val context: Context) {
         gps.stop()
         val log = logger
         logger = null
-        val embedder = bundle?.embedder
+        // bundle читаем внутри задачи на том же executor, а не здесь: если close() позвали, пока
+        // init ещё грузит бандл на этом же executor, эта задача выполнится после неё и увидит уже
+        // присвоенный bundle — иначе только что созданный OrtEmbedder не закрылся бы никогда.
         executor.execute {
             log?.close()
-            embedder?.close()
+            bundle?.embedder?.close()
         }
         executor.shutdown()
     }
