@@ -81,6 +81,7 @@ class TrackPoint:
     t: float  # unix-время, секунды
     lat: float
     lon: float
+    hdop: float | None = None
 
 
 def interpolate_track(track: list[TrackPoint], t: float) -> tuple[float, float] | None:

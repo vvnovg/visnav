@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
 import sys
@@ -14,7 +15,7 @@ from vpr_bench.geo import BBox
 from vpr_bench.mapillary import MapillaryClient
 from vpr_bench.models import MODEL_SPECS, pick_device
 from vpr_bench.pipeline import run_benchmark
-from vpr_bench.query import extract_query_frames, parse_gpx
+from vpr_bench.query import clean_track, extract_query_frames, parse_gpx
 from vpr_bench.report import render_report
 
 
@@ -54,6 +55,15 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--gpx", required=True, type=Path)
     q.add_argument("--video-start", required=True, help="ISO-время первого кадра, напр. 2026-09-20T10:00:03+03:00")
     q.add_argument("--every", type=float, default=1.0, help="шаг между кадрами, с")
+    q.add_argument(
+        "--max-gap-s", type=float, default=3.0,
+        help="макс. разрыв между точками GPX вокруг окна кадра, с",
+    )
+    q.add_argument("--max-speed", type=float, default=70.0, help="макс. правдоподобная скорость трека, м/с")
+    q.add_argument(
+        "--max-hdop", type=float, default=5.0,
+        help="макс. допустимый HDOP точки трека; 0 отключает проверку",
+    )
     q.add_argument("--out", required=True, type=Path)
 
     b = sub.add_parser("bench", help="сравнить модели")
@@ -110,10 +120,30 @@ def main(argv: list[str] | None = None) -> int:
         if args.every <= 0:
             print("error: --every must be > 0", file=sys.stderr)
             return 2
-        track = parse_gpx(args.gpx)
+        if args.max_gap_s <= 0:
+            print("error: --max-gap-s must be > 0", file=sys.stderr)
+            return 2
+        if args.max_speed <= 0:
+            print("error: --max-speed must be > 0", file=sys.stderr)
+            return 2
+        max_hdop = args.max_hdop if args.max_hdop > 0 else None
+        raw_track = parse_gpx(args.gpx)
+        track, track_counts = clean_track(raw_track, max_speed_mps=args.max_speed, max_hdop=max_hdop)
         start = video_start_dt.timestamp()
-        places = extract_query_frames(args.video, track, start, args.every, args.out)
+        frame_stats: collections.Counter = collections.Counter()
+        places = extract_query_frames(
+            args.video, track, start, args.every, args.out,
+            max_gap_s=args.max_gap_s, stats=frame_stats,
+        )
         print(f"{len(places)} query frames -> {args.out / 'queries.csv'}")
+        print(
+            "track: removed hdop={hdop} spoof={spoof} detached={detached}; "
+            "frames: kept={kept} no_pose={no_pose} gap={gap} stationary={stationary}".format(
+                **track_counts,
+                kept=frame_stats["kept"], no_pose=frame_stats["no_pose"],
+                gap=frame_stats["gap"], stationary=frame_stats["stationary"],
+            )
+        )
         return 0
 
     model_names = [m.strip() for m in args.models.split(",") if m.strip()]

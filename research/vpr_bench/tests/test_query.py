@@ -7,11 +7,22 @@ import pytest
 from vpr_bench.dataset import read_places
 from vpr_bench.query import extract_query_frames, parse_gpx, pose_at
 
+# Points every 2 s (well within the default max_gap_s=3.0 gap guard) along
+# the same straight line as the original 3-point fixture, so every
+# interpolated value stays bit-for-bit identical.
 GPX = """<?xml version="1.0"?>
 <gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
 <trk><trkseg>
-<trkpt lat="55.7510" lon="37.6000"><time>2026-09-20T10:00:10Z</time></trkpt>
+<trkpt lat="55.7502" lon="37.6000"><time>2026-09-20T10:00:02Z</time></trkpt>
 <trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:00Z</time></trkpt>
+<trkpt lat="55.7504" lon="37.6000"><time>2026-09-20T10:00:04Z</time></trkpt>
+<trkpt lat="55.7506" lon="37.6000"><time>2026-09-20T10:00:06Z</time></trkpt>
+<trkpt lat="55.7508" lon="37.6000"><time>2026-09-20T10:00:08Z</time></trkpt>
+<trkpt lat="55.7510" lon="37.6000"><time>2026-09-20T10:00:10Z</time></trkpt>
+<trkpt lat="55.7512" lon="37.6000"><time>2026-09-20T10:00:12Z</time></trkpt>
+<trkpt lat="55.7514" lon="37.6000"><time>2026-09-20T10:00:14Z</time></trkpt>
+<trkpt lat="55.7516" lon="37.6000"><time>2026-09-20T10:00:16Z</time></trkpt>
+<trkpt lat="55.7518" lon="37.6000"><time>2026-09-20T10:00:18Z</time></trkpt>
 <trkpt lat="55.7520" lon="37.6000"><time>2026-09-20T10:00:20Z</time></trkpt>
 </trkseg></trk></gpx>
 """
@@ -33,7 +44,7 @@ def _write_video(path, n_frames, fps):
 
 
 def test_parse_gpx_sorts_by_time(track):
-    assert [p.t - T0 for p in track] == [0.0, 10.0, 20.0]
+    assert [p.t - T0 for p in track] == [float(t) for t in range(0, 21, 2)]
     assert track[0].lat == 55.75
 
 
@@ -105,10 +116,31 @@ class FakeCapture:
         self._opened = False
 
 
+# Same 2 s cadence as GPX above, along the same line as the original 2-point
+# wide fixture (so WIDE_LAT0 / WIDE_DEG_PER_S below still hold exactly).
 WIDE_GPX = """<?xml version="1.0"?>
 <gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
 <trk><trkseg>
 <trkpt lat="55.7490" lon="37.6000"><time>2026-09-20T09:59:50Z</time></trkpt>
+<trkpt lat="55.7492" lon="37.6000"><time>2026-09-20T09:59:52Z</time></trkpt>
+<trkpt lat="55.7494" lon="37.6000"><time>2026-09-20T09:59:54Z</time></trkpt>
+<trkpt lat="55.7496" lon="37.6000"><time>2026-09-20T09:59:56Z</time></trkpt>
+<trkpt lat="55.7498" lon="37.6000"><time>2026-09-20T09:59:58Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:00Z</time></trkpt>
+<trkpt lat="55.7502" lon="37.6000"><time>2026-09-20T10:00:02Z</time></trkpt>
+<trkpt lat="55.7504" lon="37.6000"><time>2026-09-20T10:00:04Z</time></trkpt>
+<trkpt lat="55.7506" lon="37.6000"><time>2026-09-20T10:00:06Z</time></trkpt>
+<trkpt lat="55.7508" lon="37.6000"><time>2026-09-20T10:00:08Z</time></trkpt>
+<trkpt lat="55.7510" lon="37.6000"><time>2026-09-20T10:00:10Z</time></trkpt>
+<trkpt lat="55.7512" lon="37.6000"><time>2026-09-20T10:00:12Z</time></trkpt>
+<trkpt lat="55.7514" lon="37.6000"><time>2026-09-20T10:00:14Z</time></trkpt>
+<trkpt lat="55.7516" lon="37.6000"><time>2026-09-20T10:00:16Z</time></trkpt>
+<trkpt lat="55.7518" lon="37.6000"><time>2026-09-20T10:00:18Z</time></trkpt>
+<trkpt lat="55.7520" lon="37.6000"><time>2026-09-20T10:00:20Z</time></trkpt>
+<trkpt lat="55.7522" lon="37.6000"><time>2026-09-20T10:00:22Z</time></trkpt>
+<trkpt lat="55.7524" lon="37.6000"><time>2026-09-20T10:00:24Z</time></trkpt>
+<trkpt lat="55.7526" lon="37.6000"><time>2026-09-20T10:00:26Z</time></trkpt>
+<trkpt lat="55.7528" lon="37.6000"><time>2026-09-20T10:00:28Z</time></trkpt>
 <trkpt lat="55.7530" lon="37.6000"><time>2026-09-20T10:00:30Z</time></trkpt>
 </trkseg></trk></gpx>
 """
@@ -214,11 +246,23 @@ def test_extract_catches_up_after_timestamp_gap_without_bursting(monkeypatch, tm
 
 
 def test_extract_drops_stationary_frames(tmp_path):
-    # GPX with stationary object (same location at t=0 and t=20)
+    # GPX with a stationary object: same location every 2 s from t=-2 to
+    # t=20 (dense enough to stay within the default max_gap_s=3.0 gap guard,
+    # so the stationary-speed check is what actually rejects every frame).
     stationary_gpx = """<?xml version="1.0"?>
 <gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
 <trk><trkseg>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T09:59:58Z</time></trkpt>
 <trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:00Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:02Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:04Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:06Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:08Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:10Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:12Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:14Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:16Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:18Z</time></trkpt>
 <trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:20Z</time></trkpt>
 </trkseg></trk></gpx>
 """
@@ -228,7 +272,195 @@ def test_extract_drops_stationary_frames(tmp_path):
 
     video = tmp_path / "stationary.avi"
     _write_video(video, n_frames=200, fps=10)
-    places = extract_query_frames(video, track, T0, every_s=2.0, out_dir=tmp_path / "q")
+    from collections import Counter
+
+    stats = Counter()
+    places = extract_query_frames(
+        video, track, T0, every_s=2.0, out_dir=tmp_path / "q", stats=stats
+    )
 
     assert len(places) == 0  # All frames filtered due to zero speed
     assert read_places(tmp_path / "q" / "queries.csv") == []
+    # Every sampled frame has a pose (the track covers the whole window) and
+    # none touch a gap; the stationary-speed check is what rejects them all.
+    assert stats["no_pose"] == 0
+    assert stats["gap"] == 0
+    assert stats["stationary"] == 10
+    assert sum(stats.values()) == 10
+
+
+def test_parse_gpx_reads_hdop(tmp_path):
+    gpx = """<?xml version="1.0"?>
+<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
+<trk><trkseg>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:00Z</time><hdop>1.5</hdop></trkpt>
+<trkpt lat="55.7510" lon="37.6000"><time>2026-09-20T10:00:10Z</time></trkpt>
+</trkseg></trk></gpx>
+"""
+    p = tmp_path / "hdop.gpx"
+    p.write_text(gpx)
+    track = parse_gpx(p)
+    assert track[0].hdop == pytest.approx(1.5)
+    assert track[1].hdop is None
+
+
+def test_parse_gpx_unparsable_hdop_is_none(tmp_path):
+    gpx = """<?xml version="1.0"?>
+<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
+<trk><trkseg>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-09-20T10:00:00Z</time><hdop>bad</hdop></trkpt>
+</trkseg></trk></gpx>
+"""
+    p = tmp_path / "hdop_bad.gpx"
+    p.write_text(gpx)
+    track = parse_gpx(p)
+    assert track[0].hdop is None
+
+
+from vpr_bench.geo import TrackPoint
+from vpr_bench.query import clean_track
+
+
+def _pt(t, lat, lon=37.6, hdop=None):
+    return TrackPoint(t, lat, lon, hdop)
+
+
+def test_clean_track_empty():
+    assert clean_track([]) == ([], {"hdop": 0, "spoof": 0, "detached": 0})
+
+
+def test_clean_track_unchanged_when_clean():
+    track = [_pt(float(i), 55.7500 + i * 0.0002) for i in range(10)]  # ~22 m/s
+    cleaned, counts = clean_track(track)
+    assert cleaned == track
+    assert counts == {"hdop": 0, "spoof": 0, "detached": 0}
+
+
+def test_clean_track_hdop_filter():
+    track = [
+        _pt(0.0, 55.7500, hdop=1.0),
+        _pt(1.0, 55.7502, hdop=8.0),  # dropped: hdop > 5.0
+        _pt(2.0, 55.7504, hdop=2.0),
+    ]
+    cleaned, counts = clean_track(track)
+    assert [p.t for p in cleaned] == [0.0, 2.0]
+    assert counts == {"hdop": 1, "spoof": 0, "detached": 0}
+
+
+def test_clean_track_hdop_filter_disabled_when_none():
+    track = [
+        _pt(0.0, 55.7500, hdop=1.0),
+        _pt(1.0, 55.7502, hdop=8.0),
+        _pt(2.0, 55.7504, hdop=2.0),
+    ]
+    cleaned, counts = clean_track(track, max_hdop=None)
+    assert len(cleaned) == 3
+    assert counts["hdop"] == 0
+
+
+def test_clean_track_single_point_spike_is_spoof():
+    # A, spike, C: A and C are mutually plausible (continuation of the real
+    # track), but the spike in between is not plausible with either.
+    track = [
+        _pt(0.0, 55.7500),
+        _pt(1.0, 56.7500),  # ~111 km away in 1s -> huge speed
+        _pt(2.0, 55.7504),
+    ]
+    cleaned, counts = clean_track(track)
+    assert [p.t for p in cleaned] == [0.0, 2.0]
+    assert counts == {"hdop": 0, "spoof": 1, "detached": 0}
+
+
+def test_clean_track_multi_point_static_spoof_excursion():
+    real_before = [_pt(float(i), 55.7500 + i * 0.0002) for i in range(5)]  # t=0..4
+    spoof = [_pt(10.0 + i, 55.0000) for i in range(20)]  # far-away static, t=10..29
+    real_after_start_lat = real_before[-1].lat
+    real_after = [
+        _pt(30.0 + i, real_after_start_lat + i * 0.0002) for i in range(5)
+    ]  # t=30..34, continues from real_before's last position
+    track = real_before + spoof + real_after
+    cleaned, counts = clean_track(track)
+    assert [p.t for p in cleaned] == [p.t for p in real_before + real_after]
+    assert counts == {"hdop": 0, "spoof": 20, "detached": 0}
+
+
+def test_clean_track_spoofed_start_is_detached():
+    # Spoof block at the very start, with no real point before it to bracket
+    # it as an interior segment -> the whole real continuation wins (longer
+    # duration) and the spoof start is counted as "detached", not "spoof".
+    spoof = [_pt(float(i), 40.0000) for i in range(3)]  # t=0..2, far away
+    real = [_pt(10.0 + i, 55.7500 + i * 0.0002) for i in range(20)]  # t=10..29
+    track = spoof + real
+    cleaned, counts = clean_track(track)
+    assert [p.t for p in cleaned] == [p.t for p in real]
+    assert counts == {"hdop": 0, "spoof": 0, "detached": 3}
+
+
+def test_extract_query_frames_gap_guard_drops_frames_touching_a_gap(tmp_path):
+    from datetime import timedelta
+
+    from vpr_bench.geo import TrackPoint
+
+    # Dense (1 s) track from t=-1..10, then a 10 s outage, then dense again
+    # from t=20..31 -- same slope throughout so speeds stay realistic.
+    slope = 0.0002  # ~22 m/s, comfortably above the default min_speed_mps
+    track = [
+        TrackPoint(T0 + t, 55.7500 + slope * t, 37.6000)
+        for t in list(range(-1, 11)) + list(range(20, 32))
+    ]
+
+    video = tmp_path / "gap_drive.avi"
+    _write_video(video, n_frames=300, fps=10.0)  # 30 s @ 10 fps
+
+    from collections import Counter
+
+    stats = Counter()
+    places = extract_query_frames(
+        video, track, T0, every_s=1.0, out_dir=tmp_path / "q", stats=stats
+    )
+
+    # Samples land at t = 0..29 (30 samples). Windows [t-1, t+1] whose bracket
+    # spans the (10, 20) gap are t = 10..20 inclusive (11 samples).
+    assert stats["gap"] == 11
+    assert stats["no_pose"] == 0
+    assert stats["stationary"] == 0
+    assert stats["kept"] == 30 - 11
+    assert sum(stats.values()) == 30
+    assert len(places) == stats["kept"]
+    # None of the kept frames' recovered sample times fall inside the gap.
+    for p in places:
+        recovered_t = (p.lat - 55.7500) / slope
+        assert not (10 <= recovered_t <= 20)
+
+
+def test_extract_query_frames_stats_none_is_a_no_op(tmp_path, track):
+    video = tmp_path / "no_stats.avi"
+    _write_video(video, n_frames=200, fps=10)
+    # Just confirms passing stats=None (the default) doesn't raise.
+    places = extract_query_frames(video, track, T0, every_s=2.0, out_dir=tmp_path / "q")
+    assert len(places) == 9
+
+
+def test_clean_track_two_consecutive_spoof_excursions_both_removed():
+    real_before = [_pt(float(i), 55.7500 + i * 0.0002) for i in range(5)]  # t=0..4
+    spoof1 = [_pt(10.0 + i, 55.0000) for i in range(5)]  # far-away #1, t=10..14
+    spoof2 = [_pt(20.0 + i, 54.0000) for i in range(5)]  # far-away #2, t=20..24
+    last_lat = real_before[-1].lat
+    real_after = [_pt(30.0 + i, last_lat + i * 0.0002) for i in range(5)]  # t=30..34
+    track = real_before + spoof1 + spoof2 + real_after
+
+    cleaned, counts = clean_track(track)
+
+    assert [p.t for p in cleaned] == [p.t for p in real_before + real_after]
+    assert counts == {"hdop": 0, "spoof": len(spoof1) + len(spoof2), "detached": 0}
+
+
+def test_clean_track_spoof_at_end_is_detached():
+    real = [_pt(float(i), 55.7500 + i * 0.0002) for i in range(20)]  # t=0..19, ~22 m/s
+    spoof = [_pt(30.0 + i, 40.0000) for i in range(3)]  # far away, t=30..32
+    track = real + spoof
+
+    cleaned, counts = clean_track(track)
+
+    assert [p.t for p in cleaned] == [p.t for p in real]
+    assert counts == {"hdop": 0, "spoof": 0, "detached": 3}
