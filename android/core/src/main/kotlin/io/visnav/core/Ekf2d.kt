@@ -15,12 +15,13 @@ fun wrapAngle(a: Double): Double {
 }
 
 data class FilterConfig(
-    val accelNoise: Double = 1.0,      // м/с² — насколько быстро может меняться скорость
+    val accelNoise: Double = 1.0,      // м/с^1.5 (√СПМ) — насколько быстро может меняться скорость
     val gyroNoise: Double = 0.01,      // рад/с — шум скорости поворота
     val gyroBiasWalk: Double = 1e-4,   // рад/с/√с — дрейф смещения гироскопа
     val posNoise: Double = 0.1,        // м/√с — немоделируемые боковые смещения
     val gateChi2Pos: Double = 13.8,    // χ², 2 степени свободы, 99.9 %
     val gateChi2Scalar: Double = 10.8, // χ², 1 степень свободы, 99.9 %
+    val initGyroBiasSigma: Double = 0.01, // рад/с — начальная неопределённость смещения гироскопа
 )
 
 /**
@@ -41,7 +42,7 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
         p[idx(1, 1)] = posSigma * posSigma
         p[idx(2, 2)] = psiSigma * psiSigma
         p[idx(3, 3)] = vSigma * vSigma
-        p[idx(4, 4)] = 0.01 * 0.01
+        p[idx(4, 4)] = config.initGyroBiasSigma * config.initGyroBiasSigma
         initialized = true
     }
 
@@ -70,22 +71,32 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
         next.copyInto(p)
     }
 
-    fun updatePosition(e: Double, n: Double, sigma: Double): Boolean = update(
-        arrayOf(unit(0), unit(1)), doubleArrayOf(e - x[0], n - x[1]),
-        doubleArrayOf(sigma * sigma, sigma * sigma), config.gateChi2Pos,
-    )
+    fun updatePosition(e: Double, n: Double, sigma: Double): Boolean {
+        require(sigma > 0 && sigma.isFinite()) { "sigma must be positive and finite" }
+        return update(
+            arrayOf(unit(0), unit(1)), doubleArrayOf(e - x[0], n - x[1]),
+            doubleArrayOf(sigma * sigma, sigma * sigma), config.gateChi2Pos,
+        )
+    }
 
-    fun updateSpeed(v: Double, sigma: Double): Boolean =
-        update(arrayOf(unit(3)), doubleArrayOf(v - x[3]), doubleArrayOf(sigma * sigma), config.gateChi2Scalar)
+    fun updateSpeed(v: Double, sigma: Double): Boolean {
+        require(sigma > 0 && sigma.isFinite()) { "sigma must be positive and finite" }
+        return update(arrayOf(unit(3)), doubleArrayOf(v - x[3]), doubleArrayOf(sigma * sigma), config.gateChi2Scalar)
+    }
 
-    fun updateHeading(psi: Double, sigma: Double): Boolean =
-        update(arrayOf(unit(2)), doubleArrayOf(wrapAngle(psi - x[2])), doubleArrayOf(sigma * sigma), config.gateChi2Scalar)
+    fun updateHeading(psi: Double, sigma: Double): Boolean {
+        require(sigma > 0 && sigma.isFinite()) { "sigma must be positive and finite" }
+        return update(
+            arrayOf(unit(2)), doubleArrayOf(wrapAngle(psi - x[2])), doubleArrayOf(sigma * sigma), config.gateChi2Scalar,
+        )
+    }
 
     fun posSigma(): Double = sqrt(max(p[idx(0, 0)], p[idx(1, 1)]))
 
     /** Общее обновление: H — строки (m ≤ 2), y — невязка, r — дисперсии шума (диагональ). */
     private fun update(h: Array<DoubleArray>, y: DoubleArray, r: DoubleArray, gate: Double): Boolean {
         check(initialized) { "filter not initialized" }
+        if (y.any { !it.isFinite() }) return false
         val m = h.size
         // PHᵀ (N×m)
         val pht = Array(N) { i -> DoubleArray(m) { k -> (0 until N).sumOf { j -> p[idx(i, j)] * h[k][j] } } }
@@ -101,7 +112,7 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
         }
         var d2 = 0.0
         for (a in 0 until m) for (b in 0 until m) d2 += y[a] * sInv[a][b] * y[b]
-        if (d2 > gate) return false
+        if (!(d2 <= gate)) return false
         // K = PHᵀ S⁻¹ (N×m)
         val k = Array(N) { i -> DoubleArray(m) { b -> (0 until m).sumOf { a -> pht[i][a] * sInv[a][b] } } }
         for (i in 0 until N) x[i] += (0 until m).sumOf { a -> k[i][a] * y[a] }

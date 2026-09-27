@@ -1,8 +1,12 @@
 package io.visnav.core
 
 import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -39,9 +43,25 @@ class Ekf2dTest {
         for (s in 1..120) {
             repeat(100) { f.predict(0.01, 0.02) } // истинный поворот 0, гироскоп врёт на +0.02 рад/с
             truthE += 10.0
-            f.updatePosition(truthE, 0.0, 3.0)
-            f.updateHeading(PI / 2, 0.03)
-            f.updateSpeed(10.0, 0.2)
+            assertTrue(f.updatePosition(truthE, 0.0, 3.0))
+            assertTrue(f.updateHeading(PI / 2, 0.03))
+            assertTrue(f.updateSpeed(10.0, 0.2))
+        }
+        assertEquals(0.02, f.x[4], 0.005)
+    }
+
+    @Test fun estimatesGyroBiasWithoutHeadingUpdates() {
+        val psi0 = 0.7
+        val f = filter(psi = psi0, v = 10.0)
+        var truthE = 0.0
+        var truthN = 0.0
+        for (s in 1..120) {
+            repeat(100) { f.predict(0.01, 0.02) } // истинный поворот 0, гироскоп врёт на +0.02 рад/с
+            truthE += 10.0 * sin(psi0)
+            truthN += 10.0 * cos(psi0)
+            assertTrue(f.updatePosition(truthE, truthN, 3.0))
+            assertTrue(f.updateSpeed(10.0, 0.2))
+            // без updateHeading: смещение гироскопа должно всё равно оцениваться по позиции
         }
         assertEquals(0.02, f.x[4], 0.005)
     }
@@ -63,5 +83,34 @@ class Ekf2dTest {
     @Test fun wrapAngleRange() {
         assertEquals(-PI / 2, wrapAngle(3 * PI / 2), 1e-12)
         assertEquals(PI, wrapAngle(-PI), 1e-12)
+    }
+
+    @Test fun updatePositionRejectsNaNAndKeepsState() {
+        val f = filter()
+        repeat(10) { f.predict(0.1, 0.0) }
+        val xBefore = f.x.copyOf()
+        val pBefore = f.p.copyOf()
+        assertFalse(f.updatePosition(Double.NaN, 0.0, 3.0))
+        assertEquals(xBefore.toList(), f.x.toList())
+        assertEquals(pBefore.toList(), f.p.toList())
+    }
+
+    @Test fun zeroSigmaThrows() {
+        val f = filter()
+        assertFailsWith<IllegalArgumentException> { f.updatePosition(1.0, 1.0, 0.0) }
+        assertFailsWith<IllegalArgumentException> { f.updateSpeed(1.0, 0.0) }
+        assertFailsWith<IllegalArgumentException> { f.updateHeading(0.0, 0.0) }
+    }
+
+    @Test fun gateBoundaryOnPositionUpdate() {
+        // Свежая инициализация: P[e,e]=P[n,n]=9, без предсказаний P вне диагонали равна 0.
+        // При sigma=4 (R=16) S = 25·I, значит d² = смещение²/25 вдоль одной оси.
+        val accept = filter()
+        val rAccept = sqrt(13.7 * 25.0)
+        assertTrue(accept.updatePosition(rAccept, 0.0, 4.0))
+
+        val reject = filter()
+        val rReject = sqrt(13.9 * 25.0)
+        assertFalse(reject.updatePosition(rReject, 0.0, 4.0))
     }
 }
