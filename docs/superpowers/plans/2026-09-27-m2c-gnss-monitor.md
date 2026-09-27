@@ -193,6 +193,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 2: Монитор GNSS
 
+> Редакция после ревью (решение владельца): выход из «подмены» только по положительным доказательствам, устойчивость к городским выбросам GPS, AGC-база не подстраивается под падение.
+
 **Files:**
 - Create: `android/core/src/main/kotlin/io/visnav/core/GnssMonitor.kt`
 - Test: `android/core/src/test/kotlin/io/visnav/core/GnssMonitorTest.kt`
@@ -201,21 +203,30 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Consumes: `LocEvent`, `GnssStatusEvent`, `AgcEvent`, `Geo.haversineM`.
 - Produces:
   - `enum class GnssHealth { GOOD, DEGRADED, UNTRUSTED }`
-  - `enum class GnssReason { NO_FIX, FEW_SATS, LOW_CN0, AGC_DROP, POOR_ACCURACY, JUMP, INNOVATION, UNIFORM_CN0 }`
+  - `enum class GnssReason { FIX_GAP, NO_FIX, FEW_SATS, LOW_CN0, AGC_DROP, POOR_ACCURACY, JUMP, INNOVATION, UNIFORM_CN0 }`
   - `data class Assessment(val health: GnssHealth, val reasons: Set<GnssReason>)`
   - `data class MonitorConfig(...)` — значения по умолчанию в коде ниже.
   - `class GnssMonitor(config)` с методами:
     - `onStatus(e)`, `onAgc(e)`;
-    - `onFix(e: LocEvent, innovationD2: Double?)`;
+    - `onVisualFix(tMs: Double, lat: Double, lon: Double, sigmaM: Double)` — принятая визуальная фиксация;
+    - `onFix(e: LocEvent, innovationD2: Double?, distToFilterM: Double?, filterSigmaM: Double?)`. Здесь `innovationD2` — χ²-расстояние фикса до прогноза фильтра, `distToFilterM` — расстояние от фикса до оценки фильтра в метрах, `filterSigmaM` — `posSigma()` фильтра. Все три равны `null`, если фильтр не инициализирован. `null` в `innovationD2` сбрасывает счётчик плохих фиксов подряд.
     - `consumeReinit(): Boolean`;
     - `assess(tMs: Double): Assessment`.
 
 Правила:
-- **`UNTRUSTED`**, если есть причина из набора {`NO_FIX`, `JUMP`, `INNOVATION`, `UNIFORM_CN0`}.
-- **`DEGRADED`**, если есть любая другая причина.
-- **`INNOVATION`** фиксируется после `innovationCount` фиксов подряд с d² > гейта и держится, пока фиксы не согласуются с фильтром `relockOkMs` подряд.
-- **Повторный захват:** если подмена держится ≥ `reacquireMs`, а независимые признаки чистые (нет причин по статусу и AGC, нет скачка, точность в норме), фиксация снимается и выставляется запрос на переинициализацию фильтра по GNSS. Без этого фильтр, уплывший за долгое счисление пути, никогда бы не принял настоящий GNSS снова.
-- **Базовый уровень AGC** — экспоненциальное среднее, которое обновляется только пока по остальным признакам состояние `GOOD`.
+- **Разрыв фиксов:** больше `fixGapMs` → `FIX_GAP` (`DEGRADED`); больше `noFixMs` → `NO_FIX` (`UNTRUSTED`).
+- **`JUMP`** — расстояние между соседними фиксами больше `maxJumpMps·dt + jumpAccFactor·(acc₁ + acc₂)`. Держится `jumpHoldMs`. Фикс со временем не позже предыдущего игнорируется целиком.
+- **`UNIFORM_CN0`** — не меньше `uniformMinCount` из последних `uniformWindow` статусов имеют разброс C/N0 < `uniformCn0StdDb` при `used ≥ uniformMinUsed`, и последний статус свежий.
+- **`INNOVATION`** фиксируется после `innovationCount` фиксов подряд с d² > гейта. Снимается только после `relockOkMs` непрерывных «положительных доказательств» — каждое GNSS-фикса выполняет хотя бы одно:
+  - **визуальное согласие:** последняя визуальная фиксация отстоит от фикса по времени не больше чем на `visualAgreeMs`, а по расстоянию — не больше `max(visualAgreeM, 2·σ_vis)`;
+  - **точный фильтр:** `filterSigmaM ≤ relockMaxSigmaM` и `distToFilterM ≤ relockMaxDistM`.
+  
+  Фикс без доказательств обнуляет отсчёт. Если хотя бы одно доказательство в отсчёте было только визуальным (фильтр неточен или далеко), при снятии фиксации ставится запрос на переинициализацию фильтра по GNSS. Больше никаких путей снятия нет, в том числе «по таймауту»: подмена с правдоподобными признаками не должна вернуть систему в `GOOD`. Новая фиксация сбрасывает невостребованный запрос.
+- **Базовый уровень AGC:**
+  - экспоненциальное среднее с временной постоянной `agcTauMs`;
+  - обновляется, только если остальные признаки чистые и значение не ниже базы на `agcFreezeDb` и больше (под падение база не подстраивается);
+  - если `AGC_DROP` держится `agcRelearnMs` при чистых признаках статуса, база переустанавливается на текущее значение (зарядка, смена диапазонов).
+- **`UNTRUSTED`**, если есть причина из набора {`NO_FIX`, `JUMP`, `INNOVATION`, `UNIFORM_CN0`}; `DEGRADED` — любая другая причина.
 
 - [ ] **Step 1: Падающие тесты**
 
@@ -231,97 +242,144 @@ import kotlin.test.assertTrue
 class GnssMonitorTest {
     private fun fix(t: Double, lat: Double = 55.75, lon: Double = 37.6, acc: Float = 4f) =
         LocEvent(t, lat, lon, acc, 10f, 0.5f, 90f, 2f)
-    private fun goodStatus(t: Double) = GnssStatusEvent(t, 30, 14, 35f, 5f, 44f, 6, 4, 3, 1)
+    private fun status(t: Double, used: Int = 14, cn0: Float = 35f, std: Float = 5f) =
+        GnssStatusEvent(t, 30, used, cn0, std, cn0 + 9f, 6, 4, 3, 1)
+    private fun GnssMonitor.goodSecond(t: Double) { onStatus(status(t)); onFix(fix(t), 1.0, 2.0, 4.0) }
+    private fun GnssMonitor.latchAt(t0: Double) {
+        for (i in 0..2) onFix(fix(t0 + i * 1_000.0), 50.0, 200.0, 5.0)
+    }
 
     @Test fun cleanSignalIsGood() {
-        val m = GnssMonitor()
-        m.onStatus(goodStatus(0.0)); m.onFix(fix(0.0), 1.0)
+        val m = GnssMonitor(); m.goodSecond(0.0)
         assertEquals(Assessment(GnssHealth.GOOD, emptySet()), m.assess(500.0))
     }
 
-    @Test fun noFixAfterThreeSecondsIsUntrusted() {
-        val m = GnssMonitor()
-        m.onStatus(goodStatus(0.0)); m.onFix(fix(0.0), 1.0)
-        assertEquals(GnssHealth.GOOD, m.assess(2_900.0).health)
-        val a = m.assess(3_100.0)
+    @Test fun fixGapDegradesThenNoFixIsUntrusted() {
+        val m = GnssMonitor(); m.goodSecond(0.0)
+        assertEquals(Assessment(GnssHealth.DEGRADED, setOf(GnssReason.FIX_GAP)), m.assess(3_100.0))
+        val a = m.assess(10_100.0)
         assertEquals(GnssHealth.UNTRUSTED, a.health); assertTrue(GnssReason.NO_FIX in a.reasons)
     }
 
-    @Test fun fewSatellitesAndLowCn0Degrade() {
-        val m = GnssMonitor()
-        m.onFix(fix(0.0), 1.0)
-        m.onStatus(GnssStatusEvent(0.0, 10, 3, 22f, 6f, 30f))
-        val a = m.assess(100.0)
-        assertEquals(GnssHealth.DEGRADED, a.health)
-        assertEquals(setOf(GnssReason.FEW_SATS, GnssReason.LOW_CN0), a.reasons)
+    @Test fun satelliteAndCn0Boundaries() {
+        val ok = GnssMonitor(); ok.onFix(fix(0.0), 1.0, 1.0, 4.0); ok.onStatus(status(0.0, used = 5, cn0 = 25f))
+        assertEquals(GnssHealth.GOOD, ok.assess(100.0).health)
+        val bad = GnssMonitor(); bad.onFix(fix(0.0), 1.0, 1.0, 4.0); bad.onStatus(status(0.0, used = 4, cn0 = 24.9f))
+        assertEquals(setOf(GnssReason.FEW_SATS, GnssReason.LOW_CN0), bad.assess(100.0).reasons)
     }
 
     @Test fun staleStatusIsIgnored() {
         val m = GnssMonitor()
-        m.onStatus(GnssStatusEvent(0.0, 10, 3, 22f)); m.onFix(fix(9_000.0), 1.0)
-        assertEquals(GnssHealth.GOOD, m.assess(9_100.0).health) // статус старше 5 с
+        m.onStatus(status(0.0, used = 3)); m.onFix(fix(9_000.0), 1.0, 1.0, 4.0)
+        assertEquals(GnssHealth.GOOD, m.assess(9_100.0).health)
     }
 
-    @Test fun uniformCn0IsSpoofingHallmark() {
+    @Test fun uniformCn0NeedsThreeOfFive() {
         val m = GnssMonitor()
-        m.onFix(fix(0.0), 1.0)
-        m.onStatus(GnssStatusEvent(0.0, 12, 12, 40f, 0.8f, 41f))
-        val a = m.assess(100.0)
+        for (i in 0..4) m.onStatus(status(i * 1_000.0, used = 12, cn0 = 40f, std = 3f))
+        for (i in 5..6) m.onStatus(status(i * 1_000.0, used = 12, cn0 = 40f, std = 0.8f))
+        m.onFix(fix(6_000.0), 1.0, 1.0, 4.0)
+        assertFalse(GnssReason.UNIFORM_CN0 in m.assess(6_100.0).reasons) // 2 из 5
+        m.onStatus(status(7_000.0, used = 12, cn0 = 40f, std = 0.8f)); m.onFix(fix(7_000.0), 1.0, 1.0, 4.0)
+        val a = m.assess(7_100.0)
         assertEquals(GnssHealth.UNTRUSTED, a.health); assertTrue(GnssReason.UNIFORM_CN0 in a.reasons)
     }
 
-    @Test fun jumpIsFlaggedAndHeldForTenSeconds() {
-        val m = GnssMonitor()
-        m.onFix(fix(0.0), 1.0)
-        m.onFix(fix(1_000.0, lat = 55.80), null) // 5.5 км за 1 с
-        assertTrue(GnssReason.JUMP in m.assess(1_500.0).reasons)
-        m.onFix(fix(2_000.0, lat = 55.80), null)
-        assertTrue(GnssReason.JUMP in m.assess(10_900.0).reasons)
-        m.onFix(fix(11_500.0, lat = 55.80), null)
-        assertFalse(GnssReason.JUMP in m.assess(11_600.0).reasons)
-    }
-
-    @Test fun innovationLatchesAfterThreeBadFixesAndRelocks() {
-        val m = GnssMonitor()
-        m.onFix(fix(0.0), 50.0); m.onFix(fix(1_000.0), 50.0)
-        assertFalse(GnssReason.INNOVATION in m.assess(1_100.0).reasons) // только две подряд
-        m.onFix(fix(2_000.0), 50.0)
-        assertEquals(GnssHealth.UNTRUSTED, m.assess(2_100.0).health)
-        for (i in 3..13) m.onFix(fix(i * 1_000.0), 1.0) // согласуется 10 с: с 3-й по 13-ю секунду
-        assertFalse(GnssReason.INNOVATION in m.assess(13_100.0).reasons)
-    }
-
-    @Test fun longLatchWithCleanIndependentSignsRequestsReinit() {
-        val m = GnssMonitor()
-        for (i in 0..2) { m.onStatus(goodStatus(i * 1_000.0)); m.onFix(fix(i * 1_000.0), 100.0) }
-        assertTrue(GnssReason.INNOVATION in m.assess(2_100.0).reasons)
-        for (i in 3..32) { m.onStatus(goodStatus(i * 1_000.0)); m.onFix(fix(i * 1_000.0), 100.0) }
-        assertTrue(m.consumeReinit())
-        assertFalse(m.consumeReinit()) // запрос одноразовый
-        assertFalse(GnssReason.INNOVATION in m.assess(32_100.0).reasons)
-    }
-
-    @Test fun agcDropBelowLearnedBaselineDegrades() {
-        val m = GnssMonitor()
-        for (i in 0..20) {
-            val t = i * 1_000.0
-            m.onStatus(goodStatus(t)); m.onFix(fix(t), 1.0); m.onAgc(AgcEvent(t, 2f, 10))
+    @Test fun jumpAccountsForFixAccuracy() {
+        fun jumped(dLatDeg: Double, acc2: Float): Boolean {
+            val m = GnssMonitor()
+            m.onFix(fix(0.0), null, null, null)
+            m.onFix(fix(1_000.0, lat = 55.75 + dLatDeg, acc = acc2), null, null, null)
+            return GnssReason.JUMP in m.assess(1_100.0).reasons
         }
-        m.onAgc(AgcEvent(21_000.0, -6f, 10)); m.onFix(fix(21_000.0), 1.0); m.onStatus(goodStatus(21_000.0))
-        val a = m.assess(21_100.0)
-        assertEquals(GnssHealth.DEGRADED, a.health); assertEquals(setOf(GnssReason.AGC_DROP), a.reasons)
+        assertTrue(jumped(0.00135, 4f))    // ~150 м > 70 + 3·8 = 94
+        assertFalse(jumped(0.00081, 4f))   // ~90 м
+        assertFalse(jumped(0.00135, 30f))  // ~150 м < 70 + 3·34 = 172
+    }
+
+    @Test fun outOfOrderFixIsIgnored() {
+        val m = GnssMonitor()
+        m.onFix(fix(2_000.0), null, null, null)
+        m.onFix(fix(1_000.0, lat = 55.80), null, null, null)
+        assertFalse(GnssReason.JUMP in m.assess(2_100.0).reasons)
+    }
+
+    @Test fun innovationLatchNeedsConsecutiveBadFixes() {
+        val m = GnssMonitor()
+        m.onFix(fix(0.0), 50.0, 100.0, 5.0); m.onFix(fix(1_000.0), null, null, null)
+        m.onFix(fix(2_000.0), 50.0, 100.0, 5.0); m.onFix(fix(3_000.0), 50.0, 100.0, 5.0)
+        assertFalse(GnssReason.INNOVATION in m.assess(3_100.0).reasons) // null разорвал серию
+        m.onFix(fix(4_000.0), 50.0, 100.0, 5.0)
+        assertEquals(GnssHealth.UNTRUSTED, m.assess(4_100.0).health)
+    }
+
+    @Test fun relocksWhenFilterIsTrustworthyAndClose() {
+        val m = GnssMonitor(); m.latchAt(0.0)
+        for (i in 3..13) m.onFix(fix(i * 1_000.0), 1.0, 10.0, 8.0)
+        assertFalse(GnssReason.INNOVATION in m.assess(13_100.0).reasons)
+        assertFalse(m.consumeReinit())
+    }
+
+    @Test fun smallD2FromGrownSigmaDoesNotRelock() {
+        val m = GnssMonitor(); m.latchAt(0.0)
+        for (i in 3..60) m.onFix(fix(i * 1_000.0), 1.0, 100.0, 60.0) // «согласуется» только из-за большой σ
+        assertTrue(GnssReason.INNOVATION in m.assess(60_100.0).reasons)
+        assertFalse(m.consumeReinit())
+    }
+
+    @Test fun visualAgreementRelocksAndRequestsReinit() {
+        val m = GnssMonitor(); m.latchAt(0.0)
+        for (i in 3..13) {
+            val t = i * 1_000.0
+            m.onVisualFix(t - 200.0, 55.7501, 37.6, 8.0)       // ~11 м от GNSS
+            m.onFix(fix(t), 30.0, 120.0, 80.0)                  // фильтр уплыл
+        }
+        assertFalse(GnssReason.INNOVATION in m.assess(13_100.0).reasons)
+        assertTrue(m.consumeReinit()); assertFalse(m.consumeReinit())
+    }
+
+    @Test fun visualDisagreementKeepsLatch() {
+        val m = GnssMonitor(); m.latchAt(0.0)
+        for (i in 3..30) {
+            val t = i * 1_000.0
+            m.onVisualFix(t - 200.0, 55.752, 37.6, 8.0)        // ~220 м от GNSS
+            m.onFix(fix(t), 30.0, 120.0, 80.0)
+        }
+        assertTrue(GnssReason.INNOVATION in m.assess(30_100.0).reasons)
+    }
+
+    @Test fun agcDropDegrades() {
+        val m = GnssMonitor()
+        for (i in 0..20) { val t = i * 1_000.0; m.goodSecond(t); m.onAgc(AgcEvent(t, 2f, 10)) }
+        m.goodSecond(21_000.0); m.onAgc(AgcEvent(21_000.0, -5f, 10))
+        assertEquals(Assessment(GnssHealth.DEGRADED, setOf(GnssReason.AGC_DROP)), m.assess(21_100.0))
+    }
+
+    @Test fun slowAgcRampIsNotAbsorbed() {
+        val m = GnssMonitor()
+        for (i in 0..20) { val t = i * 1_000.0; m.goodSecond(t); m.onAgc(AgcEvent(t, 2f, 10)) }
+        for (k in 1..120) {
+            val t = (20 + k) * 1_000.0
+            m.goodSecond(t); m.onAgc(AgcEvent(t, 2f - 0.1f * k, 10))
+        }
+        assertTrue(GnssReason.AGC_DROP in m.assess(140_100.0).reasons)
+    }
+
+    @Test fun persistentAgcShiftIsRelearned() {
+        val m = GnssMonitor()
+        for (i in 0..20) { val t = i * 1_000.0; m.goodSecond(t); m.onAgc(AgcEvent(t, 2f, 10)) }
+        for (k in 1..305) { val t = (20 + k) * 1_000.0; m.goodSecond(t); m.onAgc(AgcEvent(t, -8f, 10)) }
+        assertFalse(GnssReason.AGC_DROP in m.assess(325_100.0).reasons)
     }
 
     @Test fun poorAccuracyDegrades() {
-        val m = GnssMonitor()
-        m.onFix(fix(0.0, acc = 35f), 1.0)
+        val m = GnssMonitor(); m.onFix(fix(0.0, acc = 35f), 1.0, 1.0, 4.0)
         assertEquals(Assessment(GnssHealth.DEGRADED, setOf(GnssReason.POOR_ACCURACY)), m.assess(100.0))
     }
 }
 ```
-
-Run: `./gradlew :core:test`
-Expected: FAIL при компиляции (`Unresolved reference: GnssMonitor`).
+Run: `cd /Users/vvnovg/navigator/android && JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home" ./gradlew :core:test`
+Expected: FAIL (нет новых сигнатур и причин).
 
 - [ ] **Step 2: Реализовать**
 
@@ -329,78 +387,138 @@ Expected: FAIL при компиляции (`Unresolved reference: GnssMonitor`)
 ```kotlin
 package io.visnav.core
 
+import kotlin.math.abs
+import kotlin.math.exp
+import kotlin.math.max
+
 enum class GnssHealth { GOOD, DEGRADED, UNTRUSTED }
-enum class GnssReason { NO_FIX, FEW_SATS, LOW_CN0, AGC_DROP, POOR_ACCURACY, JUMP, INNOVATION, UNIFORM_CN0 }
+enum class GnssReason { FIX_GAP, NO_FIX, FEW_SATS, LOW_CN0, AGC_DROP, POOR_ACCURACY, JUMP, INNOVATION, UNIFORM_CN0 }
 data class Assessment(val health: GnssHealth, val reasons: Set<GnssReason>)
 
 data class MonitorConfig(
-    val noFixMs: Double = 3_000.0,
+    val fixGapMs: Double = 3_000.0,
+    val noFixMs: Double = 10_000.0,
     val statusStaleMs: Double = 5_000.0,
     val minUsed: Int = 5,
-    val minCn0: Float = 25f,          // дБ·Гц, средний по спутникам в решении
-    val maxAccM: Float = 20f,
-    val agcDropDb: Float = 6f,
-    val agcAlpha: Double = 0.05,
+    val minCn0: Float = 25f,            // дБ·Гц, средний по спутникам в решении
+    val maxAccM: Float = 20f,           // Android: радиус 68 %
     val maxJumpMps: Double = 70.0,
+    val jumpAccFactor: Double = 3.0,
     val jumpHoldMs: Double = 10_000.0,
-    val innovationGate: Double = 13.8, // χ², 2 ст. свободы, 99.9 %
+    val innovationGate: Double = 13.8,  // χ², 2 ст. свободы, 99.9 %
     val innovationCount: Int = 3,
     val relockOkMs: Double = 10_000.0,
-    val reacquireMs: Double = 30_000.0,
-    val uniformCn0StdDb: Float = 1.5f, // подменный сигнал у всех спутников почти одной силы
+    val relockMaxSigmaM: Double = 30.0,
+    val relockMaxDistM: Double = 30.0,
+    val visualAgreeMs: Double = 5_000.0,
+    val visualAgreeM: Double = 30.0,
+    val uniformCn0StdDb: Float = 1.5f,  // у подменного сигнала все спутники почти одной силы
     val uniformMinUsed: Int = 6,
+    val uniformWindow: Int = 5,
+    val uniformMinCount: Int = 3,
+    val agcDropDb: Float = 6f,
+    val agcTauMs: Double = 20_000.0,
+    val agcFreezeDb: Float = 1f,
+    val agcRelearnMs: Double = 300_000.0,
 )
 
 private val UNTRUSTED_REASONS = setOf(GnssReason.NO_FIX, GnssReason.JUMP, GnssReason.INNOVATION, GnssReason.UNIFORM_CN0)
 
-/** Детектор деградации, глушения и подмены GNSS (FR-14). Время — мс настенных часов телефона. */
+/**
+ * Детектор деградации, глушения и подмены GNSS (FR-14). Время — мс настенных часов телефона.
+ * Фиксация «расхождение с фильтром» снимается только по положительным доказательствам (визуальная
+ * фиксация рядом с GNSS или точный фильтр рядом с GNSS), а не по таймауту: иначе правдоподобная
+ * подмена со временем вернула бы систему в GOOD.
+ */
 class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
+    private data class VisualFix(val tMs: Double, val lat: Double, val lon: Double, val sigmaM: Double)
+
     private var lastFix: LocEvent? = null
     private var lastStatus: GnssStatusEvent? = null
+    private val uniformFlags = ArrayDeque<Boolean>()
     private var lastAgc: AgcEvent? = null
     private var agcBaseline: Double? = null
+    private var lastAgcT: Double? = null
+    private var agcDropSince: Double? = null
+    private var lastVisual: VisualFix? = null
     private var jumpUntil = Double.NEGATIVE_INFINITY
     private var badInnovations = 0
-    private var latchedSince: Double? = null
+    private var latched = false
     private var okSince: Double? = null
+    private var okNeededVisual = false
     private var reinit = false
 
-    fun onStatus(e: GnssStatusEvent) { lastStatus = e }
+    fun onStatus(e: GnssStatusEvent) {
+        lastStatus = e
+        val std = e.cn0Std
+        uniformFlags.addLast(std != null && e.used >= config.uniformMinUsed && std < config.uniformCn0StdDb)
+        while (uniformFlags.size > config.uniformWindow) uniformFlags.removeFirst()
+    }
+
+    fun onVisualFix(tMs: Double, lat: Double, lon: Double, sigmaM: Double) {
+        lastVisual = VisualFix(tMs, lat, lon, sigmaM)
+    }
 
     fun onAgc(e: AgcEvent) {
         lastAgc = e
         if (!e.agcDb.isFinite()) return
-        if (reasonsWithoutAgc(e.tMs).isEmpty()) {
-            val b = agcBaseline
-            agcBaseline = if (b == null) e.agcDb.toDouble() else b + config.agcAlpha * (e.agcDb - b)
-        }
-    }
-
-    fun onFix(e: LocEvent, innovationD2: Double?) {
-        val prev = lastFix
-        if (prev != null && e.tMs > prev.tMs) {
-            val speed = Geo.haversineM(prev.lat, prev.lon, e.lat, e.lon) / ((e.tMs - prev.tMs) / 1000.0)
-            if (speed > config.maxJumpMps) jumpUntil = e.tMs + config.jumpHoldMs
-        }
-        lastFix = e
-        if (innovationD2 == null) return
-        val bad = !(innovationD2 <= config.innovationGate)
-        val since = latchedSince
-        if (since == null) {
-            badInnovations = if (bad) badInnovations + 1 else 0
-            if (badInnovations >= config.innovationCount) { latchedSince = e.tMs; okSince = null }
+        val prevT = lastAgcT
+        lastAgcT = e.tMs
+        val b = agcBaseline
+        if (b == null) {
+            if (reasonsWithoutAgc(e.tMs).isEmpty()) agcBaseline = e.agcDb.toDouble()
             return
         }
-        if (bad) okSince = null else if (okSince == null) okSince = e.tMs
-        val ok = okSince
-        if (ok != null && e.tMs - ok >= config.relockOkMs) {
-            unlatch()
-        } else if (e.tMs - since >= config.reacquireMs && independentOk(e.tMs)) {
-            unlatch(); reinit = true
+        if (e.agcDb < b - config.agcDropDb) {
+            val since = agcDropSince ?: e.tMs.also { agcDropSince = it }
+            if (e.tMs - since >= config.agcRelearnMs && statusReasons(e.tMs).isEmpty()) {
+                agcBaseline = e.agcDb.toDouble(); agcDropSince = null
+            }
+            return
+        }
+        agcDropSince = null
+        if (reasonsWithoutAgc(e.tMs).isEmpty() && e.agcDb >= b - config.agcFreezeDb) {
+            val dt = if (prevT == null) 0.0 else max(0.0, e.tMs - prevT)
+            val alpha = 1 - exp(-dt / config.agcTauMs)
+            agcBaseline = b + alpha * (e.agcDb - b)
         }
     }
 
-    /** true один раз после повторного захвата: вызывающий должен переинициализировать фильтр по GNSS. */
+    fun onFix(e: LocEvent, innovationD2: Double?, distToFilterM: Double?, filterSigmaM: Double?) {
+        val prev = lastFix
+        if (prev != null && e.tMs <= prev.tMs) return
+        if (prev != null) {
+            val dt = (e.tMs - prev.tMs) / 1000.0
+            val dist = Geo.haversineM(prev.lat, prev.lon, e.lat, e.lon)
+            if (dist > config.maxJumpMps * dt + config.jumpAccFactor * (prev.accM + e.accM)) {
+                jumpUntil = e.tMs + config.jumpHoldMs
+            }
+        }
+        lastFix = e
+        if (!latched) {
+            if (innovationD2 == null) { badInnovations = 0; return }
+            badInnovations = if (innovationD2 <= config.innovationGate) 0 else badInnovations + 1
+            if (badInnovations >= config.innovationCount) {
+                latched = true; okSince = null; okNeededVisual = false; reinit = false
+            }
+            return
+        }
+        val v = lastVisual
+        val visualOk = v != null && abs(e.tMs - v.tMs) <= config.visualAgreeMs &&
+            Geo.haversineM(e.lat, e.lon, v.lat, v.lon) <= max(config.visualAgreeM, 2 * v.sigmaM)
+        val filterOk = filterSigmaM != null && filterSigmaM <= config.relockMaxSigmaM &&
+            distToFilterM != null && distToFilterM <= config.relockMaxDistM
+        if (!visualOk && !filterOk) { okSince = null; okNeededVisual = false; return }
+        val since = okSince ?: e.tMs.also { okSince = it; okNeededVisual = false }
+        if (!filterOk) okNeededVisual = true
+        if (e.tMs - since >= config.relockOkMs) {
+            latched = false; okSince = null; badInnovations = 0
+            if (okNeededVisual) reinit = true
+            okNeededVisual = false
+        }
+    }
+
+    /** true один раз после снятия фиксации по визуальному согласию: переинициализировать фильтр по GNSS. */
     fun consumeReinit(): Boolean = reinit.also { reinit = false }
 
     fun assess(tMs: Double): Assessment {
@@ -417,11 +535,15 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
     private fun reasonsWithoutAgc(tMs: Double): Set<GnssReason> {
         val r = mutableSetOf<GnssReason>()
         val fix = lastFix
-        if (fix == null || tMs - fix.tMs > config.noFixMs) r += GnssReason.NO_FIX
-        else if (fix.accM > config.maxAccM) r += GnssReason.POOR_ACCURACY
+        val gap = if (fix == null) Double.POSITIVE_INFINITY else tMs - fix.tMs
+        when {
+            gap > config.noFixMs -> r += GnssReason.NO_FIX
+            gap > config.fixGapMs -> r += GnssReason.FIX_GAP
+            fix != null && fix.accM > config.maxAccM -> r += GnssReason.POOR_ACCURACY
+        }
         r += statusReasons(tMs)
         if (tMs < jumpUntil) r += GnssReason.JUMP
-        if (latchedSince != null) r += GnssReason.INNOVATION
+        if (latched) r += GnssReason.INNOVATION
         return r
     }
 
@@ -432,8 +554,7 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
         if (s.used < config.minUsed) r += GnssReason.FEW_SATS
         val cn0 = s.cn0Mean
         if (cn0 != null && cn0 < config.minCn0) r += GnssReason.LOW_CN0
-        val std = s.cn0Std
-        if (std != null && s.used >= config.uniformMinUsed && std < config.uniformCn0StdDb) r += GnssReason.UNIFORM_CN0
+        if (uniformFlags.count { it } >= config.uniformMinCount) r += GnssReason.UNIFORM_CN0
         return r
     }
 
@@ -443,20 +564,13 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
         if (tMs - a.tMs > config.statusStaleMs) return false
         return a.agcDb < b - config.agcDropDb
     }
-
-    private fun independentOk(tMs: Double): Boolean {
-        val fix = lastFix ?: return false
-        return statusReasons(tMs).isEmpty() && !agcDropped(tMs) && tMs >= jumpUntil && fix.accM <= config.maxAccM
-    }
-
-    private fun unlatch() { latchedSince = null; okSince = null; badInnovations = 0 }
 }
 ```
 
 - [ ] **Step 3: Тесты зелёные**
 
 Run: `./gradlew :core:test`
-Expected: `BUILD SUCCESSFUL`, 92 теста. Если какой-то тест на пороговом значении падает, пороги в `MonitorConfig` не менять, а сообщить NEEDS_CONTEXT с фактическими значениями.
+Expected: `BUILD SUCCESSFUL`, 98 тестов. Если тест на пороге падает, сначала проследить его вручную. Пороги `MonitorConfig` не менять, а сообщить NEEDS_CONTEXT с посчитанными значениями.
 
 - [ ] **Step 4: Commit**
 
@@ -588,7 +702,7 @@ class ModeManager(private val config: ModeConfig = ModeConfig()) {
 - [ ] **Step 3: Тесты зелёные**
 
 Run: `./gradlew :core:test`
-Expected: `BUILD SUCCESSFUL`, 96 тестов.
+Expected: `BUILD SUCCESSFUL`, 102 теста.
 
 - [ ] **Step 4: Commit**
 
@@ -626,13 +740,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - **`LocEvent` после инициализации:**
   1. `predictTo(t)`.
   2. Считаются `en` и `posSigma`.
-  3. Вызывается `monitor.onFix(ev, ekf.positionD2(en, posSigma))`, если монитор включён, иначе `null`.
+  3. Если монитор включён, вызывается `monitor.onFix(ev, ekf.positionD2(en[0], en[1], posSigma), hypot(en[0] − x[0], en[1] − x[1]), ekf.posSigma())`, иначе `onFix(ev, null, null, null)`.
   4. Если `monitor.consumeReinit()` — фильтр переинициализируется по фиксу (позиция; курс и скорость из фикса, если они есть, иначе текущие), и на этом обработка события заканчивается.
   5. Обновляется режим (см. ниже).
   6. Затем по режиму: `GNSS` — обновления с σ как в M2a; `FUSED` — все три σ × `fusedSigmaScale`; `VISUAL` и `DEAD_RECKONING` — без обновлений.
   7. Без монитора режим всегда `GNSS` (поведение M2a).
 - **`GnssStatusEvent` и `AgcEvent`** передаются в монитор.
-- **Кадр:** как в M2a, плюс `lastVisualOk = t` при принятой фиксации и обновление режима. Выход содержит режим, состояние и причины.
+- **Кадр:** как в M2a, плюс при принятой фиксации — `lastVisualOk = t` и `monitor.onVisualFix(t, lat, lon, σ_vis)` (координаты эталона и σ из M2a: 8 или 15 м), затем обновление режима. Выход содержит режим, состояние и причины.
 - **«Обновление режима»:** `assessment = monitor.assess(t)`; `modes.update(t, assessment.health, lastVisualOk)`.
 - **Инициализация** — как в M2a, по первому `LocEvent` со скоростью ≥ 3 м/с и курсом; σ ограничиваются снизу (функция `sigma(...)` переезжает из `Replayer` в `Localizer`).
 
@@ -656,7 +770,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - `monitorOffAlwaysUsesGnss`: при `monitor = false` режим всегда `GNSS`.
 
 Run: `cd /Users/vvnovg/navigator/android && JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home" ./gradlew :core:test :replay:test`
-Expected: `BUILD SUCCESSFUL`: `:core` — 99 тестов, `:replay` — 17 прежних (строковые проверки формата траектории обновлены под новые поля).
+Expected: `BUILD SUCCESSFUL`: `:core` — 105 тестов, `:replay` — 17 прежних (строковые проверки формата траектории обновлены под новые поля).
 
 Если какой-то прежний тест `:replay` меняет результат из-за гистерезиса (например, GNSS возвращается в фильтр через 10 с после конца пропадания), пороги не ослаблять. Нужно объяснить в отчёте, почему изменилось поведение, и сообщить NEEDS_CONTEXT, если тест проверял именно этот момент.
 
