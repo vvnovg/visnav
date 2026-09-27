@@ -54,6 +54,22 @@ def _split_segments(points: list[TrackPoint], max_speed_mps: float) -> list[list
     return segments
 
 
+def _find_spoof_bridge(
+    segments: list[list[TrackPoint]], max_speed_mps: float
+) -> tuple[int, int] | None:
+    """Find the smallest-span pair of segments (i, j), j > i+1, whose last/first
+    points are mutually plausible, so segments strictly between them can be
+    dropped as a spoof run. Smallest span first, so a short, confident fix is
+    always preferred over swallowing more segments than necessary."""
+    n = len(segments)
+    for span in range(2, n):
+        for i in range(0, n - span):
+            j = i + span
+            if _implied_speed_mps(segments[i][-1], segments[j][0]) <= max_speed_mps:
+                return i, j
+    return None
+
+
 def clean_track(
     track: list[TrackPoint],
     max_speed_mps: float = 70.0,
@@ -63,11 +79,12 @@ def clean_track(
 
     Points with poor HDOP are dropped outright; the remaining points are cut
     into segments wherever the implied speed between consecutive points is
-    physically impossible, interior segments bracketed by two mutually
-    plausible neighbours are merged away as GPS-spoofing excursions, and if
-    more than one segment survives only the longest-duration one is kept
-    (the rest are "detached" fragments, e.g. a spoof block with no real
-    point before it).
+    physically impossible. Any run of one or more interior segments bracketed
+    by two mutually plausible segments is merged away as a GPS-spoofing
+    excursion (smallest run first, so a short, confident bridge is always
+    preferred over a longer, riskier one). If more than one segment survives,
+    only the longest-duration one is kept (the rest are "detached" fragments,
+    e.g. a spoof block with no real point before it).
     """
     counts = {"hdop": 0, "spoof": 0, "detached": 0}
     if not track:
@@ -82,15 +99,14 @@ def clean_track(
 
     segments = _split_segments(kept, max_speed_mps)
 
-    changed = True
-    while changed and len(segments) > 2:
-        changed = False
-        for i in range(1, len(segments) - 1):
-            if _implied_speed_mps(segments[i - 1][-1], segments[i + 1][0]) <= max_speed_mps:
-                counts["spoof"] += len(segments[i])
-                segments[i - 1 : i + 2] = [segments[i - 1] + segments[i + 1]]
-                changed = True
-                break
+    while len(segments) > 2:
+        bridge = _find_spoof_bridge(segments, max_speed_mps)
+        if bridge is None:
+            break
+        i, j = bridge
+        for k in range(i + 1, j):
+            counts["spoof"] += len(segments[k])
+        segments[i : j + 1] = [segments[i] + segments[j]]
 
     if len(segments) > 1:
         def _duration(seg: list[TrackPoint]) -> float:
