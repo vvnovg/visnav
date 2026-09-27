@@ -69,3 +69,42 @@ def test_pack_refs_cli(tmp_path):
     assert rp.meta["input_h"] == 32 and rp.meta["input_w"] == 32
     assert rp.meta["source"].startswith("Mapillary")
     assert len(rp.meta["onnx_sha256"]) == 64
+
+
+def test_pack_refs_cli_with_gpx_corridor_filters_far_ref(tmp_path):
+    # Two refs near the GPX track (the usual 3-point cluster spans ~200 m) and
+    # one ref ~5 km away; only the near ones should survive the corridor filter.
+    torch.manual_seed(0)
+    net = torch.nn.Sequential(torch.nn.AdaptiveAvgPool2d(1), torch.nn.Flatten())
+    onnx_path = export_onnx(net, (32, 32), tmp_path / "m.onnx")
+
+    root = tmp_path / "refs"
+    (root / "images").mkdir(parents=True)
+    colors = [(0, 0, 255), (0, 255, 0), (255, 0, 0)]
+    far_lat = LATS[0] + 0.045  # ~5 km north
+    lats = LATS + [far_lat]
+    lons = LONS + [LONS[0]]
+    places = []
+    for i, (lat, lon) in enumerate(zip(lats, lons)):
+        cv2.imwrite(str(root / f"images/{i}.jpg"), np.full((48, 64, 3), colors[i % len(colors)], np.uint8))
+        places.append(Place(f"images/{i}.jpg", lat, lon, 0.0))
+    write_places(root / "refs.csv", places)
+
+    gpx_path = tmp_path / "track.gpx"
+    gpx_path.write_text(f"""<?xml version="1.0"?>
+<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
+<trk><trkseg>
+<trkpt lat="{LATS[0]}" lon="{LONS[0]}"><time>2026-09-20T10:00:00Z</time></trkpt>
+<trkpt lat="{LATS[-1]}" lon="{LONS[-1]}"><time>2026-09-20T10:00:10Z</time></trkpt>
+</trkseg></trk></gpx>
+""")
+
+    out = tmp_path / "bundle"
+    result = main([
+        "pack-refs", "--refs", str(root / "refs.csv"), "--onnx", str(onnx_path),
+        "--gpx", str(gpx_path), "--out", str(out),
+    ])
+    assert result == 0
+    rp = read_refpack(out)
+    assert rp.descriptors.shape == (3, 3)  # far ref (index 3) excluded, only the 3-point cluster packed
+    assert far_lat not in rp.lats.tolist()

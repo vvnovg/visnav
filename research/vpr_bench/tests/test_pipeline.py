@@ -8,6 +8,7 @@ import torch
 from vpr_bench import pipeline
 from vpr_bench.dataset import Place, write_places
 from vpr_bench.models import VprModel
+from vpr_bench.onnx_export import export_onnx
 from vpr_bench.pipeline import SETTINGS, embed_places, embed_places_cached, run_benchmark
 
 COLORS = [(0, 0, 255), (0, 255, 0), (255, 0, 0)]
@@ -40,6 +41,26 @@ def _make_set_n(root, name, n):
 def _fake_loader(name, device):
     net = torch.nn.Sequential(torch.nn.AdaptiveAvgPool2d(1), torch.nn.Flatten())
     return VprModel(name, net, (32, 32), device)
+
+
+def test_run_benchmark_end_to_end_with_onnx_model(tmp_path):
+    # Exercises the real onnx:<path> loader path (vpr_bench.models.load_model ->
+    # OnnxEmbedder), not the test-only _fake_loader used elsewhere in this file —
+    # closest thing to the real `bench --models onnx:...` CLI flow without a real
+    # exported model or network access.
+    torch.manual_seed(0)
+    net = torch.nn.Sequential(torch.nn.AdaptiveAvgPool2d(1), torch.nn.Flatten())
+    onnx_path = export_onnx(net, (32, 32), tmp_path / "tiny.onnx")
+
+    refs = _make_set(tmp_path / "refs", "refs.csv")
+    queries = _make_set(tmp_path / "queries", "queries.csv")
+    results, meta = run_benchmark([f"onnx:{onnx_path}"], refs, {"S1": queries})
+
+    model_name = f"onnx:{onnx_path}"
+    assert [r.setting for r in results] == [s[0] for s in SETTINGS]
+    assert all(r.recall[1] == 1.0 for r in results)  # identical ref/query images -> perfect top-1
+    assert meta[model_name]["dim"] == 3
+    assert meta[model_name]["ms_per_image"] > 0
 
 
 def test_run_benchmark_perfect_match(tmp_path):
