@@ -131,6 +131,11 @@ class M1Controller(private val context: Context) {
                 return
             }
             val mode = _state.value.mode
+            // Ставим running/status здесь, а не в конце: последующие предупреждения этого блока
+            // (обрыв заголовка датчиков через onFirstFailure, отсутствие гироскопа/акселерометра)
+            // дописываются к этому статусу через "it.status + ...", а не затираются им — раньше
+            // финальный _state.update шёл последним и стирал их целиком.
+            _state.update { it.copy(running = true, frames = 0, errors = 0, status = "Запись: ${mode.name}") }
             logDir.mkdirs()
             val startedMs = System.currentTimeMillis()
             val base = "session-$startedMs-${mode.name.lowercase()}"
@@ -215,7 +220,6 @@ class M1Controller(private val context: Context) {
                     }
                 }
             }
-            _state.update { it.copy(running = true, frames = 0, errors = 0, status = "Запись: ${mode.name}") }
         } catch (e: Exception) {
             // Любой сбой после CAS (например, база выгружена или диск недоступен) не должен
             // оставить контроллер в состоянии "running=true" без реально работающей записи.
@@ -281,7 +285,7 @@ class M1Controller(private val context: Context) {
             closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
             val suffix = buildString {
                 if (skipped > 0) append(" · пропущено датчиков: $skipped")
-                if (failedCount > 0) append(" · ошибок записи датчиков: $failedCount")
+                if (failedCount > 0) append(" · журнал датчиков прерван после ошибки записи")
                 for (err in closeErrors) append(" · $err")
             }
             _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}$suffix") }

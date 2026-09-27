@@ -121,7 +121,9 @@ class SensorLogger internal constructor(private val writer: java.io.Writer) : Cl
         _failed++
         val firstFailure = !broken
         broken = true
-        if (firstFailure) onFirstFailure?.invoke(e)
+        // Колбэк — чужой код; если он бросит исключение, это не должно превратить header()/event()
+        // (задуманные как никогда не бросающие) в исключение наружу.
+        if (firstFailure) runCatching { onFirstFailure?.invoke(e) }
     }
 
     @Synchronized override fun close() {
