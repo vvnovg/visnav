@@ -33,4 +33,26 @@ class HalfEncodeTest {
             assertEquals(h, bits(f), "half 0x${h.toString(16)}")
         }
     }
+
+    @Test fun tieBreakerAndCarryCases() {
+        // Halfway between 1.0 and next half (1.0 + 2^-10 in half terms):
+        // Exactly 1.0 + 2^-11 rounds to 0x3C00 by round-to-even (1.0 is even in half)
+        val halfway1 = Math.scalb(1f, -11).toFloat()  // 2^-11, adds to 1.0
+        val tied = 1.0f + halfway1
+        assertEquals(0x3C00, bits(tied), "1.0 + 2^-11 (tie to even) → 0x3C00")
+
+        // Value above halfway rounds to next representable: 1.0 + 3·2^-11 → 0x3C02
+        val above = 1.0f + 3 * halfway1
+        assertEquals(0x3C02, bits(above), "1.0 + 3·2^-11 → 0x3C02")
+
+        // Subnormal that rounds up to smallest normal (0x0400 = 2^-14):
+        // Value slightly above 2^-14 - 2^-24 should round to 0x0400
+        val nearBoundary = Math.scalb(1f, -14).toFloat() + Math.scalb(1f, -25).toFloat()
+        assertEquals(0x0400, bits(nearBoundary), "near 2^-14 rounds to normal 0x0400")
+
+        // Normal exponent boundary: value between 2^1 and 2^1 + 2^-10 in half precision
+        // 2.0 - 2^-12 should encode as 0x4000
+        val exp2 = 2.0f - Math.scalb(1f, -12).toFloat()
+        assertEquals(0x4000, bits(exp2), "2.0 - 2^-12 → 0x4000 (normal exponent carry)")
+    }
 }
