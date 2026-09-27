@@ -19,7 +19,6 @@ class TrajRow:
     lat: float
     lon: float
     sigma_m: float
-    outage: bool
 
 
 @dataclass(frozen=True)
@@ -53,7 +52,9 @@ def read_trajectory(path: Path) -> tuple[dict, list[TrajRow]]:
             continue
         # Treat null sigma_m as NaN
         sigma_m = r["sigma_m"] if r["sigma_m"] is not None else float("nan")
-        rows.append(TrajRow(int(r["t_ms"]), r["lat"], r["lon"], sigma_m, bool(r["outage"])))
+        rows.append(TrajRow(int(r["t_ms"]), r["lat"], r["lon"], sigma_m))
+    # Sort rows by t_ms
+    rows.sort(key=lambda row: row.t_ms)
     return header, rows
 
 
@@ -100,19 +101,31 @@ def evaluate_replay(
 def render_replay_report(r: ReplayResult, min_outage_dist_m: float = 200.0) -> str:
     lines = ["# Replay M2a", ""]
     if r.visual:
-        ok = r.p50_m <= 5.0 and r.p95_m <= 15.0
-        lines += [
-            f"Режим: визуальные фиксации. NFR-1: P50 ≤ 5 м, P95 ≤ 15 м — "
-            f"P50 = {r.p50_m:.1f} м, P95 = {r.p95_m:.1f} м, точек {r.n_points} {'✅' if ok else '❌'}",
-        ]
+        if r.n_points == 0:
+            lines += [
+                f"Режим: визуальные фиксации. NFR-1: P50 ≤ 5 м, P95 ≤ 15 м — "
+                f"⚠️ нет данных для проверки",
+            ]
+        else:
+            ok = r.p50_m <= 5.0 and r.p95_m <= 15.0
+            lines += [
+                f"Режим: визуальные фиксации. NFR-1: P50 ≤ 5 м, P95 ≤ 15 м — "
+                f"P50 = {r.p50_m:.1f} м, P95 = {r.p95_m:.1f} м, точек {r.n_points} {'✅' if ok else '❌'}",
+            ]
     else:
         long = [o for o in r.outages if o.distance_m >= min_outage_dist_m and not math.isnan(o.drift_pct)]
-        worst = max((o.drift_pct for o in long), default=float("nan"))
-        ok = bool(long) and worst <= 3.0
-        lines += [
-            f"Режим: счисление пути без визуальных фиксаций. NFR-5: дрейф ≤ 3 % пути — "
-            f"худший {worst:.2f} % по {len(long)} пропаданиям ≥ {min_outage_dist_m:.0f} м {'✅' if ok else '❌'}",
-        ]
+        if not long:
+            lines += [
+                f"Режим: счисление пути без визуальных фиксаций. NFR-5: дрейф ≤ 3 % пути — "
+                f"⚠️ нет данных для проверки",
+            ]
+        else:
+            worst = max((o.drift_pct for o in long), default=float("nan"))
+            ok = worst <= 3.0
+            lines += [
+                f"Режим: счисление пути без визуальных фиксаций. NFR-5: дрейф ≤ 3 % пути — "
+                f"худший {worst:.2f} % по {len(long)} пропаданиям ≥ {min_outage_dist_m:.0f} м {'✅' if ok else '❌'}",
+            ]
     lines += [
         "",
         "| Пропадание, с | Точек | Путь, м | Ошибка в конце, м | Дрейф, % |",
