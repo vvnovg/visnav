@@ -181,16 +181,22 @@ class M1Controller(private val context: Context) {
             gps.onGnss = { sLog.event(it) }
             gps.start()
             sensors.onWarning = { message -> _state.update { it.copy(status = it.status + " · $message") } }
-            if (!sensors.start { sLog.event(it) }) {
+            val sensorsStarted = sensors.start { sLog.event(it) }
+            if (!sensorsStarted) {
                 _state.update { it.copy(status = it.status + " · нет гироскопа/акселерометра — датчики не пишутся") }
             }
             frameAnalyzer.onError = { t ->
                 _state.update { it.copy(errors = it.errors + 1, status = "Ошибка кадра (анализ): ${t.message}") }
             }
             frameAnalyzer.onFrame = onFrame@{ tMs, rgb, preMs, captureTsNs ->
-                if (captureTsNs > 0) {
-                    val frameTMs = (captureTsNs / 1e6)
-                    sLog.event(FrameCaptureEvent(sensors.offsetMs + frameTMs, frameTMs.toLong()))
+                // t = tMs (the same wall-clock value as this frame's .jsonl t_ms) — NOT a conversion
+                // of captureTsNs: that raw camera timestamp isn't reliably on elapsedRealtimeNanos on
+                // every device, so offsetMs (calibrated against elapsedRealtimeNanos in SensorRecorder)
+                // would silently produce a wrong wall time. captureTsNs is kept as-is in cap_ns for
+                // later, source-aware correlation (see FrameCaptureEvent). Skipped entirely when the
+                // sensor thread never started — there is no SensorRecorder clock domain to relate it to.
+                if (captureTsNs > 0 && sensorsStarted) {
+                    sLog.event(FrameCaptureEvent(tMs.toDouble(), tMs, captureTsNs))
                 }
                 if (!headerWritten) {
                     try {

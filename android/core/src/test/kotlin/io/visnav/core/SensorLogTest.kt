@@ -46,9 +46,9 @@ class SensorLogTest {
 
     @Test fun clockAndGyroUncalAndFrameCaptureRoundTrip() {
         val events = listOf(
-            ClockEvent(1.0, 1_700_000_000_000L, 123_456_789_000L),
+            ClockEvent(1.0, 1_700_000_000_000L, 123_456_789_000L, 987_654_321_000L),
             GyroUncalEvent(2.0, 0.1f, 0.2f, 0.3f, 0.01f, 0.02f, 0.03f),
-            FrameCaptureEvent(3.0, 4_500L),
+            FrameCaptureEvent(4_500.0, 4_500L, 987_654_000L),
         )
         for (e in events) {
             assertEquals(true, SensorLogFormat.isWritable(e))

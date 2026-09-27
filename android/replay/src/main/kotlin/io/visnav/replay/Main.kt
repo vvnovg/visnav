@@ -1,6 +1,8 @@
 package io.visnav.replay
 
+import io.visnav.core.AccelEvent
 import io.visnav.core.ClockEvent
+import io.visnav.core.GyroEvent
 import io.visnav.core.RefPack
 import io.visnav.core.RefPackMeta
 import io.visnav.core.SensorEvent
@@ -13,6 +15,7 @@ import kotlin.system.exitProcess
 private const val USAGE =
     "usage: replay --session <prefix> --refpack <dir> --out <file> [--outage START_S:LEN_S]... [--no-visual]"
 private const val FIRST_SENSOR_TIME_TOLERANCE_MS = 5_000.0
+private const val CLOCK_DRIFT_WARN_MS = 1_000L
 
 fun main(args: Array<String>) {
     var session: String? = null; var refpack: String? = null; var out: String? = null
@@ -55,13 +58,18 @@ fun main(args: Array<String>) {
         fail("descriptor dim ${data.descriptors.dim} != refpack dim ${pack.dim}")
     }
     if (!firstSensorTimeOk(data.sensors, data.header.startedMs)) {
-        val first = data.sensors.minBy { it.tMs }
+        val first = firstImuEvent(data.sensors)
         fail(
-            "first sensor event t=${first.tMs} is more than ${FIRST_SENSOR_TIME_TOLERANCE_MS.toLong()} ms " +
+            "first IMU sensor event t=${first?.tMs} is more than ${FIRST_SENSOR_TIME_TOLERANCE_MS.toLong()} ms " +
                 "away from session started_ms=${data.header.startedMs} — sensors and session clock disagree"
         )
     }
-    clockDriftMaxMs(data.sensors.filterIsInstance<ClockEvent>())?.let { println("clock drift max $it ms") }
+    clockDriftMaxMs(data.sensors.filterIsInstance<ClockEvent>())?.let { drift ->
+        println("clock drift max $drift ms")
+        if (drift > CLOCK_DRIFT_WARN_MS) {
+            System.err.println("warning: clock drift max $drift ms exceeds ${CLOCK_DRIFT_WARN_MS} ms")
+        }
+    }
 
     val t0 = data.header.startedMs
     val outages = outageSpecs.map { spec -> parseOutage(spec, t0) }
@@ -74,14 +82,23 @@ fun main(args: Array<String>) {
     println("${points.size} points (${points.count { it.inOutage }} in outages) -> $out")
 }
 
-/** true unless the recorded sensor events start more than 5 s away from the session's own started_ms
- * (a sign sensor timestamps and the session clock disagree — see SensorRecorder's own first-event check). */
+/** The earliest IMU (gyro/accel) event, or null if there are none. Restricted to IMU on purpose:
+ * other SensorEvent kinds can carry a `t` derived from a different clock domain — notably
+ * FrameCaptureEvent, whose `t` is the frame's own wall time and NOT converted through
+ * SensorRecorder's elapsedRealtimeNanos-calibrated offset (see FrameCaptureEvent's kdoc) — so mixing
+ * them into a single "earliest sensor event" would compare apples to oranges. */
+internal fun firstImuEvent(sensors: List<SensorEvent>): SensorEvent? =
+    sensors.asSequence().filter { it is GyroEvent || it is AccelEvent }.minByOrNull { it.tMs }
+
+/** true unless the recorded IMU events (gyro/accel — see firstImuEvent) start more than 5 s away
+ * from the session's own started_ms (a sign sensor timestamps and the session clock disagree —
+ * see SensorRecorder's own first-event check). */
 internal fun firstSensorTimeOk(
     sensors: List<SensorEvent>,
     startedMs: Long,
     toleranceMs: Double = FIRST_SENSOR_TIME_TOLERANCE_MS,
 ): Boolean {
-    val first = sensors.minByOrNull { it.tMs } ?: return true
+    val first = firstImuEvent(sensors) ?: return true
     return abs(first.tMs - startedMs) <= toleranceMs
 }
 

@@ -81,7 +81,7 @@ class SensorRecorder(context: Context) : SensorEventListener {
         val tMs = offsetMs + e.timestamp / 1e6
         if (tMs - lastClockEventMs >= CLOCK_EVENT_PERIOD_MS) {
             lastClockEventMs = tMs
-            s(ClockEvent(tMs, System.currentTimeMillis(), SystemClock.elapsedRealtimeNanos()))
+            s(ClockEvent(tMs, System.currentTimeMillis(), SystemClock.elapsedRealtimeNanos(), System.nanoTime()))
         }
         when (e.sensor.type) {
             Sensor.TYPE_GYROSCOPE -> s(GyroEvent(tMs, e.values[0], e.values[1], e.values[2]))

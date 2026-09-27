@@ -23,8 +23,10 @@ data class LocEvent(
 ) : SensorEvent
 data class GnssStatusEvent(override val tMs: Double, val sats: Int, val used: Int, val cn0Mean: Float?) : SensorEvent
 
-/** Синхронизация часов: настенное время и монотонные часы (elapsedRealtimeNanos) для того же момента. */
-data class ClockEvent(override val tMs: Double, val wallMs: Long, val elapsedNs: Long) : SensorEvent
+/** Синхронизация часов: настенное время, elapsedRealtimeNanos и System.nanoTime() для того же
+ * момента — monoNs позволяет позже перевести метки, снятые по System.nanoTime() (например, часть
+ * камер через Camera2/CameraX), а не только по elapsedRealtimeNanos (см. FrameCaptureEvent). */
+data class ClockEvent(override val tMs: Double, val wallMs: Long, val elapsedNs: Long, val monoNs: Long) : SensorEvent
 
 /** Некалиброванный гироскоп (рад/с): values[0..2] — угловая скорость, values[3..5] — оценка смещения. */
 data class GyroUncalEvent(
@@ -32,9 +34,19 @@ data class GyroUncalEvent(
     val bx: Float, val by: Float, val bz: Float,
 ) : SensorEvent
 
-/** Время захвата кадра камеры: t — настенное время (через смещение SensorRecorder), frameTMs — «сырые»
- * миллисекунды камеры (монотонные часы, до смещения) — диагностика, replay это событие игнорирует. */
-data class FrameCaptureEvent(override val tMs: Double, val frameTMs: Long) : SensorEvent
+/**
+ * Время захвата кадра камеры — чисто диагностическое, replay это событие игнорирует.
+ *
+ * `t`/`frameTMs` — настенное время кадра (то же значение, что и `t_ms` соответствующей записи в
+ * `.jsonl`; хранится явно как `frame_t_ms`, чтобы можно было сопоставить событие с кадром без
+ * повторной конвертации). НЕ переводится из `capNs`: конвертация через смещение SensorRecorder
+ * предполагает, что метка кадра снята по elapsedRealtimeNanos, а камера (ImageProxy.imageInfo.
+ * timestamp) на части устройств использует другие часы — ложная конвертация может увести `t` на
+ * часы вперёд/назад. `capNs` — сырая метка камеры (нс, источник зависит от устройства/реализации
+ * CameraX) сохраняется как есть; сопоставить её с часами телефона можно позже через `clk`
+ * (elapsed_ns или mono_ns), когда источник метки камеры известен.
+ */
+data class FrameCaptureEvent(override val tMs: Double, val frameTMs: Long, val capNs: Long) : SensorEvent
 
 object SensorLogFormat {
     fun header(startedMs: Long): String = "{\"v\":1,\"type\":\"sensors\",\"started_ms\":$startedMs}"
@@ -68,10 +80,11 @@ object SensorLogFormat {
             val cn0 = if (e.cn0Mean?.isFinite() == true) e.cn0Mean else null
             "{\"t\":${e.tMs},\"k\":\"gnss\",\"sats\":${e.sats},\"used\":${e.used},\"cn0\":$cn0}"
         }
-        is ClockEvent -> "{\"t\":${e.tMs},\"k\":\"clk\",\"wall_ms\":${e.wallMs},\"elapsed_ns\":${e.elapsedNs}}"
+        is ClockEvent -> "{\"t\":${e.tMs},\"k\":\"clk\",\"wall_ms\":${e.wallMs}," +
+            "\"elapsed_ns\":${e.elapsedNs},\"mono_ns\":${e.monoNs}}"
         is GyroUncalEvent -> "{\"t\":${e.tMs},\"k\":\"gu\",\"x\":${e.x},\"y\":${e.y},\"z\":${e.z}," +
             "\"bx\":${e.bx},\"by\":${e.by},\"bz\":${e.bz}}"
-        is FrameCaptureEvent -> "{\"t\":${e.tMs},\"k\":\"frame\",\"frame_t_ms\":${e.frameTMs}}"
+        is FrameCaptureEvent -> "{\"t\":${e.tMs},\"k\":\"frame\",\"frame_t_ms\":${e.frameTMs},\"cap_ns\":${e.capNs}}"
     }
 
     fun parse(line: String): SensorEvent? {
@@ -87,9 +100,9 @@ object SensorLogFormat {
             "loc" -> LocEvent(t, o.getValue("lat").jsonPrimitive.double, o.getValue("lon").jsonPrimitive.double,
                 f("acc"), fOrNull("spd"), fOrNull("spd_acc"), fOrNull("brg"), fOrNull("brg_acc"))
             "gnss" -> GnssStatusEvent(t, o.getValue("sats").jsonPrimitive.int, o.getValue("used").jsonPrimitive.int, fOrNull("cn0"))
-            "clk" -> ClockEvent(t, l("wall_ms"), l("elapsed_ns"))
+            "clk" -> ClockEvent(t, l("wall_ms"), l("elapsed_ns"), l("mono_ns"))
             "gu" -> GyroUncalEvent(t, f("x"), f("y"), f("z"), f("bx"), f("by"), f("bz"))
-            "frame" -> FrameCaptureEvent(t, l("frame_t_ms"))
+            "frame" -> FrameCaptureEvent(t, l("frame_t_ms"), l("cap_ns"))
             // Контракт .sensors.jsonl v1: расширяется аддитивно, читатели игнорируют неизвестные виды событий.
             else -> null
         }
