@@ -14,6 +14,7 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import io.visnav.core.DescriptorLogWriter
+import io.visnav.core.FrameCaptureEvent
 import io.visnav.core.Geo
 import io.visnav.core.LocalizationPipeline
 import io.visnav.core.PriorMode
@@ -179,13 +180,18 @@ class M1Controller(private val context: Context) {
             gps.onLoc = { sLog.event(it) }
             gps.onGnss = { sLog.event(it) }
             gps.start()
+            sensors.onWarning = { message -> _state.update { it.copy(status = it.status + " · $message") } }
             if (!sensors.start { sLog.event(it) }) {
                 _state.update { it.copy(status = it.status + " · нет гироскопа/акселерометра — датчики не пишутся") }
             }
             frameAnalyzer.onError = { t ->
                 _state.update { it.copy(errors = it.errors + 1, status = "Ошибка кадра (анализ): ${t.message}") }
             }
-            frameAnalyzer.onFrame = onFrame@{ tMs, rgb, preMs ->
+            frameAnalyzer.onFrame = onFrame@{ tMs, rgb, preMs, captureTsNs ->
+                if (captureTsNs > 0) {
+                    val frameTMs = (captureTsNs / 1e6)
+                    sLog.event(FrameCaptureEvent(sensors.offsetMs + frameTMs, frameTMs.toLong()))
+                }
                 if (!headerWritten) {
                     try {
                         log.header(SessionHeader(
