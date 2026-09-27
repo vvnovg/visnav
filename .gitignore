@@ -4,3 +4,9 @@ __pycache__/
 .pytest_cache/
 research/vpr_bench/data/
 .env
+
+android/.gradle/
+android/build/
+android/*/build/
+android/local.properties
+android/.kotlin/

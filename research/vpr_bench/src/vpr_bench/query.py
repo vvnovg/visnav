@@ -152,7 +152,7 @@ def pose_at(track: list[TrackPoint], t: float) -> tuple[float, float, float, flo
     return here[0], here[1], heading, speed
 
 
-def _has_gap(times: list[float], t: float, max_gap_s: float) -> bool:
+def has_gap(times: list[float], t: float, max_gap_s: float) -> bool:
     """True if the track points bracketing [t-1, t+1] are too sparse to trust
     the straight-line interpolation across them (e.g. a tunnel GPS outage)."""
     lo, hi = t - 1.0, t + 1.0
@@ -203,7 +203,7 @@ def extract_query_frames(
                 if pose is None:
                     if stats is not None:
                         stats["no_pose"] += 1
-                elif _has_gap(times, t, max_gap_s):
+                elif has_gap(times, t, max_gap_s):
                     if stats is not None:
                         stats["gap"] += 1
                 elif pose[3] < min_speed_mps:
