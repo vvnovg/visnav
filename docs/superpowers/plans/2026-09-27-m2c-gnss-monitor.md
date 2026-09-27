@@ -217,7 +217,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - **Разрыв фиксов:** больше `fixGapMs` → `FIX_GAP` (`DEGRADED`); больше `noFixMs` → `NO_FIX` (`UNTRUSTED`).
 - **`JUMP`** — расстояние между соседними фиксами больше `maxJumpMps·dt + jumpAccFactor·(acc₁ + acc₂)`. Держится `jumpHoldMs`. Фикс со временем не позже предыдущего игнорируется целиком.
 - **`UNIFORM_CN0`** — не меньше `uniformMinCount` из последних `uniformWindow` статусов имеют разброс C/N0 < `uniformCn0StdDb` при `used ≥ uniformMinUsed`, и последний статус свежий.
-- **`INNOVATION`** фиксируется после `innovationCount` фиксов подряд с d² > гейта. Снимается только после `relockOkMs` непрерывных «положительных доказательств» — каждое GNSS-фикса выполняет хотя бы одно:
+- **`INNOVATION`** фиксируется после `innovationCount` фиксов подряд, каждый из которых плох сразу по двум независимым признакам: d² > гейта **и** `distToFilterM != null && distToFilterM > relockMaxDistM` (иначе расхождение можно списать на выброс χ², а не на реальный отрыв от фильтра). Снимается только после `relockOkMs` непрерывных «положительных доказательств» — каждое GNSS-фикса выполняет хотя бы одно:
   - **визуальное согласие:** последняя визуальная фиксация отстоит от фикса по времени не больше чем на `visualAgreeMs`, а по расстоянию — не больше `max(visualAgreeM, 2·σ_vis)`;
   - **точный фильтр:** `filterSigmaM ≤ relockMaxSigmaM` и `distToFilterM ≤ relockMaxDistM`.
   
@@ -227,6 +227,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - обновляется, только если остальные признаки чистые и значение не ниже базы на `agcFreezeDb` и больше (под падение база не подстраивается);
   - если `AGC_DROP` держится `agcRelearnMs` при чистых признаках статуса, база переустанавливается на текущее значение (зарядка, смена диапазонов).
 - **`UNTRUSTED`**, если есть причина из набора {`NO_FIX`, `JUMP`, `INNOVATION`, `UNIFORM_CN0`}; `DEGRADED` — любая другая причина.
+- **Окно `UNIFORM_CN0`:** если разрыв между соседними статусами превышает `statusStaleMs`, накопленное окно последних флагов сбрасывается — старые (возможно, ещё не подменённые) статусы не должны продолжать влиять на решение после долгого молчания приёмника.
 
 - [ ] **Step 1: Падающие тесты**
 
@@ -410,7 +411,7 @@ data class MonitorConfig(
     val relockOkMs: Double = 10_000.0,
     val relockMaxSigmaM: Double = 30.0,
     val relockMaxDistM: Double = 30.0,
-    val visualAgreeMs: Double = 5_000.0,
+    val visualAgreeMs: Double = 2_000.0,
     val visualAgreeM: Double = 30.0,
     val uniformCn0StdDb: Float = 1.5f,  // у подменного сигнала все спутники почти одной силы
     val uniformMinUsed: Int = 6,
@@ -449,6 +450,8 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
     private var reinit = false
 
     fun onStatus(e: GnssStatusEvent) {
+        val prev = lastStatus
+        if (prev != null && e.tMs - prev.tMs > config.statusStaleMs) uniformFlags.clear()
         lastStatus = e
         val std = e.cn0Std
         uniformFlags.addLast(std != null && e.used >= config.uniformMinUsed && std < config.uniformCn0StdDb)
@@ -497,7 +500,9 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
         lastFix = e
         if (!latched) {
             if (innovationD2 == null) { badInnovations = 0; return }
-            badInnovations = if (innovationD2 <= config.innovationGate) 0 else badInnovations + 1
+            val bad = innovationD2 > config.innovationGate &&
+                distToFilterM != null && distToFilterM > config.relockMaxDistM
+            badInnovations = if (bad) badInnovations + 1 else 0
             if (badInnovations >= config.innovationCount) {
                 latched = true; okSince = null; okNeededVisual = false; reinit = false
             }
@@ -570,7 +575,7 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
 - [ ] **Step 3: Тесты зелёные**
 
 Run: `./gradlew :core:test`
-Expected: `BUILD SUCCESSFUL`, 98 тестов. Если тест на пороге падает, сначала проследить его вручную. Пороги `MonitorConfig` не менять, а сообщить NEEDS_CONTEXT с посчитанными значениями.
+Expected: `BUILD SUCCESSFUL`, 108 тестов (после ревью добавлены тесты на метрическое условие фиксации, правила повторного захвата и пороги около границ). Если тест на пороге падает, сначала проследить его вручную. Пороги `MonitorConfig` не менять, а сообщить NEEDS_CONTEXT с посчитанными значениями.
 
 - [ ] **Step 4: Commit**
 
