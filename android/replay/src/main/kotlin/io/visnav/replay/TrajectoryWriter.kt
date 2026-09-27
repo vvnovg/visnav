@@ -14,7 +14,8 @@ object TrajectoryWriter {
             w.newLine()
             for (p in points) {
                 w.write("{\"t_ms\":${p.tMs},\"lat\":${num(p.lat)},\"lon\":${num(p.lon)},\"sigma_m\":${num(p.sigmaM)}," +
-                    "\"outage\":${p.inOutage},\"vis_sim\":${num(p.visSim)},\"vis_ok\":${p.visAccepted}}")
+                    "\"outage\":${p.inOutage},\"vis_sim\":${num(p.visSim)},\"vis_ok\":${p.visAccepted}," +
+                    "\"vis_state\":${JsonPrimitive(p.visState)},\"stationary\":${p.stationary}}")
                 w.newLine()
             }
         }

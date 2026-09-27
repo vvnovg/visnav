@@ -26,9 +26,13 @@ data class ReplayConfig(
     val filter: FilterConfig = FilterConfig(),
 )
 
+/** Состояние визуальной фиксации на кадре: "off" (визуальный режим выключен), "no_desc" (нет
+ * дескриптора для кадра), "empty_window" (нет эталонов в окне поиска), "below" (лучшее сходство
+ * ниже acceptSim), "gated" (обновление отклонено хи-квадрат-гейтом), "ok" (обновление принято). */
 data class TrajPoint(
     val tMs: Long, val lat: Double, val lon: Double, val sigmaM: Double,
     val inOutage: Boolean, val visSim: Float?, val visAccepted: Boolean?,
+    val visState: String, val stationary: Boolean,
 )
 
 private const val MIN_POS_SIGMA_M = 3.0
@@ -119,23 +123,38 @@ class Replayer(private val pack: RefPack, private val config: ReplayConfig) {
                     predictTo(t)
                     var visSim: Float? = null
                     var visOk: Boolean? = null
-                    val di = session.descriptors.indexOf(ev.tMs)
-                    if (config.visual && di >= 0) {
-                        val center = enu!!.toLatLon(ekf.x[0], ekf.x[1])
-                        val radius = (3 * ekf.posSigma()).coerceIn(config.minRadiusM, config.maxRadiusM)
-                        val best = index.search(session.descriptors.descriptor(di), config.k, center[0], center[1], radius).firstOrNull()
-                        if (best != null) {
-                            visSim = best.sim
-                            if (best.sim >= config.acceptSim) {
-                                val en = enu!!.toEn(pack.lats[best.index], pack.lons[best.index])
-                                visOk = ekf.updatePosition(en[0], en[1], if (best.sim >= 0.7f) 8.0 else 15.0)
+                    var visState: String
+                    if (!config.visual) {
+                        visState = "off"
+                    } else {
+                        val di = session.descriptors.indexOf(ev.tMs)
+                        if (di < 0) {
+                            visState = "no_desc"
+                        } else {
+                            val center = enu!!.toLatLon(ekf.x[0], ekf.x[1])
+                            val radius = (3 * ekf.posSigma()).coerceIn(config.minRadiusM, config.maxRadiusM)
+                            val best = index.search(session.descriptors.descriptor(di), config.k, center[0], center[1], radius).firstOrNull()
+                            if (best == null) {
+                                visState = "empty_window"
                             } else {
-                                visOk = false
+                                visSim = best.sim
+                                if (best.sim < config.acceptSim) {
+                                    visOk = false
+                                    visState = "below"
+                                } else {
+                                    val en = enu!!.toEn(pack.lats[best.index], pack.lons[best.index])
+                                    val accepted = ekf.updatePosition(en[0], en[1], if (best.sim >= 0.7f) 8.0 else 15.0)
+                                    visOk = accepted
+                                    visState = if (accepted) "ok" else "gated"
+                                }
                             }
                         }
                     }
                     val ll = enu!!.toLatLon(ekf.x[0], ekf.x[1])
-                    out.add(TrajPoint(ev.tMs, ll[0], ll[1], ekf.posSigma(), inOutage(t), visSim, visOk))
+                    out.add(TrajPoint(
+                        ev.tMs, ll[0], ll[1], ekf.posSigma(), inOutage(t), visSim, visOk,
+                        visState, stationary.isStationary(t),
+                    ))
                 }
             }
         }

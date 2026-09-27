@@ -178,10 +178,6 @@ class ReplayerTest {
             "visual=false end-of-outage error=$drEndError should exceed 15 m " +
                 "(bias too small to separate visual from dead-reckoning-only; increase it)",
         )
-        println(
-            "visualCorrectsBiasedDeadReckoningWhileDeadReckoningAloneExceedsNfr1: " +
-                "visual P95=$visualP95 m, dead-reckoning end-of-outage error=$drEndError m",
-        )
     }
 
     @Test fun loadsSessionFilesAndWritesTrajectory() {
@@ -198,10 +194,14 @@ class ReplayerTest {
 
         val out = File(dir, "traj.jsonl")
         TrajectoryWriter.write(out, s, ReplayConfig(), listOf(Outage(10, 20)),
-            listOf(TrajPoint(5, 55.75, 37.6, 4.0, false, null, null)))
+            listOf(TrajPoint(5, 55.75, 37.6, 4.0, false, null, null, "no_desc", false)))
         val lines = out.readLines()
         assertEquals("{\"type\":\"replay\",\"visual\":true,\"outages\":[[10,20]],\"session_started_ms\":1,\"refpack_created_at\":\"c\"}", lines[0])
-        assertEquals("{\"t_ms\":5,\"lat\":55.75,\"lon\":37.6,\"sigma_m\":4.0,\"outage\":false,\"vis_sim\":null,\"vis_ok\":null}", lines[1])
+        assertEquals(
+            "{\"t_ms\":5,\"lat\":55.75,\"lon\":37.6,\"sigma_m\":4.0,\"outage\":false,\"vis_sim\":null,\"vis_ok\":null," +
+                "\"vis_state\":\"no_desc\",\"stationary\":false}",
+            lines[1],
+        )
     }
 
     @Test fun nonFiniteFieldsAreWrittenAsNullSoEveryLineStaysValidJson() {
@@ -212,14 +212,22 @@ class ReplayerTest {
         }))
         val out = File(dir, "traj.jsonl")
         val points = listOf(
-            TrajPoint(1, Double.NaN, 37.6, 4.0, false, Float.NaN, null),
-            TrajPoint(2, 55.75, Double.POSITIVE_INFINITY, Double.NaN, true, null, false),
+            TrajPoint(1, Double.NaN, 37.6, 4.0, false, Float.NaN, null, "no_desc", false),
+            TrajPoint(2, 55.75, Double.POSITIVE_INFINITY, Double.NaN, true, null, false, "below", true),
         )
         TrajectoryWriter.write(out, s, ReplayConfig(), emptyList(), points)
         val lines = out.readLines()
         // Every line must parse as JSON (no bare NaN/Infinity tokens) and non-finite fields are null.
-        assertEquals("{\"t_ms\":1,\"lat\":null,\"lon\":37.6,\"sigma_m\":4.0,\"outage\":false,\"vis_sim\":null,\"vis_ok\":null}", lines[1])
-        assertEquals("{\"t_ms\":2,\"lat\":55.75,\"lon\":null,\"sigma_m\":null,\"outage\":true,\"vis_sim\":null,\"vis_ok\":false}", lines[2])
+        assertEquals(
+            "{\"t_ms\":1,\"lat\":null,\"lon\":37.6,\"sigma_m\":4.0,\"outage\":false,\"vis_sim\":null,\"vis_ok\":null," +
+                "\"vis_state\":\"no_desc\",\"stationary\":false}",
+            lines[1],
+        )
+        assertEquals(
+            "{\"t_ms\":2,\"lat\":55.75,\"lon\":null,\"sigma_m\":null,\"outage\":true,\"vis_sim\":null,\"vis_ok\":false," +
+                "\"vis_state\":\"below\",\"stationary\":true}",
+            lines[2],
+        )
         for (line in lines) assertTrue(!line.contains("NaN") && !line.contains("Infinity"), line)
     }
 
@@ -256,6 +264,37 @@ class ReplayerTest {
         val points = Replayer(pack(), ReplayConfig()).run(s, emptyList())
         assertTrue(points.isNotEmpty())
         assertTrue(points.all { it.sigmaM.isFinite() }, "all sigmaM must be finite: ${points.map { it.sigmaM }}")
+    }
+
+    /** D1: visState covers "no_desc" (frame with no matching descriptor), "below" (best sim <
+     * acceptSim), "ok" (accepted visual update) and "off" (visual disabled). */
+    @Test fun visStateCoversNoDescBelowOkAndOff() {
+        val dir = createTempDir()
+        val t0 = 1_700_000_000_000L
+        val initLoc = LocEvent(t0.toDouble(), enu.toLatLon(0.0, 0.0)[0], enu.toLatLon(0.0, 0.0)[1], 3f, 10f, 0.3f, 90f, 2f)
+        val tNoDesc = t0 + 100L
+        val tBelow = t0 + 5000L
+        val tOk = t0 + 300L
+        val frames = listOf(
+            FrameRecord(tMs = tOk, mode = "gps", gps = null, prior = null, top = emptyList(), fix = null, latMs = LatencyJson(0.0, 0.0, 0.0)),
+            FrameRecord(tMs = tNoDesc, mode = "gps", gps = null, prior = null, top = emptyList(), fix = null, latMs = LatencyJson(0.0, 0.0, 0.0)),
+            FrameRecord(tMs = tBelow, mode = "gps", gps = null, prior = null, top = emptyList(), fix = null, latMs = LatencyJson(0.0, 0.0, 0.0)),
+        )
+        val descFile = File(dir, "vs.desc")
+        DescriptorLogWriter(descFile, dim).use { w ->
+            w.write(tOk, oneHot(0)) // ~3 m from ref 0 — should pass the update gate
+            w.write(tBelow, FloatArray(dim).also { it[5] = 0.4f }) // sim 0.4 < acceptSim 0.5
+        }
+        val header = SessionHeader(model = "m", refpackCreatedAt = "c", device = "d", startedMs = t0, mode = "gps")
+        val s = SessionData(header, frames, listOf(initLoc), DescriptorLog.read(descFile))
+
+        val visualPoints = Replayer(pack(), ReplayConfig(visual = true)).run(s, emptyList())
+        assertEquals("no_desc", visualPoints.first { it.tMs == tNoDesc }.visState)
+        assertEquals("below", visualPoints.first { it.tMs == tBelow }.visState)
+        assertEquals("ok", visualPoints.first { it.tMs == tOk }.visState)
+
+        val drPoints = Replayer(pack(), ReplayConfig(visual = false)).run(s, emptyList())
+        assertTrue(drPoints.all { it.visState == "off" })
     }
 
     private fun createTempDir(): File = kotlin.io.path.createTempDirectory("replay").toFile()
