@@ -24,7 +24,36 @@ class SensorLogTest {
         )
         for (e in events) assertEquals(e, SensorLogFormat.parse(SensorLogFormat.line(e)))
         assertNull(SensorLogFormat.parse(SensorLogFormat.header(1)))
-        assertFailsWith<IllegalArgumentException> { SensorLogFormat.parse("{\"t\":1.0,\"k\":\"zz\"}") }
+    }
+
+    // R1: контракт .sensors.jsonl v1 расширяется аддитивно — читатели ИГНОРИРУЮТ неизвестные виды событий,
+    // а не бросают исключение (иначе новый писатель ломает старый читатель на любой новой строке).
+    @Test fun parseIgnoresUnknownEventKind() {
+        assertNull(SensorLogFormat.parse("{\"t\":1.0,\"k\":\"zz\"}"))
+    }
+
+    @Test fun readSensorLogSkipsUnknownEventKindInTheMiddle() {
+        val f = File.createTempFile("sen", ".sensors.jsonl")
+        f.writeText(
+            SensorLogFormat.header(1) + "\n" +
+                SensorLogFormat.line(GyroEvent(10.0, 0f, 0f, 0f)) + "\n" +
+                "{\"t\":15.0,\"k\":\"zz\"}\n" +
+                SensorLogFormat.line(AccelEvent(20.0, 0f, 0f, 9.8f)) + "\n"
+        )
+        val read = readSensorLog(f)
+        assertEquals(listOf(10.0, 20.0), read.map { it.tMs })
+    }
+
+    @Test fun clockAndGyroUncalAndFrameCaptureRoundTrip() {
+        val events = listOf(
+            ClockEvent(1.0, 1_700_000_000_000L, 123_456_789_000L),
+            GyroUncalEvent(2.0, 0.1f, 0.2f, 0.3f, 0.01f, 0.02f, 0.03f),
+            FrameCaptureEvent(3.0, 4_500L),
+        )
+        for (e in events) {
+            assertEquals(true, SensorLogFormat.isWritable(e))
+            assertEquals(e, SensorLogFormat.parse(SensorLogFormat.line(e)))
+        }
     }
 
     @Test fun loggerWritesAndReaderSortsAndSkipsTruncatedTail() {

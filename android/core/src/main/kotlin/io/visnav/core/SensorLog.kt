@@ -11,6 +11,7 @@ import kotlinx.serialization.json.floatOrNull
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 
 /** События датчиков; t — настенное время телефона, мс. Формат — контракт .sensors.jsonl v1 (план M2a). */
 sealed interface SensorEvent { val tMs: Double }
@@ -22,6 +23,19 @@ data class LocEvent(
 ) : SensorEvent
 data class GnssStatusEvent(override val tMs: Double, val sats: Int, val used: Int, val cn0Mean: Float?) : SensorEvent
 
+/** Синхронизация часов: настенное время и монотонные часы (elapsedRealtimeNanos) для того же момента. */
+data class ClockEvent(override val tMs: Double, val wallMs: Long, val elapsedNs: Long) : SensorEvent
+
+/** Некалиброванный гироскоп (рад/с): values[0..2] — угловая скорость, values[3..5] — оценка смещения. */
+data class GyroUncalEvent(
+    override val tMs: Double, val x: Float, val y: Float, val z: Float,
+    val bx: Float, val by: Float, val bz: Float,
+) : SensorEvent
+
+/** Время захвата кадра камеры: t — настенное время (через смещение SensorRecorder), frameTMs — «сырые»
+ * миллисекунды камеры (монотонные часы, до смещения) — диагностика, replay это событие игнорирует. */
+data class FrameCaptureEvent(override val tMs: Double, val frameTMs: Long) : SensorEvent
+
 object SensorLogFormat {
     fun header(startedMs: Long): String = "{\"v\":1,\"type\":\"sensors\",\"started_ms\":$startedMs}"
 
@@ -32,6 +46,10 @@ object SensorLogFormat {
             is AccelEvent -> e.x.isFinite() && e.y.isFinite() && e.z.isFinite()
             is LocEvent -> e.lat.isFinite() && e.lon.isFinite() && e.accM.isFinite()
             is GnssStatusEvent -> true
+            is ClockEvent -> true
+            is GyroUncalEvent -> e.x.isFinite() && e.y.isFinite() && e.z.isFinite() &&
+                e.bx.isFinite() && e.by.isFinite() && e.bz.isFinite()
+            is FrameCaptureEvent -> true
         }
     }
 
@@ -50,6 +68,10 @@ object SensorLogFormat {
             val cn0 = if (e.cn0Mean?.isFinite() == true) e.cn0Mean else null
             "{\"t\":${e.tMs},\"k\":\"gnss\",\"sats\":${e.sats},\"used\":${e.used},\"cn0\":$cn0}"
         }
+        is ClockEvent -> "{\"t\":${e.tMs},\"k\":\"clk\",\"wall_ms\":${e.wallMs},\"elapsed_ns\":${e.elapsedNs}}"
+        is GyroUncalEvent -> "{\"t\":${e.tMs},\"k\":\"gu\",\"x\":${e.x},\"y\":${e.y},\"z\":${e.z}," +
+            "\"bx\":${e.bx},\"by\":${e.by},\"bz\":${e.bz}}"
+        is FrameCaptureEvent -> "{\"t\":${e.tMs},\"k\":\"frame\",\"frame_t_ms\":${e.frameTMs}}"
     }
 
     fun parse(line: String): SensorEvent? {
@@ -58,13 +80,18 @@ object SensorLogFormat {
         val t = o.getValue("t").jsonPrimitive.double
         fun f(key: String) = o.getValue(key).jsonPrimitive.float
         fun fOrNull(key: String) = (o[key] as? JsonPrimitive)?.floatOrNull
-        return when (val k = o.getValue("k").jsonPrimitive.content) {
+        fun l(key: String) = o.getValue(key).jsonPrimitive.long
+        return when (o.getValue("k").jsonPrimitive.content) {
             "g" -> GyroEvent(t, f("x"), f("y"), f("z"))
             "a" -> AccelEvent(t, f("x"), f("y"), f("z"))
             "loc" -> LocEvent(t, o.getValue("lat").jsonPrimitive.double, o.getValue("lon").jsonPrimitive.double,
                 f("acc"), fOrNull("spd"), fOrNull("spd_acc"), fOrNull("brg"), fOrNull("brg_acc"))
             "gnss" -> GnssStatusEvent(t, o.getValue("sats").jsonPrimitive.int, o.getValue("used").jsonPrimitive.int, fOrNull("cn0"))
-            else -> throw IllegalArgumentException("unknown sensor event kind '$k'")
+            "clk" -> ClockEvent(t, l("wall_ms"), l("elapsed_ns"))
+            "gu" -> GyroUncalEvent(t, f("x"), f("y"), f("z"), f("bx"), f("by"), f("bz"))
+            "frame" -> FrameCaptureEvent(t, l("frame_t_ms"))
+            // Контракт .sensors.jsonl v1: расширяется аддитивно, читатели игнорируют неизвестные виды событий.
+            else -> null
         }
     }
 }
