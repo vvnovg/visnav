@@ -3,7 +3,7 @@ import json
 import numpy as np
 import pytest
 
-from vpr_bench.fieldlog import FieldFrame, evaluate_field, gps_track, read_log, render_field_report
+from vpr_bench.fieldlog import FieldFrame, evaluate_field, gps_lag_warnings, gps_track, read_log, render_field_report
 from vpr_bench.geo import offset_m
 
 SAMPLE_LINE = (
@@ -95,3 +95,75 @@ def test_modes_reported_separately_and_report_marks_gps_only():
     md = render_field_report({"model": "m", "device": "d"}, results)
     lines = [l for l in md.splitlines() if l.startswith("| gps") or l.startswith("| visual")]
     assert "✅" in lines[0] and "—" in lines[1]
+
+
+def _drive_with_lag(n=10, lag_ms=200.0):
+    frames = []
+    for s in range(n):
+        lat, lon = offset_m(LAT0, LON0, 0.0, 10.0 * s)
+        frames.append(FieldFrame(
+            T0 + 1000 * s, "gps", (lat, lon, 5.0, T0 + 1000 * s - int(lag_ms)), (lat, lon, 0.9),
+            {"pre": 0.0, "inf": 0.0, "search": 0.0},
+        ))
+    return frames
+
+
+def test_gps_lag_stats():
+    lats, lons = _refs_along()
+    [r] = evaluate_field(_drive_with_lag(lag_ms=200.0), lats, lons)
+    assert r.gps_lag_ms == {"p50": 200.0, "p95": 200.0, "min": 200.0, "max": 200.0}
+    assert gps_lag_warnings([r]) == []
+
+
+def test_gps_lag_warning_outside_range():
+    lats, lons = _refs_along()
+    [r] = evaluate_field(_drive_with_lag(lag_ms=2000.0), lats, lons)
+    warnings_ = gps_lag_warnings([r])
+    assert len(warnings_) == 1 and "gps_lag_ms" in warnings_[0]
+    md = render_field_report({"model": "m", "device": "d"}, [r])
+    assert "⚠️" in md
+
+
+def _drive_with_stop(n=30, stop_start=10, stop_len=5, fix_err_m=5.0):
+    frames = []
+    for s in range(n):
+        if s < stop_start:
+            dist = 10.0 * s
+        elif s < stop_start + stop_len:
+            dist = 10.0 * stop_start
+        else:
+            dist = 10.0 * stop_start + 10.0 * (s - (stop_start + stop_len))
+        lat, lon = offset_m(LAT0, LON0, 0.0, dist)
+        flat, flon = offset_m(lat, lon, fix_err_m, 0.0)
+        frames.append(FieldFrame(
+            T0 + 1000 * s, "gps", (lat, lon, 5.0, T0 + 1000 * s), (flat, flon, 0.8),
+            {"pre": 5.0, "inf": 50.0, "search": 1.0},
+        ))
+    return frames
+
+
+def test_stationary_frames_excluded_from_gt_and_counted():
+    lats, lons = _refs_along()
+    frames = _drive_with_stop()
+    [r] = evaluate_field(frames, lats, lons)
+    # Стоим в позиции s=10..15 включительно (stop_len=5 после s=10 — та же позиция ещё раз при s=15,
+    # т.к. смещение после остановки считается от stop_start+stop_len); полностью внутри окна ±1 с
+    # (оба соседа тоже стоят) — s=11..14.
+    assert r.n_stationary == 4
+    assert r.frac_within == 1.0  # остановленные кадры не портят критерий
+
+
+def test_read_log_skips_truncated_final_line_with_warning(tmp_path):
+    p = tmp_path / "s.jsonl"
+    p.write_text(HEADER_LINE + "\n" + SAMPLE_LINE + "\n" + '{"v":1,"type":"frame","t_ms":170')
+    with pytest.warns(UserWarning, match="truncated"):
+        header, frames = read_log(p)
+    assert header["model"] == "m"
+    assert len(frames) == 1
+
+
+def test_read_log_raises_on_malformed_middle_line(tmp_path):
+    p = tmp_path / "s.jsonl"
+    p.write_text(HEADER_LINE + "\n" + '{"broken' + "\n" + SAMPLE_LINE + "\n")
+    with pytest.raises(ValueError, match="line 2"):
+        read_log(p)

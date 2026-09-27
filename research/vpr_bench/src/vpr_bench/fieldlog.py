@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
 from vpr_bench.geo import TrackPoint, haversine_m, haversine_m_vec, interpolate_track
-from vpr_bench.query import clean_track, has_gap
+from vpr_bench.query import clean_track, has_gap, pose_at
 
 
 @dataclass(frozen=True)
@@ -26,21 +27,34 @@ class FieldResult:
     n_frames: int
     n_with_gt: int
     n_covered: int
+    n_stationary: int
     coverage: float
     frac_within: float
     threshold_m: float
     median_err_m: float
     p95_err_m: float
     latency_ms: dict[str, dict[str, float]]
+    gps_lag_ms: dict[str, float]
 
 
 def read_log(path: Path) -> tuple[dict, list[FieldFrame]]:
     header: dict = {}
     frames: list[FieldFrame] = []
-    for line in path.read_text().splitlines():
+    lines = path.read_text().splitlines()
+    last_nonblank = 0
+    for i, line in enumerate(lines, start=1):
+        if line.strip():
+            last_nonblank = i
+    for i, line in enumerate(lines, start=1):
         if not line.strip():
             continue
-        rec = json.loads(line)
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError as e:
+            if i == last_nonblank:
+                warnings.warn(f"{path}: skipping truncated final line {i}: {e}")
+                continue
+            raise ValueError(f"{path}: malformed log line {i}: {e}") from e
         if rec.get("type") == "session":
             header = rec
             continue
@@ -73,6 +87,18 @@ def _quantiles(values: list[float]) -> dict[str, float]:
     return {"p50": float(np.median(arr)), "p95": float(np.quantile(arr, 0.95, method="higher"))}
 
 
+def _lag_stats(values: list[float]) -> dict[str, float]:
+    if not values:
+        return {"p50": float("nan"), "p95": float("nan"), "min": float("nan"), "max": float("nan")}
+    arr = np.array(values)
+    return {
+        "p50": float(np.median(arr)),
+        "p95": float(np.quantile(arr, 0.95, method="higher")),
+        "min": float(arr.min()),
+        "max": float(arr.max()),
+    }
+
+
 def evaluate_field(
     frames: list[FieldFrame],
     ref_lats: np.ndarray,
@@ -81,6 +107,7 @@ def evaluate_field(
     cover_m: float = 25.0,
     max_gap_s: float = 3.0,
     max_speed_mps: float = 70.0,
+    min_speed_mps: float = 2.0,
 ) -> list[FieldResult]:
     track, _ = clean_track(gps_track(frames), max_speed_mps=max_speed_mps, max_hdop=None)
     times = [p.t for p in track]
@@ -88,12 +115,18 @@ def evaluate_field(
     results = []
     for mode in modes:
         mf = [fr for fr in frames if fr.mode == mode]
-        n_gt = n_cov = n_ok = 0
+        n_gt = n_cov = n_ok = n_stationary = 0
         errors: list[float] = []
         for fr in mf:
             t = fr.t_ms / 1000.0
             gt = interpolate_track(track, t)
             if gt is None or has_gap(times, t, max_gap_s):
+                continue
+            pose = pose_at(track, t)
+            if pose is None:
+                continue
+            if pose[3] < min_speed_mps:
+                n_stationary += 1
                 continue
             n_gt += 1
             if len(ref_lats) == 0 or haversine_m_vec(gt[0], gt[1], ref_lats, ref_lons).min() > cover_m:
@@ -105,16 +138,31 @@ def evaluate_field(
         err_arr = np.array(errors) if errors else np.array([float("nan")])
         lat = {k: _quantiles([fr.lat_ms[k] for fr in mf]) for k in ("pre", "inf", "search")}
         lat["total"] = _quantiles([sum(fr.lat_ms.values()) for fr in mf])
+        gps_lag = _lag_stats([fr.t_ms - fr.gps[3] for fr in mf if fr.gps is not None])
         results.append(FieldResult(
-            mode=mode, n_frames=len(mf), n_with_gt=n_gt, n_covered=n_cov,
+            mode=mode, n_frames=len(mf), n_with_gt=n_gt, n_covered=n_cov, n_stationary=n_stationary,
             coverage=n_cov / n_gt if n_gt else 0.0,
             frac_within=n_ok / n_cov if n_cov else 0.0,
             threshold_m=threshold_m,
             median_err_m=float(np.quantile(err_arr, 0.5, method="higher")),
             p95_err_m=float(np.quantile(err_arr, 0.95, method="higher")),
             latency_ms=lat,
+            gps_lag_ms=gps_lag,
         ))
     return results
+
+
+def gps_lag_warnings(results: list[FieldResult]) -> list[str]:
+    """Строки-предупреждения для результатов, у которых медиана gps_lag_ms вне [0, 1500] мс."""
+    out = []
+    for r in results:
+        p50 = r.gps_lag_ms["p50"]
+        if not (0.0 <= p50 <= 1500.0):
+            out.append(
+                f"внимание: режим {r.mode} — медиана расхождения часов кадра и GPS "
+                f"(gps_lag_ms p50) вне ожидаемого диапазона [0, 1500] мс: {p50:.0f} мс"
+            )
+    return out
 
 
 def render_field_report(header: dict, results: list[FieldResult], target: float = 0.70) -> str:
@@ -122,19 +170,27 @@ def render_field_report(header: dict, results: list[FieldResult], target: float 
         "# Полевой тест M1",
         "",
         f"Модель: {header.get('model', '—')}. Устройство: {header.get('device', '—')}.",
-        f"Критерий M1: фиксация ≤ {results[0].threshold_m:g} м в ≥ {target * 100:.0f} % покрытых кадров, режим gps."
+        f"Критерий M1: фиксация ≤ {results[0].threshold_m:g} м в ≥ {target * 100:.0f} % покрытых кадров "
+        "в движении (≥ 2 м/с), режим gps."
         if results else "Нет кадров.",
         "",
-        "| Режим | Кадров | С GPS | Покрытие, % | ≤ порога, % | Медиана, м | P95, м "
-        "| Инференс p50/p95, мс | Всего p50/p95, мс | Критерий |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for warning in gps_lag_warnings(results):
+        lines.append(f"> ⚠️ {warning}")
+    if any(gps_lag_warnings(results)):
+        lines.append("")
+    lines += [
+        "| Режим | Кадров | С GPS | Стоп | Покрытие, % | ≤ порога, % | Медиана, м | P95, м "
+        "| Инференс p50/p95, мс | Всего p50/p95, мс | Лаг GPS p50/p95, мс | Критерий |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
         verdict = ("✅" if r.frac_within >= target else "❌") if r.mode == "gps" else "—"
-        inf, tot = r.latency_ms["inf"], r.latency_ms["total"]
+        inf, tot, lag = r.latency_ms["inf"], r.latency_ms["total"], r.gps_lag_ms
         lines.append(
-            f"| {r.mode} | {r.n_frames} | {r.n_with_gt} | {r.coverage * 100:.1f} | {r.frac_within * 100:.1f} "
+            f"| {r.mode} | {r.n_frames} | {r.n_with_gt} | {r.n_stationary} | {r.coverage * 100:.1f} "
+            f"| {r.frac_within * 100:.1f} "
             f"| {r.median_err_m:.1f} | {r.p95_err_m:.1f} | {inf['p50']:.0f}/{inf['p95']:.0f} "
-            f"| {tot['p50']:.0f}/{tot['p95']:.0f} | {verdict} |"
+            f"| {tot['p50']:.0f}/{tot['p95']:.0f} | {lag['p50']:.0f}/{lag['p95']:.0f} | {verdict} |"
         )
     return "\n".join(lines) + "\n"

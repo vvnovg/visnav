@@ -41,6 +41,10 @@ def build_parser() -> argparse.ArgumentParser:
     fe.add_argument("--log", required=True, type=Path)
     fe.add_argument("--refpack", required=True, type=Path)
     fe.add_argument("--out", required=True, type=Path)
+    fe.add_argument(
+        "--force", action="store_true",
+        help="оценить, даже если журнал и refpack не совпадают по refpack_created_at",
+    )
     return parser
 
 
@@ -58,6 +62,7 @@ def _export(args) -> int:
     print(f"exported {args.model} -> {args.out}; min cosine torch/onnx = {min_cos:.5f}")
     if min_cos < 0.999:
         print("error: ONNX output differs from PyTorch (min cosine < 0.999)", file=sys.stderr)
+        args.out.unlink(missing_ok=True)
         return 1
     return 0
 
@@ -134,7 +139,7 @@ def _pack(args) -> int:
 
 
 def _field_eval(args) -> int:
-    from vpr_bench.fieldlog import evaluate_field, read_log, render_field_report
+    from vpr_bench.fieldlog import evaluate_field, gps_lag_warnings, read_log, render_field_report
     from vpr_bench.refpack import read_refpack
 
     header, frames = read_log(args.log)
@@ -142,12 +147,25 @@ def _field_eval(args) -> int:
         print("error: log has no frames", file=sys.stderr)
         return 2
     rp = read_refpack(args.refpack)
+    log_created_at = header.get("refpack_created_at")
+    pack_created_at = rp.meta.get("created_at")
+    if log_created_at != pack_created_at and not args.force:
+        print(
+            f"error: log refpack_created_at ({log_created_at!r}) does not match refpack "
+            f"created_at ({pack_created_at!r}); this log was recorded against a different "
+            "refpack. Pass --force to evaluate anyway.",
+            file=sys.stderr,
+        )
+        return 2
     results = evaluate_field(frames, rp.lats, rp.lons)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(render_field_report(header, results))
     for r in results:
         print(f"{r.mode}: {r.frac_within * 100:.1f}% within {r.threshold_m:g} m "
-              f"(covered {r.n_covered}/{r.n_with_gt}, coverage {r.coverage * 100:.1f}%)")
+              f"(covered {r.n_covered}/{r.n_with_gt}, coverage {r.coverage * 100:.1f}%, "
+              f"stationary {r.n_stationary})")
+    for warning in gps_lag_warnings(results):
+        print(f"warning: {warning}", file=sys.stderr)
     print(f"report -> {args.out}")
     return 0
 
