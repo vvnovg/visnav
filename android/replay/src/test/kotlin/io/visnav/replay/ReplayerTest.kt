@@ -198,7 +198,7 @@ class ReplayerTest {
         TrajectoryWriter.write(out, s, ReplayConfig(), listOf(Outage(10, 20)),
             listOf(TrajPoint(5, 55.75, 37.6, 4.0, false, null, null, "no_desc", false, NavMode.GNSS, GnssHealth.GOOD, emptySet())))
         val lines = out.readLines()
-        assertEquals("{\"type\":\"replay\",\"visual\":true,\"outages\":[[10,20]],\"session_started_ms\":1,\"refpack_created_at\":\"c\"}", lines[0])
+        assertEquals("{\"type\":\"replay\",\"visual\":true,\"outages\":[[10,20]],\"monitor\":true,\"jams\":[],\"spoofs\":[],\"session_started_ms\":1,\"refpack_created_at\":\"c\"}", lines[0])
         assertEquals(
             "{\"t_ms\":5,\"lat\":55.75,\"lon\":37.6,\"sigma_m\":4.0,\"outage\":false,\"vis_sim\":null,\"vis_ok\":null," +
                 "\"vis_state\":\"no_desc\",\"stationary\":false,\"mode\":\"gnss\",\"health\":\"good\",\"reasons\":[],\"injected\":null}",

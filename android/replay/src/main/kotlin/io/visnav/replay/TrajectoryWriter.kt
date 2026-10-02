@@ -6,11 +6,16 @@ import java.io.File
 import kotlinx.serialization.json.JsonPrimitive
 
 object TrajectoryWriter {
-    fun write(file: File, session: SessionData, config: ReplayConfig, outages: List<Outage>, points: List<TrajPoint>) {
+    fun write(file: File, session: SessionData, config: ReplayConfig, outages: List<Outage>,
+        points: List<TrajPoint>, jams: List<Jam> = emptyList(), spoofs: List<Spoof> = emptyList(),
+    ) {
         file.parentFile?.mkdirs()
         file.bufferedWriter().use { w ->
             val outageJson = outages.joinToString(",") { "[${it.startMs},${it.endMs}]" }
+            val jamJson = jams.joinToString(",") { "[${it.startMs},${it.endMs}]" }
+            val spoofJson = spoofs.joinToString(",") { "[${it.startMs},${it.endMs},${it.eastM},${it.northM},${it.rampMs}]" }
             w.write("{\"type\":\"replay\",\"visual\":${config.visual},\"outages\":[$outageJson]," +
+                "\"monitor\":${config.monitor},\"jams\":[$jamJson],\"spoofs\":[$spoofJson]," +
                 "\"session_started_ms\":${session.header.startedMs}," +
                 "\"refpack_created_at\":${JsonPrimitive(session.header.refpackCreatedAt)}}")
             w.newLine()

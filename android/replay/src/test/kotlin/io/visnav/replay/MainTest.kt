@@ -84,4 +84,26 @@ class MainTest {
 
         assertFalse(allFramesLackDescriptor(emptyList())) // no points at all isn't the same failure
     }
+
+    @Test fun parseJamAcceptsStartAndLength() {
+        assertEquals(Jam(1_010_000, 1_015_000), parseJam("10:5", 1_000_000))
+    }
+
+    @Test fun parseSpoofAcceptsFourOrFiveFields() {
+        assertEquals(Spoof(1_010_000, 1_015_000, 0.0, 200.0, 0), parseSpoof("10:5:0:200", 1_000_000))
+        assertEquals(Spoof(1_010_000, 1_015_000, -3.5, 200.0, 2_000), parseSpoof("10:5:-3.5:200:2", 1_000_000))
+    }
+
+    @Test fun parseJamRejectsBadForms() {
+        for (bad in listOf("10", "10:5:1", "10:-5", "10:0", "-1:5", "NaN:5", "10:NaN", "10:Infinity", "a:b")) {
+            assertNull(parseJam(bad, 0), bad)
+        }
+    }
+
+    @Test fun parseSpoofRejectsBadForms() {
+        for (bad in listOf("10:5:0", "10:5:0:200:1:1", "10:-5:0:200", "10:0:0:200", "-1:5:0:200",
+            "10:5:NaN:200", "10:5:0:Infinity", "10:5:0:200:-1", "10:5:0:200:NaN", "10:5:x:200")) {
+            assertNull(parseSpoof(bad, 0), bad)
+        }
+    }
 }

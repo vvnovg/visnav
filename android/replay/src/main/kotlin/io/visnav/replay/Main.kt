@@ -13,13 +13,17 @@ import kotlin.math.roundToLong
 import kotlin.system.exitProcess
 
 private const val USAGE =
-    "usage: replay --session <prefix> --refpack <dir> --out <file> [--outage START_S:LEN_S]... [--no-visual]"
+    "usage: replay --session <prefix> --refpack <dir> --out <file> [--outage START_S:LEN_S]... [--jam START_S:LEN_S]... " +
+        "[--spoof START_S:LEN_S:EAST_M:NORTH_M[:RAMP_S]]... [--no-visual] [--no-monitor]"
 private const val FIRST_SENSOR_TIME_TOLERANCE_MS = 5_000.0
 private const val CLOCK_DRIFT_WARN_MS = 1_000L
 
 fun main(args: Array<String>) {
     var session: String? = null; var refpack: String? = null; var out: String? = null
     var visual = true
+    var monitor = true
+    val jamSpecs = mutableListOf<String>()
+    val spoofSpecs = mutableListOf<String>()
     val outageSpecs = mutableListOf<String>()
     var i = 0
     while (i < args.size) {
@@ -28,7 +32,10 @@ fun main(args: Array<String>) {
             "--refpack" -> refpack = args.getOrNull(++i)
             "--out" -> out = args.getOrNull(++i)
             "--outage" -> outageSpecs += args.getOrNull(++i) ?: fail("--outage needs START_S:LEN_S")
+            "--jam" -> jamSpecs += args.getOrNull(++i) ?: fail("--jam needs START_S:LEN_S")
+            "--spoof" -> spoofSpecs += args.getOrNull(++i) ?: fail("--spoof needs START_S:LEN_S:EAST_M:NORTH_M[:RAMP_S]")
             "--no-visual" -> visual = false
+            "--no-monitor" -> monitor = false
             else -> fail("unknown argument ${args[i]}")
         }
         i++
@@ -73,12 +80,17 @@ fun main(args: Array<String>) {
 
     val t0 = data.header.startedMs
     val outages = outageSpecs.map { spec -> parseOutage(spec, t0) }
-    val config = ReplayConfig(visual = visual)
-    val points = Replayer(pack, config).run(data, outages)
+    val jams = jamSpecs.map { spec -> parseJam(spec, t0) ?: fail("bad --jam $spec (expected START_S:LEN_S, start >= 0, len > 0)") }
+    val spoofs = spoofSpecs.map { spec ->
+        parseSpoof(spec, t0)
+            ?: fail("bad --spoof $spec (expected START_S:LEN_S:EAST_M:NORTH_M[:RAMP_S], start >= 0, len > 0, ramp >= 0)")
+    }
+    val config = ReplayConfig(visual = visual, monitor = monitor)
+    val points = Replayer(pack, config).run(data, outages, jams, spoofs)
     if (visual && allFramesLackDescriptor(points)) {
         fail("visual mode: no frame had a descriptor (all vis_state=no_desc) — session/refpack mismatch?")
     }
-    TrajectoryWriter.write(File(out), data, config, outages, points)
+    TrajectoryWriter.write(File(out), data, config, outages, points, jams, spoofs)
     println("${points.size} points (${points.count { it.inOutage }} in outages) -> $out")
 }
 
@@ -121,6 +133,29 @@ private fun parseOutage(spec: String, t0: Long): Outage {
     val len = parts[1].toDoubleOrNull()?.takeIf { it.isFinite() } ?: fail("bad --outage $spec")
     if (start < 0 || len <= 0) fail("bad --outage $spec (need start >= 0, len > 0)")
     return Outage(t0 + (start * 1000).toLong(), t0 + ((start + len) * 1000).toLong())
+}
+
+private fun finiteOrNull(s: String): Double? = s.toDoubleOrNull()?.takeIf { it.isFinite() }
+
+/** START_S:LEN_S → [Jam]; null при неверной форме, нефинитных числах, start < 0 или len <= 0. */
+internal fun parseJam(spec: String, t0: Long): Jam? {
+    val parts = spec.split(":")
+    if (parts.size != 2) return null
+    val start = finiteOrNull(parts[0]) ?: return null
+    val len = finiteOrNull(parts[1]) ?: return null
+    if (start < 0 || len <= 0) return null
+    return Jam(t0 + (start * 1000).toLong(), t0 + ((start + len) * 1000).toLong())
+}
+
+/** START_S:LEN_S:EAST_M:NORTH_M[:RAMP_S] → [Spoof]; null при неверной форме или значениях. */
+internal fun parseSpoof(spec: String, t0: Long): Spoof? {
+    val parts = spec.split(":")
+    if (parts.size !in 4..5) return null
+    val nums = parts.map { finiteOrNull(it) ?: return null }
+    val (start, len, east, north) = nums
+    val ramp = nums.getOrElse(4) { 0.0 }
+    if (start < 0 || len <= 0 || ramp < 0) return null
+    return Spoof(t0 + (start * 1000).toLong(), t0 + ((start + len) * 1000).toLong(), east, north, (ramp * 1000).toLong())
 }
 
 private fun fail(message: String): Nothing {
