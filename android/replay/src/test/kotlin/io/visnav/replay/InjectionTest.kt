@@ -28,14 +28,29 @@ class InjectionTest {
         val window = inWindow(points, 40, 70)
         val p95 = p95(window.map { truthErrorM(it) })
         assertTrue(p95 <= 15.0, "P95=$p95")
-        // Контроль: ворота EKF сами отбрасывают скачок при точности фикса 3 м, а визуальные фиксации
-        // возвращают трек, поэтому «монитор выключен» проверяем на фиксах с точностью 60 м без камеры.
-        val loose = SyntheticSession.session(dir(), accM = 60f)
-        // Фильтр втягивается медленно, поэтому в контроле подмена длится до 80-й секунды.
-        val off = Replayer(SyntheticSession.pack(), ReplayConfig(monitor = false, visual = false))
-            .run(loose, emptyList(), spoofs = listOf(spoof.copy(endMs = T0 + 80_000)))
-        val endErr = truthErrorM(inWindow(off, 40, 80).last())
-        assertTrue(endErr > 100.0, "monitor off end-of-window error=$endErr")
+        // Резкий скачок на 200 м ворота χ² EKF отбрасывают и без монитора, поэтому контроля «монитор
+        // выключен» здесь нет: действие монитора закреплено slowDragOffThatPassesTheEkfGateIsNotFused
+        // и тестом защиты в :core (LocalizerTest.untrustedFixIsNotFusedWhileModeLagsBehind).
+    }
+
+    @Test fun spoofShiftGeometry() {
+        val e = SyntheticSession.enu
+        val ll = e.toLatLon(500.0, 0.0)
+        val orig = io.visnav.core.LocEvent(1_000.0, ll[0], ll[1], 3f, 10f, 0.3f, 90f, 2f)
+        fun dist(a: io.visnav.core.LocEvent, b: io.visnav.core.LocEvent) =
+            io.visnav.core.Geo.haversineM(a.lat, a.lon, b.lat, b.lon)
+        val north = shifted(orig, Spoof(0, 10_000, 0.0, 200.0))
+        assertEquals(200.0, dist(orig, north), 0.01)
+        assertTrue(north.lat > orig.lat); assertEquals(orig.lon, north.lon, 1e-12)
+        val east = shifted(orig, Spoof(0, 10_000, 200.0, 0.0))
+        assertEquals(200.0, dist(orig, east), 0.01)
+        assertTrue(east.lon > orig.lon); assertEquals(orig.lat, east.lat, 1e-12)
+        val diag = shifted(orig, Spoof(0, 10_000, -120.0, -160.0))
+        assertEquals(200.0, dist(orig, diag), 0.01)
+        assertTrue(diag.lat < orig.lat && diag.lon < orig.lon)
+        val half = shifted(orig, Spoof(0, 10_000, 0.0, 200.0, rampMs = 2_000)) // t = 1000 = полрампы
+        assertEquals(100.0, dist(orig, half), 0.01)
+        assertEquals(orig.speedMps, north.speedMps); assertEquals(orig.bearingDeg, north.bearingDeg)
     }
 
     @Test fun jamLeavesGnssModeQuickly() {
@@ -110,19 +125,28 @@ class InjectionTest {
         assertTrue(p95 <= 15.0, "P95=$p95")
     }
 
+    private fun firstUntrusted(points: List<TrajPoint>, fromMs: Long) =
+        points.firstOrNull { it.tMs >= fromMs && it.health == GnssHealth.UNTRUSTED }
+
+    private fun describe(p: TrajPoint?, fromMs: Long) =
+        if (p == null) "never" else "${(p.tMs - fromMs) / 1000.0} s ${p.reasons}"
+
     // Увод 200 м за 30 с (6.7 м/с) отсекают сами ворота EKF даже при выключенном мониторе, поэтому он
     // не доказывает защиту. Медленный увод (50 м за 60 с) ворота проходит; без камеры, чтобы она не
-    // возвращала трек, это и закрепляет пропуск UNTRUSTED-фиксов в Localizer.onLoc.
+    // возвращала трек, это и показывает действие монитора.
     @Test fun slowDragOffThatPassesTheEkfGateIsNotFused() {
         val s = SyntheticSession.session(dir(), uniformFromMs = 40_000, uniformToMs = 110_000, uniformCn0Std = 1f)
         val spoof = Spoof(T0 + 40_000, T0 + 110_000, 0.0, 50.0, 60_000)
         val on = Replayer(SyntheticSession.pack(), ReplayConfig(visual = false)).run(s, emptyList(), spoofs = listOf(spoof))
         val onP95 = p95(inWindow(on, 40, 110).map { truthErrorM(it) })
-        assertTrue(onP95 <= 15.0, "monitor on P95=$onP95")
         val off = Replayer(SyntheticSession.pack(), ReplayConfig(visual = false, monitor = false))
             .run(s, emptyList(), spoofs = listOf(spoof))
         val endErr = truthErrorM(inWindow(off, 40, 110).last())
-        assertTrue(endErr > 30.0, "monitor off end-of-window error=$endErr")
+        val fu = describe(firstUntrusted(on, T0 + 40_000), T0 + 40_000)
+        System.err.println("slow drag-off (50 m / 60 s, uniform CN0, no visual): monitor on P95 = $onP95 m, " +
+            "monitor off end error = $endErr m, first UNTRUSTED = $fu")
+        assertTrue(onP95 <= 15.0, "monitor on P95=$onP95 (first UNTRUSTED $fu)")
+        assertTrue(endErr >= 0.6 * 50.0, "monitor off end-of-window error=$endErr, expected >= 30 (0.6 x 50 m)")
     }
 
     // Измерение предела, не требование: увод без признаков в статусе приёмника.
@@ -132,9 +156,19 @@ class InjectionTest {
         val points = Replayer(SyntheticSession.pack(), ReplayConfig()).run(s, emptyList(), spoofs = listOf(spoof))
         val window = inWindow(points, 40, 80)
         val maxErr = window.maxOf { truthErrorM(it) }
-        val firstUntrusted = points.firstOrNull { it.tMs >= T0 + 40_000 && it.health == GnssHealth.UNTRUSTED }
-        val whenStr = firstUntrusted?.let { "${(it.tMs - (T0 + 40_000)) / 1000.0} s" } ?: "нет"
-        System.err.println("drag-off without CN0 signature: max error in window = $maxErr m, first UNTRUSTED = $whenStr")
+        val first = firstUntrusted(points, T0 + 40_000)
+        System.err.println("drag-off 200 m / 30 s without CN0 signature: max error in window = $maxErr m, " +
+            "first UNTRUSTED = ${describe(first, T0 + 40_000)}")
         assertTrue(window.isNotEmpty())
+        assertNotNull(first, "never UNTRUSTED")
+        assertTrue(GnssReason.INNOVATION in first.reasons, "reasons=${first.reasons}")
+
+        // Подпороговый увод (50 м за 60 с) с камерой и без признаков в статусе.
+        val sub = Spoof(T0 + 40_000, T0 + 110_000, 0.0, 50.0, 60_000)
+        val pts2 = Replayer(SyntheticSession.pack(), ReplayConfig()).run(s, emptyList(), spoofs = listOf(sub))
+        val w2 = inWindow(pts2, 40, 110)
+        System.err.println("drag-off 50 m / 60 s, visual on, no CN0 signature: max error in window = " +
+            "${w2.maxOf { truthErrorM(it) }} m, first UNTRUSTED = ${describe(firstUntrusted(pts2, T0 + 40_000), T0 + 40_000)}")
+        assertTrue(w2.isNotEmpty())
     }
 }

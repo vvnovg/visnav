@@ -2,6 +2,7 @@ package io.visnav.core
 
 import kotlin.math.sin
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
@@ -132,5 +133,41 @@ class LocalizerTest {
         val outputs = run(LocalizerConfig(monitor = false), gapStartMs = 30_000, gapEndMs = 60_000)
         assertTrue(outputs.size > 100)
         assertTrue(outputs.all { it.mode == NavMode.GNSS }, "modes: ${outputs.map { it.mode }.distinct()}")
+    }
+
+    /**
+     * Защита в Localizer.onLoc: фикс при UNTRUSTED не сливается, даже пока режим (гистерезис) ещё GNSS.
+     * Два одинаковых локализатора; A одна получает в 12.5 с фикс со сдвигом 8 м на север (ниже ворот
+     * EKF, защёлки инновации и JUMP). Без защиты A сдвинулась бы, с защитой совпадает с B.
+     */
+    @Test fun untrustedFixIsNotFusedWhileModeLagsBehind() {
+        val config = LocalizerConfig(visual = false)
+        val a = Localizer(pack(), config)
+        val b = Localizer(pack(), config)
+        fun both(e: SensorEvent) { a.onSensor(e); b.onSensor(e) }
+        for (step in 0..1_200) {
+            val t = (t0 + step * 10L).toDouble()
+            both(AccelEvent(t, 0f, 0f, 9.81f + 0.3f * sin(step.toFloat())))
+            both(GyroEvent(t, 0f, 0f, 0f))
+            if (step % 100 == 0) {
+                val sec = step / 100
+                val ll = enu.toLatLon(step * 0.1, 0.0)
+                both(LocEvent(t, ll[0], ll[1], 3f, 10f, 0.3f, 90f, 2f))
+                both(if (sec in 10..12) GnssStatusEvent(t, 16, 10, 35f, 1f) else GnssStatusEvent(t, 16, 14, 35f, 5f))
+            }
+        }
+        val tShift = t0 + 12_500L
+        val ll = enu.toLatLon(125.0, 8.0)
+        a.onSensor(LocEvent(tShift.toDouble(), ll[0], ll[1], 3f, 10f, 0.3f, 90f, 2f))
+        assertEquals(NavMode.GNSS, a.mode, "precondition: mode still lags in GNSS")
+        // Кадр в тот же момент: состояние и режим не меняются, но видно здоровье; B получает такой же кадр.
+        val pre = a.onFrame(tShift, null)!!
+        b.onFrame(tShift, null)
+        assertEquals(GnssHealth.UNTRUSTED, pre.health, "precondition: A is UNTRUSTED")
+        assertEquals(NavMode.GNSS, pre.mode, "precondition: A still in GNSS")
+        val oa = a.onFrame(t0 + 13_000L, null)!!
+        val ob = b.onFrame(t0 + 13_000L, null)!!
+        val d = Geo.haversineM(oa.lat, oa.lon, ob.lat, ob.lon)
+        assertTrue(d < 1e-3, "A and B positions differ by $d m")
     }
 }

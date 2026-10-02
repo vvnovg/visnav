@@ -109,17 +109,19 @@ class Replayer(private val pack: RefPack, private val config: ReplayConfig) {
         return out
     }
 
+    // Счётчики по системам: null (нет в записи, формат аддитивен) остаётся null, иначе 0.
     private fun jammed(e: GnssStatusEvent) = e.copy(
         used = 0, cn0Mean = null, cn0Std = null, cn0Max = null,
         usedGps = e.usedGps?.let { 0 }, usedGlo = e.usedGlo?.let { 0 },
         usedGal = e.usedGal?.let { 0 }, usedBds = e.usedBds?.let { 0 },
     )
+}
 
-    private fun shifted(e: LocEvent, s: Spoof): LocEvent {
-        val f = s.fraction(e.tMs)
-        val mPerDeg = PI / 180.0 * Geo.EARTH_RADIUS_M
-        val lat = e.lat + s.northM * f / mPerDeg
-        val lon = e.lon + s.eastM * f / (mPerDeg * cos(Math.toRadians(lat)))
-        return e.copy(lat = lat, lon = lon)
-    }
+/** Сдвиг фикса подменой; смещение только по положению, скорость и курс остаются истинными. */
+internal fun shifted(e: LocEvent, s: Spoof): LocEvent {
+    val f = s.fraction(e.tMs)
+    val mPerDeg = PI / 180.0 * Geo.EARTH_RADIUS_M
+    val lat = e.lat + s.northM * f / mPerDeg
+    val lon = e.lon + s.eastM * f / (mPerDeg * cos(Math.toRadians(lat)))
+    return e.copy(lat = lat, lon = lon)
 }
