@@ -123,4 +123,40 @@ class MapMatcherTest {
         val far = m.step(450.0, 0.0, 5.0, Math.PI / 2, 10.0)
         assertNotNull(far); assertTrue(!far.nearJunction)
     }
+
+    @Test fun onewayStopJitterAcrossNodeKeepsWay() {
+        val a = straightRoad(0.0, 0.0, 600.0, 0.0, 10.0, 1, 0, flags = RoadPack.FLAG_ONEWAY)
+        val b = straightRoad(0.0, 25.0, 600.0, 25.0, 10.0, 2, a.first.size)
+        // Короткая связь way 3 между узлом way 1 при e = 310 и узлом way 2 над ним.
+        val link = EdgeSpec(31, a.first.size + 31, 3)
+        val m = MapMatcher(RoadIndex(roadPackOf(enu, a.first + b.first, a.second + b.second + link), enu))
+        val rnd = Random(4)
+        for (k in 0..30) m.step(10.0 * k + rnd.nextGaussian(), rnd.nextGaussian(), 5.0, Math.PI / 2, 10.0)
+        val ways = (0 until 30).map { k ->
+            m.step(if (k % 2 == 0) 299.0 else 301.0, 0.0, 5.0, Math.PI / 2, 0.0)?.wayId
+        }
+        assertTrue(ways.all { it == 1L }, "ways: $ways")
+    }
+
+    @Test fun uShapedWayKeepsTrackedLeg() {
+        val out = straightRoad(0.0, 0.0, 500.0, 0.0, 10.0, 1, 0)
+        val up = straightRoad(500.0, 0.0, 500.0, 20.0, 10.0, 1, out.first.size, startNode = out.first.size - 1)
+        val back = straightRoad(500.0, 20.0, 0.0, 20.0, 10.0, 1, out.first.size + up.first.size,
+            startNode = out.first.size + up.first.size - 1)
+        val m = MapMatcher(RoadIndex(graph(out, up, back), enu))
+        val rnd = Random(5)
+        fun noisy(e: Double, n: Double, psi: Double) = m.step(e + 8 * rnd.nextGaussian(), n + 8 * rnd.nextGaussian(), 8.0, psi, 10.0)
+        for (k in 0..50) noisy(10.0 * k, 0.0, Math.PI / 2)
+        noisy(500.0, 10.0, 0.0)
+        val ret = (1..50).map { k -> noisy(500.0 - 10.0 * k, 20.0, -Math.PI / 2) }
+        val tail = ret.filterIndexed { i, _ -> 500.0 - 10.0 * (i + 1) <= 400.0 }
+        val ok = tail.count { r -> r != null && (kotlin.math.abs(r.n - 20.0) <= 8.0 || !r.fit || r.confidence < 0.9) }
+        assertTrue(ok == tail.size, "ok $ok of ${tail.size}")
+    }
+
+    @Test fun fitFalseOnHeadingMismatchAtSpeed() {
+        val m = MapMatcher(RoadIndex(graph(straightRoad(0.0, 0.0, 1000.0, 0.0, 100.0, 1, 0)), enu))
+        val r = m.step(500.0, 2.0, 5.0, 0.0, 10.0)
+        assertNotNull(r); assertTrue(!r.fit)
+    }
 }

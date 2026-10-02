@@ -17,6 +17,13 @@ data class MatchConfig(
     /** Штраф перехода, если по графу пути нет: позволяет выйти с ошибочно выбранной несвязанной улицы. */
     val teleportPenalty: Double = 20.0,
     val junctionM: Double = 20.0,
+    /** Верхняя граница радиуса поиска, который растёт с σ (3σ). */
+    val maxSearchRadiusM: Double = 200.0,
+    /** fit: расстояние до дороги не больше fitSigmaFactor·σ (и не больше maxFitM). */
+    val fitSigmaFactor: Double = 2.5,
+    val maxFitM: Double = 50.0,
+    /** fit: при движении курс отличается от направления по ребру не больше чем на столько. */
+    val fitHeadingDeg: Double = 30.0,
 )
 
 /**
@@ -28,7 +35,7 @@ data class RoadMatch(
     val edge: Int, val wayId: Long, val e: Double, val n: Double, val distM: Double,
     val travelBearing: Double, val confidence: Double, val roadClass: Int, val tunnel: Boolean,
     val nearJunction: Boolean,
-    /** Абсолютное соответствие: расстояние ≤ 2.5σ и (при движении) курс в пределах 30°. */
+    /** Абсолютное соответствие: расстояние ≤ min(fitSigmaFactor·σ, maxFitM) и (при движении) курс в пределах fitHeadingDeg. */
     val fit: Boolean,
 )
 
@@ -48,9 +55,17 @@ class MapMatcher(private val index: RoadIndex, private val config: MatchConfig =
 
     fun step(e: Double, n: Double, sigmaM: Double, psi: Double, speedMps: Double): RoadMatch? {
         val sigE = max(sigmaM, config.minEmissionSigmaM)
-        val radius = min(max(config.searchRadiusM, 3 * sigE), MAX_SEARCH_M)
+        val radius = min(max(config.searchRadiusM, 3 * sigE), config.maxSearchRadiusM)
         // near() отсортирован по расстоянию: первое ребро каждой дороги — ближайшее.
-        val projections = index.near(e, n, radius).distinctBy { index.pack.way[it.edge] }.take(config.maxCandidates)
+        val projections = ArrayList(
+            index.near(e, n, radius).distinctBy { index.pack.way[it.edge] }.take(config.maxCandidates),
+        )
+        // Ребра, на которых цепочка уже стоит, остаются кандидатами, даже если на их дороге есть ребро ближе.
+        val have = projections.mapTo(HashSet()) { it.edge }
+        for (s in prev) if (have.add(s.proj.edge)) {
+            val q = index.project(s.proj.edge, e, n)
+            if (q.distM <= radius) projections.add(q) else have.remove(s.proj.edge)
+        }
         if (projections.isEmpty()) { reset(); return null }
         val sigPsi = Math.toRadians(config.headingSigmaDeg)
         val useHeading = speedMps >= config.minHeadingSpeedMps
@@ -95,8 +110,8 @@ class MapMatcher(private val index: RoadIndex, private val config: MatchConfig =
         }
         val p = best.proj
         val bearing = travelBearing(p.edge, best.forward)
-        val fit = p.distM <= 2.5 * sigE &&
-            (!useHeading || abs(wrapAngle(psi - bearing)) <= Math.toRadians(FIT_HEADING_DEG))
+        val fit = p.distM <= min(config.fitSigmaFactor * sigE, config.maxFitM) &&
+            (!useHeading || abs(wrapAngle(psi - bearing)) <= Math.toRadians(config.fitHeadingDeg))
         return RoadMatch(
             p.edge, way, p.e, p.n, p.distM, bearing, sameWay / total,
             index.pack.roadClass(p.edge), index.pack.tunnel(p.edge), nearJunction(p), fit,
@@ -133,7 +148,5 @@ class MapMatcher(private val index: RoadIndex, private val config: MatchConfig =
     private companion object {
         const val BACKTRACK_TOLERANCE_M = 5.0
         const val PRUNE = -30.0
-        const val MAX_SEARCH_M = 200.0
-        const val FIT_HEADING_DEG = 30.0
     }
 }
