@@ -32,24 +32,34 @@ class LocalizerTest {
         return Geo.haversineM(ll[0], ll[1], o.lat, o.lon)
     }
 
-    /** LocEvent и статус не подаются в окне [gapStartMs, gapEndMs) (мс от начала). */
-    private fun run(config: LocalizerConfig, gapStartMs: Long = -1, gapEndMs: Long = -1): List<LocalizerOutput> {
+    /**
+     * LocEvent и статус не подаются в окне [gapStartMs, gapEndMs) (мс от начала). Фиксы в окне
+     * [spoofStartMs, spoofEndMs) сдвинуты на spoofNorthM м к северу (движение согласованное).
+     * Кадры без дескриптора до visualFromMs.
+     */
+    private fun run(
+        config: LocalizerConfig, gapStartMs: Long = -1, gapEndMs: Long = -1,
+        spoofStartMs: Long = -1, spoofEndMs: Long = -1, spoofNorthM: Double = 0.0, visualFromMs: Long = 0,
+    ): List<LocalizerOutput> {
         val localizer = Localizer(pack(), config)
         val out = ArrayList<LocalizerOutput>()
         for (step in 0..12_000) {
             val tMs = t0 + step * 10L
             val t = tMs.toDouble()
-            val inGap = tMs - t0 >= gapStartMs && tMs - t0 < gapEndMs
+            val rel = tMs - t0
+            val inGap = rel >= gapStartMs && rel < gapEndMs
+            val spoof = if (rel >= spoofStartMs && rel < spoofEndMs) spoofNorthM else 0.0
             localizer.onSensor(AccelEvent(t, 0f, 0f, 9.81f + 0.3f * sin(step.toFloat())))
             localizer.onSensor(GyroEvent(t, 0f, 0f, 0f))
             val eMeters = step * 0.1
             if (step % 100 == 0 && !inGap) {
-                val ll = enu.toLatLon(eMeters, 0.0)
+                val ll = enu.toLatLon(eMeters, spoof)
                 localizer.onSensor(LocEvent(t, ll[0], ll[1], 3f, 10f, 0.3f, 90f, 2f))
                 localizer.onSensor(GnssStatusEvent(t, 16, 14, 35f, 5f))
             }
             if (step % 50 == 0) {
-                localizer.onFrame(tMs, oneHot(minOf(n, (eMeters / 10.0).toInt())))?.let { out.add(it) }
+                val d = if (rel >= visualFromMs) oneHot(minOf(n, (eMeters / 10.0).toInt())) else null
+                localizer.onFrame(tMs, d)?.let { out.add(it) }
             }
         }
         return out
@@ -62,22 +72,60 @@ class LocalizerTest {
         assertTrue(outputs.all { it.health == GnssHealth.GOOD }, "health: ${outputs.map { it.health }.distinct()}")
     }
 
-    @Test fun gnssDropSwitchesToVisualWithinFiveSeconds() {
-        // Тайминги монитора ужаты (по умолчанию NO_FIX наступает через 10 с, а VISUAL — ещё через 2 с
-        // гистерезиса), чтобы проверить ровно проводку Localizer: GNSS -> VISUAL за ≤ 5 с.
-        val config = LocalizerConfig(monitorConfig = MonitorConfig(fixGapMs = 800.0, noFixMs = 1_500.0))
-        val outputs = run(config, gapStartMs = 30_000, gapEndMs = 60_000)
+    private fun List<LocalizerOutput>.firstAfter(t: Long, pred: (LocalizerOutput) -> Boolean) =
+        firstOrNull { it.tMs >= t && pred(it) }
+
+    @Test fun gnssDropLeavesGnssWithinFiveSeconds() {
+        // GnssStatusEvent в окне тоже не подаются; на оценку это не влияет (статус устаревает через 5 с
+        // и тогда просто не даёт причин), деградацию определяет отсутствие фиксов.
+        val outputs = run(LocalizerConfig(), gapStartMs = 30_000, gapEndMs = 60_000)
         val dropStart = t0 + 30_000; val dropEnd = t0 + 60_000
-
-        val visual = outputs.firstOrNull { it.tMs >= dropStart && it.mode == NavMode.VISUAL }
-        assertTrue(visual != null && visual.tMs - dropStart <= 5_000, "first VISUAL at ${visual?.tMs?.minus(dropStart)} ms")
-
+        val left = outputs.firstAfter(dropStart) { it.mode != NavMode.GNSS }
+        val visual = outputs.firstAfter(dropStart) { it.mode == NavMode.VISUAL }
+        val back = outputs.firstAfter(dropEnd) { it.mode == NavMode.GNSS }
+        assertTrue(left != null && left.tMs - dropStart <= 5_000, "left GNSS at ${left?.tMs?.minus(dropStart)}")
+        assertTrue(visual != null && visual.tMs - dropStart <= 12_500, "VISUAL at ${visual?.tMs?.minus(dropStart)}")
         val errors = outputs.filter { it.tMs in dropStart until dropEnd }.map { truthErrorM(it) }.sorted()
         val p95 = errors[errors.size * 95 / 100]
         assertTrue(p95 <= 15.0, "P95=$p95")
+        assertTrue(back != null && back.tMs - dropEnd <= 10_000, "back to GNSS at ${back?.tMs?.minus(dropEnd)}")
+    }
 
-        val back = outputs.firstOrNull { it.tMs >= dropEnd && it.mode == NavMode.GNSS }
-        assertTrue(back != null && back.tMs - dropEnd <= 10_000, "back to GNSS at ${back?.tMs?.minus(dropEnd)} ms")
+    @Test fun tightenedMonitorConfigReachesVisualQuickly() {
+        val config = LocalizerConfig(monitorConfig = MonitorConfig(fixGapMs = 800.0, noFixMs = 1_500.0))
+        val outputs = run(config, gapStartMs = 30_000, gapEndMs = 60_000)
+        val visual = outputs.firstAfter(t0 + 30_000) { it.mode == NavMode.VISUAL }
+        assertTrue(visual != null && visual.tMs - (t0 + 30_000) <= 5_000)
+    }
+
+    @Test fun gnssDropWithoutVisualLeavesGnssThenDeadReckoning() {
+        val outputs = run(LocalizerConfig(visual = false), gapStartMs = 30_000, gapEndMs = 70_000)
+        val dropStart = t0 + 30_000
+        val left = outputs.firstAfter(dropStart) { it.mode != NavMode.GNSS }
+        val dr = outputs.firstAfter(dropStart) { it.mode == NavMode.DEAD_RECKONING }
+        assertTrue(left != null && left.tMs - dropStart <= 5_000, "left GNSS at ${left?.tMs?.minus(dropStart)}")
+        assertTrue(dr != null && dr.tMs - dropStart <= 13_000, "DR at ${dr?.tMs?.minus(dropStart)}")
+        assertTrue(dr!!.tMs - dropStart > 5_000)
+    }
+
+    @Test fun spoofedFixesAreNotFusedOnceUntrusted() {
+        val outputs = run(LocalizerConfig(), spoofStartMs = 40_000, spoofEndMs = 80_000, spoofNorthM = 200.0)
+        val window = outputs.filter { it.tMs >= t0 + 40_000 && it.tMs < t0 + 80_000 && it.health == GnssHealth.UNTRUSTED }
+        assertTrue(window.size > 20, "untrusted frames: ${window.size}")
+        val worst = window.maxOf { truthErrorM(it) }
+        assertTrue(worst <= 15.0, "worst error while UNTRUSTED = $worst")
+    }
+
+    @Test fun relocksByVisualAgreementAndReinitializesFilter() {
+        // relockMaxSigmaM ≈ 0: фильтр никогда не считается «точным», поэтому защёлку снимает только согласие
+        // GNSS с камерой, и фильтр переинициализируется по фиксу (путь consumeReinit).
+        val config = LocalizerConfig(monitorConfig = MonitorConfig(relockMaxSigmaM = 0.001))
+        val outputs = run(config, spoofStartMs = 40_000, spoofEndMs = 60_000, spoofNorthM = 200.0)
+        val late = outputs.filter { it.tMs >= t0 + 90_000 }
+        assertTrue(late.isNotEmpty())
+        val worst = late.maxOf { truthErrorM(it) }
+        assertTrue(worst <= 15.0, "late error=$worst")
+        assertTrue(late.all { it.mode == NavMode.GNSS && it.health == GnssHealth.GOOD }, "late: ${late.map { it.mode to it.health }.distinct()}")
     }
 
     @Test fun monitorOffAlwaysUsesGnss() {

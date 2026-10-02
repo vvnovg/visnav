@@ -121,7 +121,7 @@ class Localizer(private val pack: RefPack, private val config: LocalizerConfig =
             monitor.onFix(ev, null, null, null)
         }
         if (monitor.consumeReinit()) {
-            val psi = if (brg != null) Math.toRadians(brg.toDouble()) else ekf.x[2]
+            val psi = if (brg != null && spd != null && spd >= 3f) Math.toRadians(brg.toDouble()) else ekf.x[2]
             val v = spd?.toDouble() ?: ekf.x[3]
             val psiSigma = Math.toRadians(sigma(ev.bearingAccDeg, DEFAULT_HEADING_ACC_DEG_UPDATE, MIN_HEADING_SIGMA_DEG))
             val vSigma = sigma(ev.speedAccMps, DEFAULT_SPEED_ACC_UPDATE, MIN_SPEED_SIGMA_MPS)
@@ -129,6 +129,9 @@ class Localizer(private val pack: RefPack, private val config: LocalizerConfig =
             return
         }
         if (config.monitor) updateMode(t)
+        // Подозрительный GNSS не сливаем в фильтр, какой бы режим ни показывался: гистерезис нужен
+        // для стабильности индикации, а не для доверия.
+        if (config.monitor && lastHealth == GnssHealth.UNTRUSTED) return
         when (modes.mode) {
             NavMode.GNSS -> applyFix(ev, en, posSigma, 1.0)
             NavMode.FUSED -> applyFix(ev, en, posSigma, config.fusedSigmaScale)
@@ -181,12 +184,14 @@ class Localizer(private val pack: RefPack, private val config: LocalizerConfig =
                     visState = if (accepted) "ok" else "gated"
                     if (accepted) {
                         lastVisualOk = t
-                        monitor.onVisualFix(t, lat, lon, sigmaVis)
-                        if (config.monitor) updateMode(t)
+                        if (config.monitor) monitor.onVisualFix(t, lat, lon, sigmaVis)
                     }
                 }
             }
         }
+        // Режим и состояние обновляются на каждом кадре, чтобы глушение без визуальных фиксаций
+        // не оставляло режим GNSS навсегда, а VISUAL — не переходил в DEAD_RECKONING.
+        if (config.monitor) updateMode(t)
         val ll = enu!!.toLatLon(ekf.x[0], ekf.x[1])
         return LocalizerOutput(
             tMs, ll[0], ll[1], ekf.posSigma(), visSim, visOk, visState, stationary.isStationary(t),
