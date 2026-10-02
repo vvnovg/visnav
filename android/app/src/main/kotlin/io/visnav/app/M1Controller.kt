@@ -220,8 +220,7 @@ class M1Controller(private val context: Context) {
                 }
             }
             flush = { reorderer.drainAll(sink); Pair(reorderer.late, reorderer.dropped) }
-            drainNow = { reorderer.drain(System.currentTimeMillis(), sink) }
-            startDrainTimer()
+            startDrainTimer { reorderer.drain(System.currentTimeMillis(), sink) }
             // Колбэки датчиков/GNSS: журнал, затем только постановка в очередь (коротко, без фильтра).
             val feed: (SensorEvent) -> Unit = { e ->
                 sLog.event(e)
@@ -484,8 +483,10 @@ class M1Controller(private val context: Context) {
         executor.shutdown()
     }
 
-    private fun startDrainTimer() {
+    private fun startDrainTimer(drain: () -> Unit) {
         stopDrainTimer()
+        // drainNow ставим после stopDrainTimer(): тот обнуляет его.
+        drainNow = drain
         val timer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
         drainTimer = timer
         // Таймер только ставит задачу на executor: сам drain остаётся однопоточным.
