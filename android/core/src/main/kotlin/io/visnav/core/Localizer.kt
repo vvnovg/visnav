@@ -1,0 +1,196 @@
+package io.visnav.core
+
+import kotlin.math.hypot
+import kotlin.math.max
+
+data class LocalizerConfig(
+    val visual: Boolean = true,
+    val acceptSim: Float = 0.5f,
+    val minRadiusM: Double = 100.0,
+    val maxRadiusM: Double = 3000.0,
+    val k: Int = 5,
+    val filter: FilterConfig = FilterConfig(),
+    val monitor: Boolean = true,
+    val monitorConfig: MonitorConfig = MonitorConfig(),
+    val modeConfig: ModeConfig = ModeConfig(),
+    val fusedSigmaScale: Double = 3.0,
+)
+
+/** visState: "off", "no_desc", "empty_window", "below", "gated", "ok" (см. M2a). */
+data class LocalizerOutput(
+    val tMs: Long, val lat: Double, val lon: Double, val sigmaM: Double,
+    val visSim: Float?, val visAccepted: Boolean?, val visState: String, val stationary: Boolean,
+    val mode: NavMode, val health: GnssHealth, val reasons: Set<GnssReason>,
+)
+
+private const val MIN_POS_SIGMA_M = 3.0
+private const val MIN_SPEED_SIGMA_MPS = 0.1
+private const val MIN_HEADING_SIGMA_DEG = 1.0
+private const val DEFAULT_HEADING_ACC_DEG_INIT = 10.0
+private const val DEFAULT_HEADING_ACC_DEG_UPDATE = 5.0
+private const val DEFAULT_SPEED_ACC_INIT = 1.0
+private const val DEFAULT_SPEED_ACC_UPDATE = 0.5
+
+/**
+ * Сигма из поля GNSS-точности: `null` или не-конечное значение заменяется значением по умолчанию,
+ * иначе — значение поля, ограниченное снизу `floor` (Ekf2d.update* требует sigma > 0 и конечную).
+ */
+private fun sigma(v: Float?, default: Double, floor: Double): Double =
+    if (v != null && v.isFinite()) max(v.toDouble(), floor) else default
+
+/**
+ * Общий конвейер локализации (фильтр M2a + монитор GNSS + режимы FR-15). Время — мс настенных часов.
+ * С `monitor = false` ведёт себя как Replayer из M2a: режим всегда GNSS.
+ */
+class Localizer(private val pack: RefPack, private val config: LocalizerConfig = LocalizerConfig()) {
+    private val index = GeoIndex(pack)
+    private val ekf = Ekf2d(config.filter)
+    private val yaw = YawRate()
+    private val stationary = StationaryDetector()
+    private val monitor = GnssMonitor(config.monitorConfig)
+    private val modes = ModeManager(config.modeConfig)
+    private var enu: Enu? = null
+    private var lastT = 0.0
+    private var lastOmega = 0.0
+    private var lastZupt = Double.NEGATIVE_INFINITY
+    private var lastVisualOk: Double? = null
+    private var lastHealth = GnssHealth.GOOD
+    private var lastReasons: Set<GnssReason> = emptySet()
+
+    val initialized: Boolean get() = ekf.initialized
+    val mode: NavMode get() = modes.mode
+
+    private fun predictTo(t: Double) {
+        if (ekf.initialized && t > lastT) { ekf.predict((t - lastT) / 1000.0, lastOmega); lastT = t }
+    }
+
+    private fun updateMode(t: Double) {
+        val a = monitor.assess(t)
+        lastHealth = a.health; lastReasons = a.reasons
+        modes.update(t, a.health, lastVisualOk)
+    }
+
+    fun onSensor(e: SensorEvent) {
+        val t = e.tMs
+        when (e) {
+            is GyroEvent -> {
+                val omega = yaw.headingRate(e.x, e.y, e.z) ?: 0.0
+                predictTo(t)
+                lastOmega = omega
+                stationary.onGyro(t, e.x, e.y, e.z)
+            }
+            is AccelEvent -> {
+                yaw.onAccel(e.x, e.y, e.z)
+                stationary.onAccel(t, e.x, e.y, e.z)
+                if (ekf.initialized && t - lastZupt >= 100.0 && stationary.isStationary(t)) {
+                    predictTo(t); ekf.updateSpeed(0.0, 0.05); lastZupt = t
+                }
+            }
+            is LocEvent -> onLoc(e)
+            is GnssStatusEvent -> monitor.onStatus(e)
+            is AgcEvent -> monitor.onAgc(e)
+            else -> Unit
+        }
+    }
+
+    private fun onLoc(ev: LocEvent) {
+        if (!ev.lat.isFinite() || !ev.lon.isFinite() || !ev.accM.isFinite()) return
+        val t = ev.tMs
+        val spd = ev.speedMps; val brg = ev.bearingDeg
+        if (!ekf.initialized) {
+            if (spd != null && spd >= 3f && brg != null) {
+                enu = Enu(ev.lat, ev.lon)
+                val posSigma = sigma(ev.accM, MIN_POS_SIGMA_M, MIN_POS_SIGMA_M)
+                val psiSigma = Math.toRadians(sigma(ev.bearingAccDeg, DEFAULT_HEADING_ACC_DEG_INIT, MIN_HEADING_SIGMA_DEG))
+                val vSigma = sigma(ev.speedAccMps, DEFAULT_SPEED_ACC_INIT, MIN_SPEED_SIGMA_MPS)
+                ekf.init(0.0, 0.0, Math.toRadians(brg.toDouble()), spd.toDouble(), posSigma, psiSigma, vSigma)
+                lastT = t
+                monitor.onFix(ev, null, null, null) // первый фикс — тоже «последний фикс» для монитора
+            }
+            return
+        }
+        predictTo(t)
+        val en = enu!!.toEn(ev.lat, ev.lon)
+        val posSigma = sigma(ev.accM, MIN_POS_SIGMA_M, MIN_POS_SIGMA_M)
+        if (config.monitor) {
+            monitor.onFix(
+                ev, ekf.positionD2(en[0], en[1], posSigma),
+                hypot(en[0] - ekf.x[0], en[1] - ekf.x[1]), ekf.posSigma(),
+            )
+        } else {
+            monitor.onFix(ev, null, null, null)
+        }
+        if (monitor.consumeReinit()) {
+            val psi = if (brg != null) Math.toRadians(brg.toDouble()) else ekf.x[2]
+            val v = spd?.toDouble() ?: ekf.x[3]
+            val psiSigma = Math.toRadians(sigma(ev.bearingAccDeg, DEFAULT_HEADING_ACC_DEG_UPDATE, MIN_HEADING_SIGMA_DEG))
+            val vSigma = sigma(ev.speedAccMps, DEFAULT_SPEED_ACC_UPDATE, MIN_SPEED_SIGMA_MPS)
+            ekf.init(en[0], en[1], psi, v, posSigma, psiSigma, vSigma)
+            return
+        }
+        if (config.monitor) updateMode(t)
+        when (modes.mode) {
+            NavMode.GNSS -> applyFix(ev, en, posSigma, 1.0)
+            NavMode.FUSED -> applyFix(ev, en, posSigma, config.fusedSigmaScale)
+            NavMode.VISUAL, NavMode.DEAD_RECKONING -> Unit
+        }
+    }
+
+    private fun applyFix(ev: LocEvent, en: DoubleArray, posSigma: Double, scale: Double) {
+        val spd = ev.speedMps; val brg = ev.bearingDeg
+        ekf.updatePosition(en[0], en[1], posSigma * scale)
+        if (spd != null) {
+            val spdSigma = sigma(ev.speedAccMps, DEFAULT_SPEED_ACC_UPDATE, MIN_SPEED_SIGMA_MPS)
+            ekf.updateSpeed(spd.toDouble(), spdSigma * scale)
+        }
+        if (brg != null && spd != null && spd >= 3f) {
+            val brgSigma = Math.toRadians(sigma(ev.bearingAccDeg, DEFAULT_HEADING_ACC_DEG_UPDATE, MIN_HEADING_SIGMA_DEG))
+            ekf.updateHeading(Math.toRadians(brg.toDouble()), brgSigma * scale)
+        }
+    }
+
+    /** null, пока фильтр не инициализирован. */
+    fun onFrame(tMs: Long, desc: FloatArray?): LocalizerOutput? {
+        if (!ekf.initialized) return null
+        val t = tMs.toDouble()
+        predictTo(t)
+        var visSim: Float? = null
+        var visOk: Boolean? = null
+        val visState: String
+        if (!config.visual) {
+            visState = "off"
+        } else if (desc == null) {
+            visState = "no_desc"
+        } else {
+            val center = enu!!.toLatLon(ekf.x[0], ekf.x[1])
+            val radius = (3 * ekf.posSigma()).coerceIn(config.minRadiusM, config.maxRadiusM)
+            val best = index.search(desc, config.k, center[0], center[1], radius).firstOrNull()
+            if (best == null) {
+                visState = "empty_window"
+            } else {
+                visSim = best.sim
+                if (best.sim < config.acceptSim) {
+                    visOk = false
+                    visState = "below"
+                } else {
+                    val lat = pack.lats[best.index]; val lon = pack.lons[best.index]
+                    val en = enu!!.toEn(lat, lon)
+                    val sigmaVis = if (best.sim >= 0.7f) 8.0 else 15.0
+                    val accepted = ekf.updatePosition(en[0], en[1], sigmaVis)
+                    visOk = accepted
+                    visState = if (accepted) "ok" else "gated"
+                    if (accepted) {
+                        lastVisualOk = t
+                        monitor.onVisualFix(t, lat, lon, sigmaVis)
+                        if (config.monitor) updateMode(t)
+                    }
+                }
+            }
+        }
+        val ll = enu!!.toLatLon(ekf.x[0], ekf.x[1])
+        return LocalizerOutput(
+            tMs, ll[0], ll[1], ekf.posSigma(), visSim, visOk, visState, stationary.isStationary(t),
+            modes.mode, lastHealth, lastReasons,
+        )
+    }
+}

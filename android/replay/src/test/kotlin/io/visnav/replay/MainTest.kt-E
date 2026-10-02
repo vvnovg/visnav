@@ -74,12 +74,12 @@ class MainTest {
 
     @Test fun allFramesLackDescriptorTrueOnlyWhenEveryPointIsNoDesc() {
         val allNoDesc = listOf(
-            TrajPoint(1, 0.0, 0.0, 1.0, false, null, null, "no_desc", false, io.visnav.core.NavMode.GNSS, io.visnav.core.GnssHealth.GOOD, emptySet()),
-            TrajPoint(2, 0.0, 0.0, 1.0, false, null, null, "no_desc", false, io.visnav.core.NavMode.GNSS, io.visnav.core.GnssHealth.GOOD, emptySet()),
+            TrajPoint(1, 0.0, 0.0, 1.0, false, null, null, "no_desc", false),
+            TrajPoint(2, 0.0, 0.0, 1.0, false, null, null, "no_desc", false),
         )
         assertTrue(allFramesLackDescriptor(allNoDesc))
 
-        val oneOk = allNoDesc + TrajPoint(3, 0.0, 0.0, 1.0, false, 0.9f, true, "ok", false, io.visnav.core.NavMode.GNSS, io.visnav.core.GnssHealth.GOOD, emptySet())
+        val oneOk = allNoDesc + TrajPoint(3, 0.0, 0.0, 1.0, false, 0.9f, true, "ok", false)
         assertFalse(allFramesLackDescriptor(oneOk))
 
         assertFalse(allFramesLackDescriptor(emptyList())) // no points at all isn't the same failure

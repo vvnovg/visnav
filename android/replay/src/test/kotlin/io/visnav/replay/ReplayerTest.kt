@@ -6,10 +6,12 @@ import io.visnav.core.DescriptorLogWriter
 import io.visnav.core.Enu
 import io.visnav.core.FrameRecord
 import io.visnav.core.Geo
+import io.visnav.core.GnssHealth
 import io.visnav.core.GyroEvent
 import io.visnav.core.Half
 import io.visnav.core.LatencyJson
 import io.visnav.core.LocEvent
+import io.visnav.core.NavMode
 import io.visnav.core.RefPack
 import io.visnav.core.SensorEvent
 import io.visnav.core.SessionHeader
@@ -194,12 +196,12 @@ class ReplayerTest {
 
         val out = File(dir, "traj.jsonl")
         TrajectoryWriter.write(out, s, ReplayConfig(), listOf(Outage(10, 20)),
-            listOf(TrajPoint(5, 55.75, 37.6, 4.0, false, null, null, "no_desc", false)))
+            listOf(TrajPoint(5, 55.75, 37.6, 4.0, false, null, null, "no_desc", false, NavMode.GNSS, GnssHealth.GOOD, emptySet())))
         val lines = out.readLines()
         assertEquals("{\"type\":\"replay\",\"visual\":true,\"outages\":[[10,20]],\"session_started_ms\":1,\"refpack_created_at\":\"c\"}", lines[0])
         assertEquals(
             "{\"t_ms\":5,\"lat\":55.75,\"lon\":37.6,\"sigma_m\":4.0,\"outage\":false,\"vis_sim\":null,\"vis_ok\":null," +
-                "\"vis_state\":\"no_desc\",\"stationary\":false}",
+                "\"vis_state\":\"no_desc\",\"stationary\":false,\"mode\":\"gnss\",\"health\":\"good\",\"reasons\":[],\"injected\":null}",
             lines[1],
         )
     }
@@ -212,20 +214,20 @@ class ReplayerTest {
         }))
         val out = File(dir, "traj.jsonl")
         val points = listOf(
-            TrajPoint(1, Double.NaN, 37.6, 4.0, false, Float.NaN, null, "no_desc", false),
-            TrajPoint(2, 55.75, Double.POSITIVE_INFINITY, Double.NaN, true, null, false, "below", true),
+            TrajPoint(1, Double.NaN, 37.6, 4.0, false, Float.NaN, null, "no_desc", false, NavMode.GNSS, GnssHealth.GOOD, emptySet()),
+            TrajPoint(2, 55.75, Double.POSITIVE_INFINITY, Double.NaN, true, null, false, "below", true, NavMode.GNSS, GnssHealth.GOOD, emptySet()),
         )
         TrajectoryWriter.write(out, s, ReplayConfig(), emptyList(), points)
         val lines = out.readLines()
         // Every line must parse as JSON (no bare NaN/Infinity tokens) and non-finite fields are null.
         assertEquals(
             "{\"t_ms\":1,\"lat\":null,\"lon\":37.6,\"sigma_m\":4.0,\"outage\":false,\"vis_sim\":null,\"vis_ok\":null," +
-                "\"vis_state\":\"no_desc\",\"stationary\":false}",
+                "\"vis_state\":\"no_desc\",\"stationary\":false,\"mode\":\"gnss\",\"health\":\"good\",\"reasons\":[],\"injected\":null}",
             lines[1],
         )
         assertEquals(
             "{\"t_ms\":2,\"lat\":55.75,\"lon\":null,\"sigma_m\":null,\"outage\":true,\"vis_sim\":null,\"vis_ok\":false," +
-                "\"vis_state\":\"below\",\"stationary\":true}",
+                "\"vis_state\":\"below\",\"stationary\":true,\"mode\":\"gnss\",\"health\":\"good\",\"reasons\":[],\"injected\":null}",
             lines[2],
         )
         for (line in lines) assertTrue(!line.contains("NaN") && !line.contains("Infinity"), line)
