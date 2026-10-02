@@ -15,10 +15,19 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import io.visnav.core.DescriptorLogWriter
 import io.visnav.core.FrameCaptureEvent
+import io.visnav.core.EventReorderer
 import io.visnav.core.Geo
+import io.visnav.core.GnssReason
+import io.visnav.core.Localizer
+import io.visnav.core.LocalizerConfig
+import io.visnav.core.NavMode
+import io.visnav.core.ReorderItem
+import io.visnav.core.SensorEvent
+import io.visnav.core.TrajectoryFormat
 import io.visnav.core.LocalizationPipeline
 import io.visnav.core.PriorMode
 import io.visnav.core.PriorPolicy
+import io.visnav.core.SensorLogFormat
 import io.visnav.core.SensorLogger
 import io.visnav.core.SessionHeader
 import io.visnav.core.SessionLogger
@@ -43,7 +52,17 @@ data class UiState(
     val lastInfMs: Double? = null,
     val gpsAccM: Float? = null,
     val frameSize: String? = null,
+    val navMode: NavMode? = null,
+    val sigmaM: Double? = null,
+    val gnssReasons: Set<GnssReason> = emptySet(),
 )
+
+/** Журнал траектории фильтра: заголовок и по строке на кадр. */
+private class FusionLog(file: File) : Closeable {
+    private val w = file.bufferedWriter()
+    @Synchronized fun line(s: String) { w.write(s); w.newLine() }
+    @Synchronized override fun close() = w.close()
+}
 
 /**
  * Владеет камерой, GPS, конвейером и журналом одной сессии M1. Не зависит от LifecycleOwner —
@@ -66,6 +85,13 @@ class M1Controller(private val context: Context) {
     @Volatile private var logger: SessionLogger? = null
     @Volatile private var sensorLog: SensorLogger? = null
     @Volatile private var descLog: DescriptorLogWriter? = null
+    @Volatile private var fusionLog: FusionLog? = null
+    /** Выпускает остаток очереди переупорядочителя (на executor) и возвращает число опоздавших событий. */
+    @Volatile private var flush: (() -> Pair<Int, Int>)? = null
+    /** Периодический drain на executor, независимо от кадров (иначе очередь растёт, если кадры встали). */
+    @Volatile private var drainNow: (() -> Unit)? = null
+    @Volatile private var drainTimer: java.util.concurrent.ScheduledExecutorService? = null
+    @Volatile private var drainTask: java.util.concurrent.ScheduledFuture<*>? = null
 
     init {
         executor.execute {
@@ -136,7 +162,8 @@ class M1Controller(private val context: Context) {
             // (обрыв заголовка датчиков через onFirstFailure, отсутствие гироскопа/акселерометра)
             // дописываются к этому статусу через "it.status + ...", а не затираются им — раньше
             // финальный _state.update шёл последним и стирал их целиком.
-            _state.update { it.copy(running = true, frames = 0, errors = 0, status = "Запись: ${mode.name}") }
+            _state.update { it.copy(running = true, frames = 0, errors = 0, status = "Запись: ${mode.name}",
+                navMode = null, sigmaM = null, gnssReasons = emptySet()) }
             logDir.mkdirs()
             val startedMs = System.currentTimeMillis()
             val base = "session-$startedMs-${mode.name.lowercase()}"
@@ -157,6 +184,50 @@ class M1Controller(private val context: Context) {
             sLog.header(startedMs)
             val dLog = DescriptorLogWriter(File(logDir, "$base.desc"), b.pack.dim)
             descLog = dLog
+            val fLog = FusionLog(File(logDir, "$base.fusion.jsonl"))
+            fusionLog = fLog
+            fLog.line(TrajectoryFormat.fusionHeader(startedMs, b.meta.createdAt))
+            val localizer = Localizer(b.pack, LocalizerConfig())
+            val reorderer = EventReorderer()
+            var sensorFailureReported = false
+            var frameFailureReported = false
+            // Весь доступ к Localizer — только на потоке кадров (executor), через sink переупорядочителя.
+            val sink: (ReorderItem) -> Unit = { item ->
+                when (item) {
+                    is ReorderItem.Sensor -> try {
+                        localizer.onSensor(item.event)
+                    } catch (ex: Exception) {
+                        // Один раз и без обновления UI на каждое событие.
+                        if (!sensorFailureReported) {
+                            sensorFailureReported = true
+                            _state.update { it.copy(errors = it.errors + 1, status = "Ошибка фильтра (датчики): ${ex.message}") }
+                        }
+                    }
+                    is ReorderItem.Frame -> try {
+                        val out = localizer.onFrame(item.frameTMs, item.desc)
+                        if (out != null) {
+                            fLog.line(TrajectoryFormat.row(out, false, null))
+                            _state.update { it.copy(navMode = out.mode, sigmaM = out.sigmaM, gnssReasons = out.reasons) }
+                        }
+                    } catch (e: Exception) {
+                        // Сбой фильтра на кадре не останавливает запись.
+                        val first = !frameFailureReported
+                        frameFailureReported = true
+                        _state.update {
+                            it.copy(errors = it.errors + 1, status = if (first) "Ошибка фильтра: ${e.message}" else it.status)
+                        }
+                    }
+                }
+            }
+            flush = { reorderer.drainAll(sink); Pair(reorderer.late, reorderer.dropped) }
+            startDrainTimer { reorderer.drain(System.currentTimeMillis(), sink) }
+            // Колбэки датчиков/GNSS: журнал, затем только постановка в очередь (коротко, без фильтра).
+            val feed: (SensorEvent) -> Unit = { e ->
+                sLog.event(e)
+                // В фильтр идёт только то, что пишется в журнал, — как видит Replayer.
+                if (SensorLogFormat.isWritable(e)) reorderer.push(ReorderItem.Sensor(e))
+            }
+            var frameDesc: FloatArray? = null
             var descriptorFailureReported = false
             val pipeline = LocalizationPipeline(b.pack, b.embedder, PriorPolicy(mode), onDescriptor = { t, d ->
                 try {
@@ -172,16 +243,18 @@ class M1Controller(private val context: Context) {
                         _state.update { it.copy(errors = it.errors + 1) }
                     }
                 }
+                frameDesc = d
             })
             // Заголовок пишется не здесь, а при первом кадре: только тогда известно фактическое
             // разрешение анализа (device string включает "analysis WxH", см. C2), но первой строкой
             // журнала он всё равно останется — до первого кадра ничего больше не пишется.
             var headerWritten = false
-            gps.onLoc = { sLog.event(it) }
-            gps.onGnss = { sLog.event(it) }
+            gps.onLoc = feed
+            gps.onGnss = feed
+            gps.onAgc = feed
             gps.start()
             sensors.onWarning = { message -> _state.update { it.copy(status = it.status + " · $message") } }
-            val sensorsStarted = sensors.start { sLog.event(it) }
+            val sensorsStarted = sensors.start(feed)
             if (!sensorsStarted) {
                 _state.update { it.copy(status = it.status + " · нет гироскопа/акселерометра — датчики не пишутся") }
             }
@@ -217,8 +290,12 @@ class M1Controller(private val context: Context) {
                 }
                 try {
                     val fix = gps.fresh()
+                    frameDesc = null
                     val rec = pipeline.process(tMs, rgb, b.meta.inputW, b.meta.inputH, fix, preMs)
                     log.frame(rec)
+                    // После process() и записи кадра: вне интервала замера поиска (латентность M1 не меняется).
+                    reorderer.push(ReorderItem.Frame(tMs, frameDesc))
+                    reorderer.drain(System.currentTimeMillis(), sink)
                     val err = if (fix != null && rec.fix != null) Geo.haversineM(fix.lat, fix.lon, rec.fix!!.lat, rec.fix!!.lon) else null
                     _state.update {
                         it.copy(frames = it.frames + 1, lastSim = rec.fix?.sim, lastErrM = err,
@@ -236,11 +313,14 @@ class M1Controller(private val context: Context) {
             // Любой сбой после CAS (например, база выгружена или диск недоступен) не должен
             // оставить контроллер в состоянии "running=true" без реально работающей записи.
             runningFlag.set(false)
+            flush = null
+            stopDrainTimer()
             analyzer.get()?.onFrame = null
             analyzer.get()?.onError = null
             sensors.stop()
             gps.onLoc = null
             gps.onGnss = null
+            gps.onAgc = null
             gps.stop()
             val log = logger
             logger = null
@@ -248,10 +328,13 @@ class M1Controller(private val context: Context) {
             sensorLog = null
             val dLog = descLog
             descLog = null
+            val fl = fusionLog
+            fusionLog = null
             val failedCount = sLog?.failed ?: 0
             val closeErrors = mutableListOf<String>()
             closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
             closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
+            closeQuietly("журнала фильтра", fl)?.let { closeErrors.add(it) }
             try {
                 log?.close()
             } catch (closeError: Exception) {
@@ -274,6 +357,7 @@ class M1Controller(private val context: Context) {
         sensors.stop()
         gps.onLoc = null
         gps.onGnss = null
+        gps.onAgc = null
         gps.stop()
         val log = logger
         logger = null
@@ -281,6 +365,11 @@ class M1Controller(private val context: Context) {
         sensorLog = null
         val dLog = descLog
         descLog = null
+        val fl = fusionLog
+        fusionLog = null
+        stopDrainTimer()
+        val flushFn = flush
+        flush = null
         val skipped = sLog?.skipped ?: 0
         val failedCount = sLog?.failed ?: 0
         // Закрываем и формируем финальный статус на потоке анализа — после кадра, который, возможно,
@@ -288,6 +377,10 @@ class M1Controller(private val context: Context) {
         // executor) не была затёрта более ранним присваиванием статуса с потока вызывающего stop().
         executor.execute {
             val closeErrors = mutableListOf<String>()
+            // Выпускаем остаток очереди до закрытия журнала фильтра.
+            val (late, dropped) = try { flushFn?.invoke() ?: Pair(0, 0) } catch (e: Exception) {
+                closeErrors.add("ошибка завершения фильтра: ${e.message}"); Pair(0, 0)
+            }
             try {
                 log?.close()
             } catch (e: Exception) {
@@ -295,7 +388,10 @@ class M1Controller(private val context: Context) {
             }
             closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
             closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
+            closeQuietly("журнала фильтра", fl)?.let { closeErrors.add(it) }
             val suffix = buildString {
+                if (late > 0) append(" · опоздавших событий фильтра: $late")
+                if (dropped > 0) append(" · отброшено событий фильтра: $dropped")
                 if (skipped > 0) append(" · пропущено датчиков: $skipped")
                 if (failedCount > 0) append(" · журнал датчиков прерван после ошибки записи")
                 for (err in closeErrors) append(" · $err")
@@ -317,16 +413,24 @@ class M1Controller(private val context: Context) {
         sensors.stop()
         gps.onLoc = null
         gps.onGnss = null
+        gps.onAgc = null
         gps.stop()
         if (logger === log) logger = null
         val sLog = sensorLog
         sensorLog = null
         val dLog = descLog
         descLog = null
+        val fl = fusionLog
+        fusionLog = null
+        stopDrainTimer()
+        val flushFn = flush
+        flush = null
         val failedCount = sLog?.failed ?: 0
         val closeErrors = mutableListOf<String>()
+        try { flushFn?.invoke() } catch (e: Exception) { closeErrors.add("ошибка завершения фильтра: ${e.message}") }
         closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
         closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
+        closeQuietly("журнала фильтра", fl)?.let { closeErrors.add(it) }
         try {
             log.close()
         } catch (closeError: Exception) {
@@ -342,6 +446,7 @@ class M1Controller(private val context: Context) {
     /** Освобождает камеру/GPS/логгер/модель. Вызывать один раз при уничтожении владельца. */
     fun close() {
         if (runningFlag.get()) stop()
+        stopDrainTimer()
         sensors.stop()
         gps.close()
         val log = logger
@@ -350,6 +455,8 @@ class M1Controller(private val context: Context) {
         sensorLog = null
         val dLog = descLog
         descLog = null
+        val fl = fusionLog
+        fusionLog = null
         // bundle читаем внутри задачи на том же executor, а не здесь: если close() позвали, пока
         // init ещё грузит бандл на этом же executor, эта задача выполнится после неё и увидит уже
         // присвоенный bundle — иначе только что созданный OrtEmbedder не закрылся бы никогда.
@@ -363,6 +470,7 @@ class M1Controller(private val context: Context) {
             }
             closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
             closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
+            closeQuietly("журнала фильтра", fl)?.let { closeErrors.add(it) }
             if (failedCount > 0 || closeErrors.isNotEmpty()) {
                 val suffix = buildString {
                     if (failedCount > 0) append(" · ошибок записи датчиков: $failedCount")
@@ -373,6 +481,30 @@ class M1Controller(private val context: Context) {
             bundle?.embedder?.close()
         }
         executor.shutdown()
+    }
+
+    private fun startDrainTimer(drain: () -> Unit) {
+        stopDrainTimer()
+        // drainNow ставим после stopDrainTimer(): тот обнуляет его.
+        drainNow = drain
+        val timer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
+        drainTimer = timer
+        // Таймер только ставит задачу на executor: сам drain остаётся однопоточным.
+        drainTask = timer.scheduleWithFixedDelay({
+            try {
+                executor.execute { drainNow?.invoke() }
+            } catch (_: java.util.concurrent.RejectedExecutionException) {
+                // executor уже закрыт — таймер остановит close().
+            }
+        }, 500, 500, java.util.concurrent.TimeUnit.MILLISECONDS)
+    }
+
+    private fun stopDrainTimer() {
+        drainTask?.cancel(false)
+        drainTask = null
+        drainTimer?.shutdownNow()
+        drainTimer = null
+        drainNow = null
     }
 
     private fun closeQuietly(label: String, closeable: Closeable?): String? = try {

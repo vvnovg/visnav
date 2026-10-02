@@ -5,6 +5,7 @@ import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -112,5 +113,14 @@ class Ekf2dTest {
         val reject = filter()
         val rReject = sqrt(13.9 * 25.0)
         assertFalse(reject.updatePosition(rReject, 0.0, 4.0))
+    }
+
+    @Test fun positionD2MatchesUpdateGateAndDoesNotChangeState() {
+        val f = Ekf2d().also { it.init(0.0, 0.0, 0.0, 0.0, posSigma = 3.0, psiSigma = 0.1, vSigma = 1.0) }
+        val before = f.x.copyOf() to f.p.copyOf()
+        // S = (9 + 16)·I = 25·I, смещение 10 м по востоку → d² = 100/25 = 4
+        assertEquals(4.0, f.positionD2(10.0, 0.0, 4.0), 1e-9)
+        assertContentEquals(before.first, f.x); assertContentEquals(before.second, f.p)
+        assertFailsWith<IllegalArgumentException> { f.positionD2(0.0, 0.0, 0.0) }
     }
 }

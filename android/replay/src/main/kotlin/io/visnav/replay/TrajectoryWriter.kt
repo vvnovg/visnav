@@ -1,27 +1,32 @@
 package io.visnav.replay
 
+import io.visnav.core.LocalizerOutput
+import io.visnav.core.TrajectoryFormat
 import java.io.File
 import kotlinx.serialization.json.JsonPrimitive
 
 object TrajectoryWriter {
-    fun write(file: File, session: SessionData, config: ReplayConfig, outages: List<Outage>, points: List<TrajPoint>) {
+    fun write(file: File, session: SessionData, config: ReplayConfig, outages: List<Outage>,
+        points: List<TrajPoint>, jams: List<Jam> = emptyList(), spoofs: List<Spoof> = emptyList(),
+    ) {
         file.parentFile?.mkdirs()
         file.bufferedWriter().use { w ->
             val outageJson = outages.joinToString(",") { "[${it.startMs},${it.endMs}]" }
+            val jamJson = jams.joinToString(",") { "[${it.startMs},${it.endMs}]" }
+            val spoofJson = spoofs.joinToString(",") { "[${it.startMs},${it.endMs},${it.eastM},${it.northM},${it.rampMs}]" }
             w.write("{\"type\":\"replay\",\"visual\":${config.visual},\"outages\":[$outageJson]," +
+                "\"monitor\":${config.monitor},\"jams\":[$jamJson],\"spoofs\":[$spoofJson]," +
                 "\"session_started_ms\":${session.header.startedMs}," +
                 "\"refpack_created_at\":${JsonPrimitive(session.header.refpackCreatedAt)}}")
             w.newLine()
             for (p in points) {
-                w.write("{\"t_ms\":${p.tMs},\"lat\":${num(p.lat)},\"lon\":${num(p.lon)},\"sigma_m\":${num(p.sigmaM)}," +
-                    "\"outage\":${p.inOutage},\"vis_sim\":${num(p.visSim)},\"vis_ok\":${p.visAccepted}," +
-                    "\"vis_state\":${JsonPrimitive(p.visState)},\"stationary\":${p.stationary}}")
+                val o = LocalizerOutput(
+                    p.tMs, p.lat, p.lon, p.sigmaM, p.visSim, p.visAccepted, p.visState, p.stationary,
+                    p.mode, p.health, p.reasons,
+                )
+                w.write(TrajectoryFormat.row(o, p.inOutage, p.injected))
                 w.newLine()
             }
         }
     }
-
-    /** JSON has no NaN/Infinity literal; a non-finite value is written as `null` to keep every line valid JSON. */
-    private fun num(v: Double): String = if (v.isFinite()) v.toString() else "null"
-    private fun num(v: Float?): String = if (v != null && v.isFinite()) v.toString() else "null"
 }

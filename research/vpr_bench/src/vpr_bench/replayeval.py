@@ -28,6 +28,10 @@ class TrajRow:
     outage: bool
     vis_state: str | None = None
     stationary: bool | None = None
+    mode: str | None = None
+    health: str | None = None
+    reasons: tuple[str, ...] = ()
+    injected: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,23 +96,29 @@ def _vis_state_line(counts: dict[str, int], prefix: str = "визуальные 
     return f"{prefix}: {parts}"
 
 
-def read_trajectory(path: Path) -> tuple[dict, list[TrajRow]]:
+def read_trajectory(path: Path, keep_null_pos: bool = False,
+                    allow_fusion: bool = False) -> tuple[dict, list[TrajRow]]:
+    """keep_null_pos=True keeps rows with null lat/lon (as NaN) for health/mode metrics; replay-eval skips them.
+    allow_fusion=True also accepts the phone's .fusion.jsonl (header type "fusion", same row format)."""
     lines = [l for l in path.read_text().splitlines() if l.strip()]
     if not lines:
         raise ValueError(f"{path}: empty trajectory file")
     header = json.loads(lines[0])
-    if header.get("type") != "replay":
+    if header.get("type") != "replay" and not (allow_fusion and header.get("type") == "fusion"):
         raise ValueError(f"{path}: not a replay trajectory")
     rows = []
     for r in map(json.loads, lines[1:]):
         # Skip rows with null lat or lon
         if r["lat"] is None or r["lon"] is None:
-            continue
+            if not keep_null_pos:
+                continue
+            r = {**r, "lat": float("nan"), "lon": float("nan")}
         # Treat null sigma_m as NaN
         sigma_m = r["sigma_m"] if r["sigma_m"] is not None else float("nan")
         rows.append(TrajRow(
             int(r["t_ms"]), r["lat"], r["lon"], sigma_m, bool(r["outage"]),
             r.get("vis_state"), r.get("stationary"),
+            r.get("mode"), r.get("health"), tuple(r.get("reasons") or ()), r.get("injected"),
         ))
     # Sort rows by t_ms
     rows.sort(key=lambda row: row.t_ms)

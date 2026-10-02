@@ -4,6 +4,7 @@ import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 
 class SensorLogTest {
@@ -13,7 +14,7 @@ class SensorLogTest {
             SensorLogFormat.line(GyroEvent(1000.5, 0.1f, -0.2f, 0.3f)))
         assertEquals("{\"t\":2000.0,\"k\":\"loc\",\"lat\":55.75,\"lon\":37.6,\"acc\":4.5,\"spd\":12.5,\"spd_acc\":null,\"brg\":90.0,\"brg_acc\":null}",
             SensorLogFormat.line(LocEvent(2000.0, 55.75, 37.6, 4.5f, 12.5f, null, 90f, null)))
-        assertEquals("{\"t\":3000.0,\"k\":\"gnss\",\"sats\":20,\"used\":12,\"cn0\":null}",
+        assertEquals("{\"t\":3000.0,\"k\":\"gnss\",\"sats\":20,\"used\":12,\"cn0\":null,\"cn0_std\":null,\"cn0_max\":null,\"used_gps\":null,\"used_glo\":null,\"used_gal\":null,\"used_bds\":null}",
             SensorLogFormat.line(GnssStatusEvent(3000.0, 20, 12, null)))
     }
 
@@ -150,5 +151,24 @@ class SensorLogTest {
         assertEquals(1, log.failed)
         assertFailsWith<java.io.IOException> { log.close() }
         assertEquals(true, w.closeCalled)
+    }
+
+    @Test fun gnssStatusExtendedFieldsRoundTrip() {
+        val e = GnssStatusEvent(5.0, 30, 14, 33.5f, 4.25f, 41f, 6, 4, 3, 1)
+        assertEquals("{\"t\":5.0,\"k\":\"gnss\",\"sats\":30,\"used\":14,\"cn0\":33.5,\"cn0_std\":4.25,\"cn0_max\":41.0," +
+            "\"used_gps\":6,\"used_glo\":4,\"used_gal\":3,\"used_bds\":1}", SensorLogFormat.line(e))
+        assertEquals(e, SensorLogFormat.parse(SensorLogFormat.line(e)))
+    }
+
+    @Test fun gnssStatusM2aLineStillParses() {
+        val e = SensorLogFormat.parse("{\"t\":3000.0,\"k\":\"gnss\",\"sats\":20,\"used\":12,\"cn0\":null}")
+        assertEquals(GnssStatusEvent(3000.0, 20, 12, null), e)
+    }
+
+    @Test fun agcEventRoundTripAndWritability() {
+        val e = AgcEvent(7.0, -2.5f, 12)
+        assertEquals("{\"t\":7.0,\"k\":\"agc\",\"agc_db\":-2.5,\"n\":12}", SensorLogFormat.line(e))
+        assertEquals(e, SensorLogFormat.parse(SensorLogFormat.line(e)))
+        assertFalse(SensorLogFormat.isWritable(AgcEvent(7.0, Float.NaN, 1)))
     }
 }
