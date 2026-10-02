@@ -96,7 +96,8 @@ def _vis_state_line(counts: dict[str, int], prefix: str = "визуальные 
     return f"{prefix}: {parts}"
 
 
-def read_trajectory(path: Path) -> tuple[dict, list[TrajRow]]:
+def read_trajectory(path: Path, keep_null_pos: bool = False) -> tuple[dict, list[TrajRow]]:
+    """keep_null_pos=True keeps rows with null lat/lon (as NaN) for health/mode metrics; replay-eval skips them."""
     lines = [l for l in path.read_text().splitlines() if l.strip()]
     if not lines:
         raise ValueError(f"{path}: empty trajectory file")
@@ -107,7 +108,9 @@ def read_trajectory(path: Path) -> tuple[dict, list[TrajRow]]:
     for r in map(json.loads, lines[1:]):
         # Skip rows with null lat or lon
         if r["lat"] is None or r["lon"] is None:
-            continue
+            if not keep_null_pos:
+                continue
+            r = {**r, "lat": float("nan"), "lon": float("nan")}
         # Treat null sigma_m as NaN
         sigma_m = r["sigma_m"] if r["sigma_m"] is not None else float("nan")
         rows.append(TrajRow(

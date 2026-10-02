@@ -28,7 +28,7 @@ def _frames(n=N, shifted=()):
 
 
 def _write(tmp_path, spoofs=(), jams=(), mode=lambda s: "gnss", health=lambda s: "good",
-           err_m=lambda s: 0.0, new_fields=True, n=N):
+           err_m=lambda s: 0.0, new_fields=True, n=N, null_pos=()):
     header = {"type": "replay", "visual": True, "outages": [], "monitor": True,
               "jams": [[T0 + a * 1000, T0 + b * 1000] for a, b in jams],
               "spoofs": [[T0 + a * 1000, T0 + b * 1000, 300.0, 0.0, 0] for a, b in spoofs],
@@ -41,6 +41,8 @@ def _write(tmp_path, spoofs=(), jams=(), mode=lambda s: "gnss", health=lambda s:
         lat, lon = offset_m(LAT0, LON0, err_m(s), 10.0 * s)
         row = {"t_ms": T0 + 1000 * s, "lat": lat, "lon": lon, "sigma_m": 5.0, "outage": False,
                "vis_sim": None, "vis_ok": None, "vis_state": None, "stationary": None}
+        if s in null_pos:
+            row["lat"] = row["lon"] = None
         if new_fields:
             row.update({"mode": mode(s), "health": health(s), "reasons": [], "injected": None})
         lines.append(json.dumps(row))
@@ -77,6 +79,8 @@ def test_jam_latency_is_first_non_gnss_row(tmp_path):
     r, _ = _eval(p)
     [w] = r.windows
     assert w.kind == "jam" and w.latency_s == 2.0
+    line = [l for l in render_monitor_report(r).splitlines() if "глушении" in l][0]
+    assert "2.0 с" in line and "✅" in line
 
 
 @pytest.mark.parametrize("n_bad,ok", [(2, True), (3, False)])
@@ -96,16 +100,55 @@ def test_real_spoof_recall(tmp_path):
     r, _ = _eval(p, _frames(shifted=shifted))
     assert r.n_real_spoof_s == 10
     assert r.real_spoof_recall_pct == pytest.approx(90.0)
-    assert "✅" in render_monitor_report(r).split("реальн")[1]
+    rep = render_monitor_report(r)
+    assert "✅" in rep.split("реальн")[1]
+    assert r.false_untrusted_pct <= 1.0
+    assert "✅" in [l for l in rep.splitlines() if "Ложное" in l][0]
 
 
-def test_old_format_trajectory_reads_and_reports_no_data(tmp_path):
-    p = _write(tmp_path, new_fields=False)
+def _log(tmp_path, frames):
+    lines = [json.dumps({"type": "session", "started_ms": T0})]
+    for f in frames:
+        g = {"lat": f.gps[0], "lon": f.gps[1], "acc_m": f.gps[2], "t_ms": f.gps[3]}
+        lines.append(json.dumps({"t_ms": f.t_ms, "mode": f.mode, "gps": g, "fix": None, "lat_ms": f.lat_ms}))
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(lines) + "\n")
+    return p
+
+
+def test_old_format_trajectory_reads_and_cli_reports_no_data(tmp_path):
+    p = _write(tmp_path, spoofs=[(100, 160)], new_fields=False)
     header, rows = read_trajectory(p)
     assert rows[0].mode is None and rows[0].health is None and rows[0].reasons == ()
-    r = evaluate_monitor(header, rows, _frames())
-    rep = render_monitor_report(r)
+    out = tmp_path / "r.md"
+    assert main(["monitor-eval", "--traj", str(p), "--log", str(_log(tmp_path, _frames())), "--out", str(out)]) == 0
+    rep = out.read_text()
     assert "⚠️ нет данных" in rep and "❌" not in rep
+
+
+def test_empty_clean_set_is_no_data(tmp_path):
+    p = _write(tmp_path, n=50)
+    r, _ = _eval(p)
+    assert r.false_untrusted_pct != r.false_untrusted_pct
+    assert "⚠️ нет данных" in [l for l in render_monitor_report(r).splitlines() if "Ложное" in l][0]
+
+
+def test_empty_window_is_no_data_not_failure(tmp_path):
+    p = _write(tmp_path, spoofs=[(400, 460)])
+    r, _ = _eval(p)
+    rep = render_monitor_report(r)
+    assert "❌" not in rep and "| spoof | " in rep and "nan" not in rep
+    assert "⚠️ нет данных" in [l for l in rep.splitlines() if "подмены ≤ 5" in l][0]
+
+
+def test_null_position_row_still_counts_for_latency(tmp_path):
+    p = _write(tmp_path, spoofs=[(100, 160)], health=lambda s: "untrusted" if s >= 103 else "good",
+               null_pos={103})
+    header, rows = read_trajectory(p)
+    assert all(r.t_ms != T0 + 103_000 for r in rows)  # replay-eval view unchanged
+    header, rows = read_trajectory(p, keep_null_pos=True)
+    r = evaluate_monitor(header, rows, _frames())
+    assert r.windows[0].latency_s == 3.0
 
 
 def test_five_element_spoofs_and_monitor_flag_shown(tmp_path):

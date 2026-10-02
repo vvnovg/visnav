@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    header, rows = read_trajectory(args.traj)
+    header, rows = read_trajectory(args.traj, keep_null_pos=args.command == "monitor-eval")
     log_header, frames = read_log(args.log)
     if log_header.get("started_ms") != header.get("session_started_ms"):
         print("error: trajectory and log are from different sessions", file=sys.stderr)
