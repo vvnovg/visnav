@@ -136,7 +136,7 @@ class LocalizerTest {
         val outputs = run(config, spoofStartMs = 40_000, spoofEndMs = 60_000, spoofNorthM = 200.0, uniformFromMs = 62_000)
         val late = outputs.filter { it.tMs >= t0 + 75_000 }
         assertTrue(late.all { it.health == GnssHealth.UNTRUSTED && GnssReason.UNIFORM_CN0 in it.reasons })
-        // Переинициализация сбрасывает sigma к ~3 м, а установившийся фильтр держит ~4 м.
+        // Переинициализация сбрасывает sigma к ~2,6 м, а установившийся фильтр держит ~4 м.
         val window = outputs.filter { it.tMs >= t0 + 60_000 && it.tMs < t0 + 90_000 }
         assertTrue(window.all { it.sigmaM > 3.5 }, "reinit applied: ${window.map { "%.1f".format(it.sigmaM) }}")
     }
