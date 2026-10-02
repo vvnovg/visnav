@@ -771,11 +771,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 `android/core/src/test/kotlin/io/visnav/core/LocalizerTest.kt`. Три теста на синтетической прямой: 10 м/с на восток, IMU 100 Гц с вибрацией акселерометра (как в `ReplayerTest`), GNSS и статус 1 Гц (`used = 14`, `cn0 = 35`, `cn0Std = 5`), кадры 2 Гц с дескриптором-«отпечатком» ближайшего эталона каждые 10 м. Эталоны и дескрипторы строятся так же, как в `android/replay/src/test/kotlin/io/visnav/replay/ReplayerTest.kt` (скопировать вспомогательные функции в тест, они короткие):
 - `cleanDriveStaysInGnssMode`: после инициализации все выходы в режиме `GNSS`, состояние `GOOD`.
-- `gnssDropSwitchesToVisualWithinFiveSeconds`: с 30-й по 60-ю секунду `LocEvent` не подаются. Режим становится `VISUAL` не позже чем через 5 с после 30-й секунды; ошибка позиции в окне ≤ 15 м (P95); через ≤ 10 с после 60-й секунды режим снова `GNSS`.
+- `gnssDropLeavesGnssWithinFiveSeconds` (пороги по умолчанию): с 30-й по 60-ю секунду `LocEvent` не подаются. Режим уходит из `GNSS` не позже чем через 5 с после 30-й секунды (`FIX_GAP` через 3 с, плюс 2 с гистерезиса) и становится `VISUAL` не позже 12,5 с (`NO_FIX` через 10 с, плюс 2 с); ошибка позиции в окне ≤ 15 м (P95); через ≤ 10 с после 60-й секунды режим снова `GNSS`.
+- `gnssDropWithoutVisualLeavesGnssThenDeadReckoning`: то же без визуальных фиксов — режим и состояние пересчитываются на каждом кадре, поэтому навигатор доходит до `DEAD_RECKONING`.
+- `untrustedGnssIsNeverFused`: подмена 200 м. Пока состояние `UNTRUSTED`, фиксы GNSS в фильтр не подаются, независимо от отображаемого режима (гистерезис нужен только для стабильности индикации).
 - `monitorOffAlwaysUsesGnss`: при `monitor = false` режим всегда `GNSS`.
 
 Run: `cd /Users/vvnovg/navigator/android && JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home" ./gradlew :core:test :replay:test`
-Expected: `BUILD SUCCESSFUL`: `:core` — 105 тестов, `:replay` — 17 прежних (строковые проверки формата траектории обновлены под новые поля).
+Expected: `BUILD SUCCESSFUL`: `:core` — 119 тестов, `:replay` — 17 прежних (строковые проверки формата траектории обновлены под новые поля).
 
 Если какой-то прежний тест `:replay` меняет результат из-за гистерезиса (например, GNSS возвращается в фильтр через 10 с после конца пропадания), пороги не ослаблять. Нужно объяснить в отчёте, почему изменилось поведение, и сообщить NEEDS_CONTEXT, если тест проверял именно этот момент.
 
