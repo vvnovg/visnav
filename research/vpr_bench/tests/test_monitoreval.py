@@ -31,7 +31,8 @@ def _write(tmp_path, spoofs=(), jams=(), mode=lambda s: "gnss", health=lambda s:
            err_m=lambda s: 0.0, new_fields=True, n=N, null_pos=()):
     header = {"type": "replay", "visual": True, "outages": [], "monitor": True,
               "jams": [[T0 + a * 1000, T0 + b * 1000] for a, b in jams],
-              "spoofs": [[T0 + a * 1000, T0 + b * 1000, 300.0, 0.0, 0] for a, b in spoofs],
+              "spoofs": [[T0 + w[0] * 1000, T0 + w[1] * 1000, *(w[2:5] if len(w) > 2 else (300.0, 0.0, 0))]
+                         for w in spoofs],
               "session_started_ms": T0, "refpack_created_at": "c"}
     if not new_fields:
         header = {"type": "replay", "visual": True, "outages": [], "session_started_ms": T0,
@@ -178,3 +179,47 @@ def test_phone_fusion_log_accepted_by_monitor_eval_only(tmp_path):
     assert "монитор: включён" in out.read_text()
     with pytest.raises(ValueError):
         read_trajectory(fusion)
+
+
+def test_tail_after_injected_windows_is_not_clean(tmp_path):
+    # After the spoof ends (160) the fix jumps back: 10 s UNTRUSTED, 20 s non-GNSS. None of it is "clean".
+    p = _write(tmp_path, spoofs=[(100, 160)],
+               health=lambda s: "untrusted" if 160 <= s < 170 else "good",
+               mode=lambda s: "fused" if 160 <= s < 180 else "gnss")
+    r, _ = _eval(p)
+    assert r.tail_s == 20.0
+    assert r.false_untrusted_pct == 0.0 and r.non_gnss_clean_pct == 0.0
+    assert "20 с" in render_monitor_report(r)
+
+
+def test_tail_after_jam_and_outage_windows_is_not_clean(tmp_path):
+    p = _write(tmp_path, jams=[(100, 130)], mode=lambda s: "fused" if 130 <= s < 150 else "gnss")
+    r, _ = _eval(p)
+    assert r.non_gnss_clean_pct == 0.0
+
+
+def test_ramped_spoof_detected_before_100m_has_zero_latency(tmp_path):
+    # 300 m offset, 60 s ramp -> 100 m reached 20 s after start; untrusted at +5 s.
+    p = _write(tmp_path, spoofs=[(100, 200, 300.0, 0.0, 60_000)],
+               health=lambda s: "untrusted" if 105 <= s < 200 else "good")
+    r, _ = _eval(p)
+    assert r.windows[0].latency_s == 0.0
+    assert "✅" in [l for l in render_monitor_report(r).splitlines() if "подмены ≤ 5" in l][0]
+
+
+def test_ramped_spoof_latency_measured_from_100m(tmp_path):
+    p = _write(tmp_path, spoofs=[(100, 200, 300.0, 0.0, 60_000)],
+               health=lambda s: "untrusted" if 123 <= s < 200 else "good")
+    r, _ = _eval(p)
+    assert r.windows[0].latency_s == pytest.approx(3.0)
+
+
+def test_spoof_under_100m_excluded_from_verdict(tmp_path):
+    p = _write(tmp_path, spoofs=[(100, 160, 50.0, 0.0, 0)],
+               health=lambda s: "untrusted" if s >= 110 else "good")
+    r, _ = _eval(p)
+    assert r.windows[0].latency_s == 10.0
+    rep = render_monitor_report(r)
+    assert "< 100 м" in rep
+    assert "⚠️ нет данных" in [l for l in rep.splitlines() if "подмены ≤ 5" in l][0]
+    assert "❌" not in rep.split("Ложное")[0]
