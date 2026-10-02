@@ -11,6 +11,11 @@ object TrajectoryFormat {
         NavMode.DEAD_RECKONING -> "dead_reckoning"
     }
 
+    /** Заголовок журнала fusion; строка refpack_created_at экранируется как JSON. */
+    fun fusionHeader(sessionStartedMs: Long, refpackCreatedAt: String): String =
+        "{\"type\":\"fusion\",\"monitor\":true,\"session_started_ms\":$sessionStartedMs," +
+            "\"refpack_created_at\":${JsonPrimitive(refpackCreatedAt)}}"
+
     fun row(o: LocalizerOutput, inOutage: Boolean, injected: String?): String {
         val reasons = o.reasons.joinToString(",") { JsonPrimitive(it.name.lowercase()).toString() }
         val inj = if (injected == null) "null" else JsonPrimitive(injected).toString()

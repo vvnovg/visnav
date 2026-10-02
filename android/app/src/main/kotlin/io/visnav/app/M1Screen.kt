@@ -47,9 +47,8 @@ fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
             Text("Точность GPS: ${s.gpsAccM?.let { "%.0f м".format(it) } ?: "нет сигнала"}")
             s.navMode?.let { m ->
                 Text("${modeLabel(m)}${s.sigmaM?.let { " ±${Math.round(it)} м" } ?: ""}", color = modeColor(m))
-                if (s.gnssReasons.isNotEmpty()) {
-                    Text(s.gnssReasons.mapNotNull { reasonLabel(it) }.joinToString(", "))
-                }
+                val reasons = s.gnssReasons.mapNotNull { reasonLabel(it) }
+                if (reasons.isNotEmpty()) Text(reasons.joinToString(", "))
             }
             OutlinedButton(
                 onClick = { controller.setMode(if (s.mode == PriorMode.GPS) PriorMode.VISUAL else PriorMode.GPS) },
