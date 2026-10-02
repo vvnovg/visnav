@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from vpr_bench.fieldlog import read_log
+from vpr_bench.monitoreval import evaluate_monitor, render_monitor_report
 from vpr_bench.replayeval import evaluate_replay, read_trajectory, render_replay_report
 
 
@@ -16,6 +17,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--traj", required=True, type=Path)
     r.add_argument("--log", required=True, type=Path, help="журнал кадров сессии (.jsonl) — источник GPS")
     r.add_argument("--out", required=True, type=Path)
+    m = sub.add_parser("monitor-eval", help="оценить монитор GNSS: задержки, ложные тревоги, полнота")
+    m.add_argument("--traj", required=True, type=Path)
+    m.add_argument("--log", required=True, type=Path, help="журнал кадров сессии (.jsonl) — источник GPS")
+    m.add_argument("--out", required=True, type=Path)
     return parser
 
 
@@ -26,6 +31,12 @@ def main(argv: list[str] | None = None) -> int:
     if log_header.get("started_ms") != header.get("session_started_ms"):
         print("error: trajectory and log are from different sessions", file=sys.stderr)
         return 2
+    if args.command == "monitor-eval":
+        mon = evaluate_monitor(header, rows, frames)
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(render_monitor_report(mon))
+        print(f"windows={len(mon.windows)} false_untrusted={mon.false_untrusted_pct:.2f} % -> {args.out}")
+        return 0
     result = evaluate_replay(header, rows, frames)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(render_replay_report(result))

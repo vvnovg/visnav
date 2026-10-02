@@ -1,0 +1,122 @@
+import json
+
+import pytest
+
+from vpr_bench.fieldlog import FieldFrame
+from vpr_bench.geo import offset_m
+from vpr_bench.m2cli import main
+from vpr_bench.monitoreval import evaluate_monitor, render_monitor_report
+from vpr_bench.replayeval import read_trajectory
+
+T0 = 1_700_000_000_000
+LAT0, LON0 = 55.75, 37.6
+N = 300
+
+
+def _gps(s, north_extra=0.0):
+    lat, lon = offset_m(LAT0, LON0, 0.0, 10.0 * s + north_extra)
+    return lat, lon
+
+
+def _frames(n=N, shifted=()):
+    out = []
+    for s in range(n):
+        lat, lon = _gps(s, 3000.0 if s in shifted else 0.0)
+        out.append(FieldFrame(T0 + 1000 * s, "gps", (lat, lon, 4.0, T0 + 1000 * s), None,
+                              {"pre": 0.0, "inf": 0.0, "search": 0.0}))
+    return out
+
+
+def _write(tmp_path, spoofs=(), jams=(), mode=lambda s: "gnss", health=lambda s: "good",
+           err_m=lambda s: 0.0, new_fields=True, n=N):
+    header = {"type": "replay", "visual": True, "outages": [], "monitor": True,
+              "jams": [[T0 + a * 1000, T0 + b * 1000] for a, b in jams],
+              "spoofs": [[T0 + a * 1000, T0 + b * 1000, 300.0, 0.0, 0] for a, b in spoofs],
+              "session_started_ms": T0, "refpack_created_at": "c"}
+    if not new_fields:
+        header = {"type": "replay", "visual": True, "outages": [], "session_started_ms": T0,
+                  "refpack_created_at": "c"}
+    lines = [json.dumps(header)]
+    for s in range(1, n - 1):
+        lat, lon = offset_m(LAT0, LON0, err_m(s), 10.0 * s)
+        row = {"t_ms": T0 + 1000 * s, "lat": lat, "lon": lon, "sigma_m": 5.0, "outage": False,
+               "vis_sim": None, "vis_ok": None, "vis_state": None, "stationary": None}
+        if new_fields:
+            row.update({"mode": mode(s), "health": health(s), "reasons": [], "injected": None})
+        lines.append(json.dumps(row))
+    p = tmp_path / "traj.jsonl"
+    p.write_text("\n".join(lines) + "\n")
+    return p
+
+
+def _eval(path, frames=None):
+    header, rows = read_trajectory(path)
+    return evaluate_monitor(header, rows, frames or _frames()), rows
+
+
+def test_spoof_detected_after_three_seconds(tmp_path):
+    p = _write(tmp_path, spoofs=[(100, 160)], health=lambda s: "untrusted" if 103 <= s < 160 else "good",
+               err_m=lambda s: 5.0)
+    r, _ = _eval(p)
+    [w] = r.windows
+    assert w.kind == "spoof" and w.latency_s == 3.0
+    assert w.p95_err_m == pytest.approx(5.0, abs=0.1)
+    rep = render_monitor_report(r)
+    assert "✅" in rep and "❌" not in rep.split("Ложное")[0]
+
+
+def test_spoof_not_detected(tmp_path):
+    p = _write(tmp_path, spoofs=[(100, 160)])
+    r, _ = _eval(p)
+    assert r.windows[0].latency_s is None
+    assert "❌" in render_monitor_report(r)
+
+
+def test_jam_latency_is_first_non_gnss_row(tmp_path):
+    p = _write(tmp_path, jams=[(100, 160)], mode=lambda s: "fused" if s >= 102 else "gnss")
+    r, _ = _eval(p)
+    [w] = r.windows
+    assert w.kind == "jam" and w.latency_s == 2.0
+
+
+@pytest.mark.parametrize("n_bad,ok", [(2, True), (3, False)])
+def test_false_untrusted_rate(tmp_path, n_bad, ok):
+    # Clean rows: s in [61, 298] minus nothing -> use first n_bad rows after warm-up.
+    bad = set(range(100, 100 + n_bad))
+    p = _write(tmp_path, health=lambda s: "untrusted" if s in bad else "good", n=263)
+    header, rows = read_trajectory(p)
+    r = evaluate_monitor(header, rows, _frames(263))
+    assert r.false_untrusted_pct == pytest.approx(n_bad / 200 * 100, rel=0.05)
+    assert ("✅" in render_monitor_report(r).split("Ложное")[1].splitlines()[0]) is ok
+
+
+def test_real_spoof_recall(tmp_path):
+    shifted = set(range(100, 110))
+    p = _write(tmp_path, health=lambda s: "untrusted" if 101 <= s < 110 else "good")
+    r, _ = _eval(p, _frames(shifted=shifted))
+    assert r.n_real_spoof_s == 10
+    assert r.real_spoof_recall_pct == pytest.approx(90.0)
+    assert "✅" in render_monitor_report(r).split("реальн")[1]
+
+
+def test_old_format_trajectory_reads_and_reports_no_data(tmp_path):
+    p = _write(tmp_path, new_fields=False)
+    header, rows = read_trajectory(p)
+    assert rows[0].mode is None and rows[0].health is None and rows[0].reasons == ()
+    r = evaluate_monitor(header, rows, _frames())
+    rep = render_monitor_report(r)
+    assert "⚠️ нет данных" in rep and "❌" not in rep
+
+
+def test_five_element_spoofs_and_monitor_flag_shown(tmp_path):
+    p = _write(tmp_path, spoofs=[(100, 160)])
+    r, _ = _eval(p)
+    assert r.monitor is True
+    assert "монитор: включён" in render_monitor_report(r)
+
+
+def test_cli_session_mismatch_returns_2(tmp_path):
+    traj = _write(tmp_path)
+    log = tmp_path / "s.jsonl"
+    log.write_text(json.dumps({"type": "session", "started_ms": T0 + 5}) + "\n")
+    assert main(["monitor-eval", "--traj", str(traj), "--log", str(log), "--out", str(tmp_path / "r.md")]) == 2

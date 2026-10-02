@@ -28,6 +28,10 @@ class TrajRow:
     outage: bool
     vis_state: str | None = None
     stationary: bool | None = None
+    mode: str | None = None
+    health: str | None = None
+    reasons: tuple[str, ...] = ()
+    injected: str | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +113,7 @@ def read_trajectory(path: Path) -> tuple[dict, list[TrajRow]]:
         rows.append(TrajRow(
             int(r["t_ms"]), r["lat"], r["lon"], sigma_m, bool(r["outage"]),
             r.get("vis_state"), r.get("stationary"),
+            r.get("mode"), r.get("health"), tuple(r.get("reasons") or ()), r.get("injected"),
         ))
     # Sort rows by t_ms
     rows.sort(key=lambda row: row.t_ms)
