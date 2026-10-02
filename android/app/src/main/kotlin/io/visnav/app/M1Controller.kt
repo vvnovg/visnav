@@ -16,6 +16,12 @@ import androidx.lifecycle.LifecycleOwner
 import io.visnav.core.DescriptorLogWriter
 import io.visnav.core.FrameCaptureEvent
 import io.visnav.core.Geo
+import io.visnav.core.GnssReason
+import io.visnav.core.Localizer
+import io.visnav.core.LocalizerConfig
+import io.visnav.core.NavMode
+import io.visnav.core.SensorEvent
+import io.visnav.core.TrajectoryFormat
 import io.visnav.core.LocalizationPipeline
 import io.visnav.core.PriorMode
 import io.visnav.core.PriorPolicy
@@ -43,7 +49,17 @@ data class UiState(
     val lastInfMs: Double? = null,
     val gpsAccM: Float? = null,
     val frameSize: String? = null,
+    val navMode: NavMode? = null,
+    val sigmaM: Double? = null,
+    val gnssReasons: Set<GnssReason> = emptySet(),
 )
+
+/** Журнал траектории фильтра: заголовок и по строке на кадр. */
+private class FusionLog(file: File) : Closeable {
+    private val w = file.bufferedWriter()
+    @Synchronized fun line(s: String) { w.write(s); w.newLine() }
+    @Synchronized override fun close() = w.close()
+}
 
 /**
  * Владеет камерой, GPS, конвейером и журналом одной сессии M1. Не зависит от LifecycleOwner —
@@ -66,6 +82,7 @@ class M1Controller(private val context: Context) {
     @Volatile private var logger: SessionLogger? = null
     @Volatile private var sensorLog: SensorLogger? = null
     @Volatile private var descLog: DescriptorLogWriter? = null
+    @Volatile private var fusionLog: FusionLog? = null
 
     init {
         executor.execute {
@@ -136,7 +153,8 @@ class M1Controller(private val context: Context) {
             // (обрыв заголовка датчиков через onFirstFailure, отсутствие гироскопа/акселерометра)
             // дописываются к этому статусу через "it.status + ...", а не затираются им — раньше
             // финальный _state.update шёл последним и стирал их целиком.
-            _state.update { it.copy(running = true, frames = 0, errors = 0, status = "Запись: ${mode.name}") }
+            _state.update { it.copy(running = true, frames = 0, errors = 0, status = "Запись: ${mode.name}",
+                navMode = null, sigmaM = null, gnssReasons = emptySet()) }
             logDir.mkdirs()
             val startedMs = System.currentTimeMillis()
             val base = "session-$startedMs-${mode.name.lowercase()}"
@@ -157,6 +175,27 @@ class M1Controller(private val context: Context) {
             sLog.header(startedMs)
             val dLog = DescriptorLogWriter(File(logDir, "$base.desc"), b.pack.dim)
             descLog = dLog
+            val fLog = FusionLog(File(logDir, "$base.fusion.jsonl"))
+            fusionLog = fLog
+            val createdEsc = b.meta.createdAt.replace("\\", "\\\\").replace("\"", "\\\"")
+            fLog.line("{\"type\":\"fusion\",\"monitor\":true,\"session_started_ms\":$startedMs," +
+                "\"refpack_created_at\":\"$createdEsc\"}")
+            val localizer = Localizer(b.pack, LocalizerConfig())
+            val fusionLock = Any()
+            var fusionFailureReported = false
+            // Все датчики идут и в журнал, и в фильтр; потоки колбэков разные, поэтому фильтр под замком.
+            val feed: (SensorEvent) -> Unit = { e ->
+                sLog.event(e)
+                try {
+                    synchronized(fusionLock) { localizer.onSensor(e) }
+                } catch (ex: Exception) {
+                    val first: Boolean
+                    synchronized(fusionLock) { first = !fusionFailureReported; fusionFailureReported = true }
+                    _state.update {
+                        it.copy(errors = it.errors + 1, status = if (first) "Ошибка фильтра: ${ex.message}" else it.status)
+                    }
+                }
+            }
             var descriptorFailureReported = false
             val pipeline = LocalizationPipeline(b.pack, b.embedder, PriorPolicy(mode), onDescriptor = { t, d ->
                 try {
@@ -172,16 +211,31 @@ class M1Controller(private val context: Context) {
                         _state.update { it.copy(errors = it.errors + 1) }
                     }
                 }
+                try {
+                    val out = synchronized(fusionLock) { localizer.onFrame(t, d) }
+                    if (out != null) {
+                        fLog.line(TrajectoryFormat.row(out, false, null))
+                        _state.update { it.copy(navMode = out.mode, sigmaM = out.sigmaM, gnssReasons = out.reasons) }
+                    }
+                } catch (e: Exception) {
+                    // Сбой фильтра на кадре не останавливает запись; сообщение — один раз.
+                    val first: Boolean
+                    synchronized(fusionLock) { first = !fusionFailureReported; fusionFailureReported = true }
+                    _state.update {
+                        it.copy(errors = it.errors + 1, status = if (first) "Ошибка фильтра: ${e.message}" else it.status)
+                    }
+                }
             })
             // Заголовок пишется не здесь, а при первом кадре: только тогда известно фактическое
             // разрешение анализа (device string включает "analysis WxH", см. C2), но первой строкой
             // журнала он всё равно останется — до первого кадра ничего больше не пишется.
             var headerWritten = false
-            gps.onLoc = { sLog.event(it) }
-            gps.onGnss = { sLog.event(it) }
+            gps.onLoc = feed
+            gps.onGnss = feed
+            gps.onAgc = feed
             gps.start()
             sensors.onWarning = { message -> _state.update { it.copy(status = it.status + " · $message") } }
-            val sensorsStarted = sensors.start { sLog.event(it) }
+            val sensorsStarted = sensors.start(feed)
             if (!sensorsStarted) {
                 _state.update { it.copy(status = it.status + " · нет гироскопа/акселерометра — датчики не пишутся") }
             }
@@ -241,6 +295,7 @@ class M1Controller(private val context: Context) {
             sensors.stop()
             gps.onLoc = null
             gps.onGnss = null
+            gps.onAgc = null
             gps.stop()
             val log = logger
             logger = null
@@ -248,10 +303,13 @@ class M1Controller(private val context: Context) {
             sensorLog = null
             val dLog = descLog
             descLog = null
+            val fl = fusionLog
+            fusionLog = null
             val failedCount = sLog?.failed ?: 0
             val closeErrors = mutableListOf<String>()
             closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
             closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
+            closeQuietly("журнала фильтра", fl)?.let { closeErrors.add(it) }
             try {
                 log?.close()
             } catch (closeError: Exception) {
@@ -274,6 +332,7 @@ class M1Controller(private val context: Context) {
         sensors.stop()
         gps.onLoc = null
         gps.onGnss = null
+        gps.onAgc = null
         gps.stop()
         val log = logger
         logger = null
@@ -281,6 +340,8 @@ class M1Controller(private val context: Context) {
         sensorLog = null
         val dLog = descLog
         descLog = null
+        val fl = fusionLog
+        fusionLog = null
         val skipped = sLog?.skipped ?: 0
         val failedCount = sLog?.failed ?: 0
         // Закрываем и формируем финальный статус на потоке анализа — после кадра, который, возможно,
@@ -295,6 +356,7 @@ class M1Controller(private val context: Context) {
             }
             closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
             closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
+            closeQuietly("журнала фильтра", fl)?.let { closeErrors.add(it) }
             val suffix = buildString {
                 if (skipped > 0) append(" · пропущено датчиков: $skipped")
                 if (failedCount > 0) append(" · журнал датчиков прерван после ошибки записи")
@@ -317,16 +379,20 @@ class M1Controller(private val context: Context) {
         sensors.stop()
         gps.onLoc = null
         gps.onGnss = null
+        gps.onAgc = null
         gps.stop()
         if (logger === log) logger = null
         val sLog = sensorLog
         sensorLog = null
         val dLog = descLog
         descLog = null
+        val fl = fusionLog
+        fusionLog = null
         val failedCount = sLog?.failed ?: 0
         val closeErrors = mutableListOf<String>()
         closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
         closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
+            closeQuietly("журнала фильтра", fl)?.let { closeErrors.add(it) }
         try {
             log.close()
         } catch (closeError: Exception) {
@@ -350,6 +416,8 @@ class M1Controller(private val context: Context) {
         sensorLog = null
         val dLog = descLog
         descLog = null
+        val fl = fusionLog
+        fusionLog = null
         // bundle читаем внутри задачи на том же executor, а не здесь: если close() позвали, пока
         // init ещё грузит бандл на этом же executor, эта задача выполнится после неё и увидит уже
         // присвоенный bundle — иначе только что созданный OrtEmbedder не закрылся бы никогда.
@@ -363,6 +431,7 @@ class M1Controller(private val context: Context) {
             }
             closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
             closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
+            closeQuietly("журнала фильтра", fl)?.let { closeErrors.add(it) }
             if (failedCount > 0 || closeErrors.isNotEmpty()) {
                 val suffix = buildString {
                     if (failedCount > 0) append(" · ошибок записи датчиков: $failedCount")

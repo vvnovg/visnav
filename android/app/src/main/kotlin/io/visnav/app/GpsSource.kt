@@ -20,16 +20,55 @@ class GpsSource(context: Context) : LocationListener {
     @Volatile var onLoc: ((io.visnav.core.LocEvent) -> Unit)? = null
     @Volatile var onGnss: ((io.visnav.core.GnssStatusEvent) -> Unit)? = null
     private val gnssExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    @Volatile var onAgc: ((io.visnav.core.AgcEvent) -> Unit)? = null
     private val gnssCallback = object : android.location.GnssStatus.Callback() {
         override fun onSatelliteStatusChanged(status: android.location.GnssStatus) {
             val cb = onGnss ?: return
             var used = 0
-            var cn0Sum = 0.0
+            var sum = 0.0
+            var sumSq = 0.0
+            var max = Float.NEGATIVE_INFINITY
+            var gps = 0; var glo = 0; var gal = 0; var bds = 0
             for (i in 0 until status.satelliteCount) {
-                if (status.usedInFix(i)) { used++; cn0Sum += status.getCn0DbHz(i) }
+                if (!status.usedInFix(i)) continue
+                val c = status.getCn0DbHz(i)
+                used++; sum += c; sumSq += c.toDouble() * c
+                if (c > max) max = c
+                when (status.getConstellationType(i)) {
+                    android.location.GnssStatus.CONSTELLATION_GPS -> gps++
+                    android.location.GnssStatus.CONSTELLATION_GLONASS -> glo++
+                    android.location.GnssStatus.CONSTELLATION_GALILEO -> gal++
+                    android.location.GnssStatus.CONSTELLATION_BEIDOU -> bds++
+                }
             }
-            cb(io.visnav.core.GnssStatusEvent(System.currentTimeMillis().toDouble(), status.satelliteCount, used,
-                if (used > 0) (cn0Sum / used).toFloat() else null))
+            val mean = if (used > 0) sum / used else 0.0
+            // Стандартное отклонение по генеральной совокупности.
+            val std = if (used > 0) Math.sqrt(maxOf(0.0, sumSq / used - mean * mean)) else 0.0
+            cb(io.visnav.core.GnssStatusEvent(
+                System.currentTimeMillis().toDouble(), status.satelliteCount, used,
+                if (used > 0) mean.toFloat() else null,
+                if (used > 0) std.toFloat() else null,
+                if (used > 0) max else null,
+                gps, glo, gal, bds,
+            ))
+        }
+    }
+
+    private val agcCallback = object : android.location.GnssMeasurementsEvent.Callback() {
+        override fun onGnssMeasurementsReceived(event: android.location.GnssMeasurementsEvent) {
+            val cb = onAgc ?: return
+            val levels = ArrayList<Double>()
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                for (a in event.gnssAutomaticGainControls) levels.add(a.levelDb)
+            }
+            if (levels.isEmpty()) {
+                @Suppress("DEPRECATION")
+                for (m in event.measurements) {
+                    if (m.hasAutomaticGainControlLevelDb()) levels.add(m.automaticGainControlLevelDb)
+                }
+            }
+            if (levels.isEmpty()) return
+            cb(io.visnav.core.AgcEvent(System.currentTimeMillis().toDouble(), levels.average().toFloat(), levels.size))
         }
     }
 
@@ -42,11 +81,19 @@ class GpsSource(context: Context) : LocationListener {
             @Suppress("DEPRECATION")
             lm.registerGnssStatusCallback(gnssCallback, android.os.Handler(Looper.getMainLooper()))
         }
+        // Измерения требуют того же разрешения; если платформа их не отдаёт, AGC просто не пишется.
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            lm.registerGnssMeasurementsCallback(gnssExecutor, agcCallback)
+        } else {
+            @Suppress("DEPRECATION")
+            lm.registerGnssMeasurementsCallback(agcCallback, android.os.Handler(Looper.getMainLooper()))
+        }
     }
 
     fun stop() {
         lm.removeUpdates(this)
         lm.unregisterGnssStatusCallback(gnssCallback)
+        lm.unregisterGnssMeasurementsCallback(agcCallback)
     }
 
     /** Останавливает GPS/GNSS и освобождает поток gnssExecutor. Вызывать один раз при уничтожении владельца. */
