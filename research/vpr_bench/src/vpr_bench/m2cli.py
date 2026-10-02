@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
-from vpr_bench.fieldlog import read_log
+from vpr_bench.fieldlog import gps_track, read_log
 from vpr_bench.monitoreval import evaluate_monitor, render_monitor_report
 from vpr_bench.replayeval import evaluate_replay, read_trajectory, render_replay_report
+from vpr_bench.roadpack import write_roadpack
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,11 +23,46 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--traj", required=True, type=Path)
     m.add_argument("--log", required=True, type=Path, help="журнал кадров сессии (.jsonl) — источник GPS")
     m.add_argument("--out", required=True, type=Path)
+    pr = sub.add_parser("pack-roads", help="упаковать дорожный граф OSM в коридоре вокруг треков (roadpack)")
+    pr.add_argument("--pbf", required=True, type=Path, help="выгрузка OSM (.osm.pbf или .osm)")
+    pr.add_argument("--gpx", action="append", default=[], type=Path, help="трек поездки GPX")
+    pr.add_argument("--log", action="append", default=[], type=Path, help="журнал кадров сессии (.jsonl): его GPS-трек")
+    pr.add_argument("--buffer-m", type=float, default=300.0)
+    pr.add_argument("--out", required=True, type=Path)
     return parser
+
+
+def _pack_roads(args) -> int:
+    from vpr_bench.db_builder import Corridor
+    from vpr_bench.osmgraph import build_graph, read_ways
+    from vpr_bench.query import clean_track, parse_gpx
+
+    tracks = [parse_gpx(p) for p in args.gpx]
+    # Трек из журнала очищаем от подмены, иначе коридор уедет к точке, куда «прыгал» GPS.
+    tracks += [clean_track(gps_track(read_log(p)[1]), max_hdop=None)[0] for p in args.log]
+    tracks = [t for t in tracks if t]
+    if not tracks:
+        print("error: need at least one non-empty --gpx or --log track", file=sys.stderr)
+        return 2
+    corridor = Corridor(tracks, args.buffer_m)
+    graph = build_graph(read_ways(args.pbf, corridor.bbox()), keep=corridor.contains)
+    if len(graph.edge_from) == 0:
+        print("error: no drivable roads in the corridor", file=sys.stderr)
+        return 2
+    meta = {
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source": args.pbf.name, "buffer_m": args.buffer_m,
+        "attribution": "© участники OpenStreetMap, ODbL 1.0",
+    }
+    write_roadpack(args.out, graph, meta)
+    print(f"nodes={len(graph.node_lats)} edges={len(graph.edge_from)} -> {args.out}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "pack-roads":
+        return _pack_roads(args)
     is_monitor = args.command == "monitor-eval"
     header, rows = read_trajectory(args.traj, keep_null_pos=is_monitor, allow_fusion=is_monitor)
     log_header, frames = read_log(args.log)
