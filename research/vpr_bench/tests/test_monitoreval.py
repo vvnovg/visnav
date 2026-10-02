@@ -163,3 +163,18 @@ def test_cli_session_mismatch_returns_2(tmp_path):
     log = tmp_path / "s.jsonl"
     log.write_text(json.dumps({"type": "session", "started_ms": T0 + 5}) + "\n")
     assert main(["monitor-eval", "--traj", str(traj), "--log", str(log), "--out", str(tmp_path / "r.md")]) == 2
+
+
+def test_phone_fusion_log_accepted_by_monitor_eval_only(tmp_path):
+    p = _write(tmp_path)
+    lines = p.read_text().splitlines()
+    lines[0] = json.dumps({"type": "fusion", "monitor": True, "session_started_ms": T0,
+                           "refpack_created_at": "x"})
+    fusion = tmp_path / "s.fusion.jsonl"
+    fusion.write_text("\n".join(lines) + "\n")
+    log = _log(tmp_path, _frames())
+    out = tmp_path / "r.md"
+    assert main(["monitor-eval", "--traj", str(fusion), "--log", str(log), "--out", str(out)]) == 0
+    assert "монитор: включён" in out.read_text()
+    with pytest.raises(ValueError):
+        read_trajectory(fusion)
