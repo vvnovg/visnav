@@ -2,6 +2,7 @@ package io.visnav.core
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertSame
 
 class EventReordererTest {
     private fun ev(t: Double) = ReorderItem.Sensor(GyroEvent(t, 0f, 0f, 0f))
@@ -25,11 +26,10 @@ class EventReordererTest {
 
     @Test fun equalTimesKeepInsertionOrder() {
         val r = EventReorderer(0)
-        val a = ev(10.0); val b = ReorderItem.Frame(10, null); val c = ev(10.0)
+        val a = ev(10.0); val b = ev(10.0); val c = ev(10.0)
         r.push(a); r.push(b); r.push(c)
         val out = r.drainList(10)
-        assertEquals(listOf(a, b, c), out)
-        assert(out[0] === a && out[1] === b && out[2] === c)
+        assertSame(a, out[0]); assertSame(b, out[1]); assertSame(c, out[2])
     }
 
     @Test fun drainAllReleasesEverything() {
@@ -50,5 +50,20 @@ class EventReordererTest {
         assertEquals(listOf(900.0, 800.0), r.drainList(1200).times())
         assertEquals(2, r.late)
         assertEquals(listOf(5000.0), r.drainList(5100).times())
+    }
+
+    @Test fun sensorBeforeFrameOnEqualTimeRegardlessOfArrival() {
+        val r = EventReorderer(0)
+        val f = ReorderItem.Frame(10, null); val e = ev(10.0)
+        r.push(f); r.push(e)
+        val out = r.drainList(10)
+        assertSame(e, out[0]); assertSame(f, out[1])
+    }
+
+    @Test fun overflowDropsOldestAndCounts() {
+        val r = EventReorderer(0, maxQueued = 3)
+        for (t in listOf(5.0, 1.0, 4.0, 2.0, 3.0)) r.push(ev(t))
+        assertEquals(2, r.dropped)
+        assertEquals(listOf(3.0, 4.0, 5.0), r.drainList(100).times())
     }
 }
