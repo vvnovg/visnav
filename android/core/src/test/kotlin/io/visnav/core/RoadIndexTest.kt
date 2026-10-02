@@ -45,4 +45,14 @@ class RoadIndexTest {
         val limited = idx.routeFrom(0, 150.0)
         assertTrue(1 in limited); assertFalse(2 in limited)
     }
+
+    @Test fun junctionDistAlongDegreeTwoChain() {
+        val nodes = (0..5).map { 10.0 * it to 0.0 } + listOf(50.0 to 10.0, 50.0 to -10.0)
+        val edges = (0 until 5).map { EdgeSpec(it, it + 1, 1) } + EdgeSpec(5, 6, 2) + EdgeSpec(5, 7, 3)
+        val idx = RoadIndex(roadPackOf(enu, nodes, edges), enu)
+        assertEquals(0.0, idx.junctionDist[5], 1e-6)
+        assertEquals(20.0, idx.junctionDist[2], 1e-6)  // до тупика 0, а не до развилки 5 (30 м)
+        assertEquals(20.0, idx.junctionDist[3], 1e-6)  // до развилки 5
+        assertEquals(0.0, idx.junctionDist[0], 1e-6)
+    }
 }

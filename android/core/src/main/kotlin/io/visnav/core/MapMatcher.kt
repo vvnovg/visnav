@@ -5,6 +5,7 @@ import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.min
 
 data class MatchConfig(
     val searchRadiusM: Double = 50.0,
@@ -18,11 +19,17 @@ data class MatchConfig(
     val junctionM: Double = 20.0,
 )
 
-/** Результат шага: ребро и направление движения по нему (travelBearing), точка на оси дороги, уверенность ∈ [0, 1]. */
+/**
+ * Результат шага: ребро и направление движения по нему (travelBearing), точка на оси дороги.
+ * confidence ∈ [0, 1] — доля среди кандидатов, а не вероятность правильной привязки; потребитель
+ * должен проверять и [fit].
+ */
 data class RoadMatch(
     val edge: Int, val wayId: Long, val e: Double, val n: Double, val distM: Double,
     val travelBearing: Double, val confidence: Double, val roadClass: Int, val tunnel: Boolean,
     val nearJunction: Boolean,
+    /** Абсолютное соответствие: расстояние ≤ 2.5σ и (при движении) курс в пределах 30°. */
+    val fit: Boolean,
 )
 
 /**
@@ -37,12 +44,14 @@ class MapMatcher(private val index: RoadIndex, private val config: MatchConfig =
     private var prevE = 0.0
     private var prevN = 0.0
 
-    fun reset() { prev = emptyList() }
+    fun reset() { prev = emptyList(); prevE = 0.0; prevN = 0.0 }
 
     fun step(e: Double, n: Double, sigmaM: Double, psi: Double, speedMps: Double): RoadMatch? {
-        val projections = index.near(e, n, config.searchRadiusM).take(config.maxCandidates)
-        if (projections.isEmpty()) { reset(); return null }
         val sigE = max(sigmaM, config.minEmissionSigmaM)
+        val radius = min(max(config.searchRadiusM, 3 * sigE), MAX_SEARCH_M)
+        // near() отсортирован по расстоянию: первое ребро каждой дороги — ближайшее.
+        val projections = index.near(e, n, radius).distinctBy { index.pack.way[it.edge] }.take(config.maxCandidates)
+        if (projections.isEmpty()) { reset(); return null }
         val sigPsi = Math.toRadians(config.headingSigmaDeg)
         val useHeading = speedMps >= config.minHeadingSpeedMps
         val trav = hypot(e - prevE, n - prevN)
@@ -62,7 +71,7 @@ class MapMatcher(private val index: RoadIndex, private val config: MatchConfig =
             var best = Double.NEGATIVE_INFINITY
             for (s in prev) {
                 val r = route(s, p, forward, cache, limit)
-                val tr = if (r == null) -config.teleportPenalty else -abs(r - trav) / config.betaM
+                val tr = if (r == null) -config.teleportPenalty else -min(abs(r - trav) / config.betaM, config.teleportPenalty)
                 best = max(best, s.score + tr)
             }
             cand.add(State(p, forward, 0.0)); emission.add(em); viaPrev.add(best)
@@ -85,9 +94,12 @@ class MapMatcher(private val index: RoadIndex, private val config: MatchConfig =
             if (index.pack.way[s.proj.edge] == way) sameWay += w
         }
         val p = best.proj
+        val bearing = travelBearing(p.edge, best.forward)
+        val fit = p.distM <= 2.5 * sigE &&
+            (!useHeading || abs(wrapAngle(psi - bearing)) <= Math.toRadians(FIT_HEADING_DEG))
         return RoadMatch(
-            p.edge, way, p.e, p.n, p.distM, travelBearing(p.edge, best.forward), sameWay / total,
-            index.pack.roadClass(p.edge), index.pack.tunnel(p.edge), nearJunction(p),
+            p.edge, way, p.e, p.n, p.distM, bearing, sameWay / total,
+            index.pack.roadClass(p.edge), index.pack.tunnel(p.edge), nearJunction(p), fit,
         )
     }
 
@@ -115,12 +127,13 @@ class MapMatcher(private val index: RoadIndex, private val config: MatchConfig =
     private fun nearJunction(p: RoadProjection): Boolean {
         val a = index.pack.from[p.edge]; val b = index.pack.to[p.edge]
         val len = index.length[p.edge]
-        return (index.degree[a] != 2 && p.t * len <= config.junctionM) ||
-            (index.degree[b] != 2 && (1 - p.t) * len <= config.junctionM)
+        return min(index.junctionDist[a] + p.t * len, index.junctionDist[b] + (1 - p.t) * len) <= config.junctionM
     }
 
     private companion object {
         const val BACKTRACK_TOLERANCE_M = 5.0
         const val PRUNE = -30.0
+        const val MAX_SEARCH_M = 200.0
+        const val FIT_HEADING_DEG = 30.0
     }
 }

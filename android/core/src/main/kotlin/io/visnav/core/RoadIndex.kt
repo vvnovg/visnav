@@ -20,6 +20,8 @@ class RoadIndex(val pack: RoadPack, val enu: Enu, private val cellM: Double = 50
     val bearing = DoubleArray(pack.edgeCount)
     /** Число рёбер, сходящихся в узле (без учёта направления). */
     val degree = IntArray(pack.nodeCount)
+    /** Расстояние по графу (без учёта направления) до ближайшего узла со степенью ≠ 2; дальше 200 м — бесконечность. */
+    val junctionDist = DoubleArray(pack.nodeCount) { Double.POSITIVE_INFINITY }
     val outNodes: Array<IntArray>
     val outLen: Array<DoubleArray>
     private val grid = HashMap<Long, MutableList<Int>>()
@@ -43,9 +45,25 @@ class RoadIndex(val pack: RoadPack, val enu: Enu, private val cellM: Double = 50
                 }
             }
         }
+        val und = Array(pack.nodeCount) { ArrayList<Pair<Int, Double>>() }
+        for (k in 0 until pack.edgeCount) {
+            und[pack.from[k]].add(pack.to[k] to length[k]); und[pack.to[k]].add(pack.from[k] to length[k])
+        }
+        val jq = PriorityQueue<Pair<Double, Int>>(compareBy { it.first })
+        for (i in 0 until pack.nodeCount) if (degree[i] != 2) { junctionDist[i] = 0.0; jq.add(0.0 to i) }
+        while (jq.isNotEmpty()) {
+            val (d, u) = jq.poll()
+            if (d > junctionDist[u]) continue
+            for ((v, l) in und[u]) {
+                val nd = d + l
+                if (nd <= JUNCTION_SEARCH_M && nd < junctionDist[v]) { junctionDist[v] = nd; jq.add(nd to v) }
+            }
+        }
         outNodes = Array(pack.nodeCount) { outN[it].toIntArray() }
         outLen = Array(pack.nodeCount) { outL[it].toDoubleArray() }
     }
+
+    private companion object { const val JUNCTION_SEARCH_M = 200.0 }
 
     private fun cell(v: Double): Int = floor(v / cellM).toInt()
     private fun key(cx: Int, cy: Int): Long = (cx.toLong() shl 32) or (cy.toLong() and 0xFFFFFFFFL)

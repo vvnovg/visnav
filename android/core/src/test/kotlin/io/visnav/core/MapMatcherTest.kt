@@ -85,4 +85,42 @@ class MapMatcherTest {
         val atJunction = m.step(490.0, 0.0, 5.0, Math.PI / 2, 10.0)
         assertNotNull(atJunction); assertTrue(atJunction.nearJunction)
     }
+
+    @Test fun denseNodesParallelRoadStaysCandidate() {
+        val a = straightRoad(0.0, 0.0, 1000.0, 0.0, 10.0, 1, 0)
+        val b = straightRoad(0.0, 25.0, 1000.0, 25.0, 10.0, 2, a.first.size)
+        val m = MapMatcher(RoadIndex(graph(a, b), enu))
+        val rnd = Random(3)
+        val ways = (0 until 100).map { k ->
+            m.step(10.0 * k, 8.0 * rnd.nextGaussian(), 8.0, Math.PI / 2, 10.0)?.wayId
+        }
+        val onA = ways.drop(3).count { it == 1L }
+        assertTrue(onA >= 95, "on way 1: $onA of 97")
+        val mid = MapMatcher(RoadIndex(graph(a, b), enu))
+        val conf = (0 until 30).map { mid.step(10.0 * it, 12.5, 8.0, Math.PI / 2, 10.0)!!.confidence }
+        assertTrue(conf.drop(3).all { it < 0.9 }, "midway: $conf")
+    }
+
+    @Test fun loneDistantRoadIsNotFit() {
+        val r = straightRoad(0.0, 0.0, 1000.0, 0.0, 100.0, 1, 0)
+        val m = MapMatcher(RoadIndex(graph(r), enu))
+        val far = m.step(500.0, 40.0, 5.0, Math.PI / 2, 10.0)
+        assertNotNull(far); assertTrue(!far.fit)
+        m.reset()
+        val close = m.step(500.0, 3.0, 5.0, Math.PI / 2, 10.0)
+        assertNotNull(close); assertTrue(close.fit)
+    }
+
+    @Test fun nearJunctionAcrossShortSegments() {
+        val a = straightRoad(0.0, 0.0, 500.0, 0.0, 10.0, 1, 0)
+        val junction = a.first.size - 1
+        val c = straightRoad(500.0, 0.0, 500.0, 500.0, 10.0, 3, a.first.size, startNode = junction)
+        val d = straightRoad(500.0, 0.0, 1000.0, 0.0, 10.0, 4, a.first.size + c.first.size, startNode = junction)
+        val m = MapMatcher(RoadIndex(graph(a, c, d), enu))
+        val near = m.step(485.0, 0.0, 5.0, Math.PI / 2, 10.0)
+        assertNotNull(near); assertTrue(near.nearJunction)
+        m.reset()
+        val far = m.step(450.0, 0.0, 5.0, Math.PI / 2, 10.0)
+        assertNotNull(far); assertTrue(!far.nearJunction)
+    }
 }
