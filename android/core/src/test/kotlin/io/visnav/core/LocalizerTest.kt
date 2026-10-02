@@ -41,6 +41,7 @@ class LocalizerTest {
     private fun run(
         config: LocalizerConfig, gapStartMs: Long = -1, gapEndMs: Long = -1,
         spoofStartMs: Long = -1, spoofEndMs: Long = -1, spoofNorthM: Double = 0.0, visualFromMs: Long = 0,
+        uniformFromMs: Long = Long.MAX_VALUE,
     ): List<LocalizerOutput> {
         val localizer = Localizer(pack(), config)
         val out = ArrayList<LocalizerOutput>()
@@ -56,7 +57,7 @@ class LocalizerTest {
             if (step % 100 == 0 && !inGap) {
                 val ll = enu.toLatLon(eMeters, spoof)
                 localizer.onSensor(LocEvent(t, ll[0], ll[1], 3f, 10f, 0.3f, 90f, 2f))
-                localizer.onSensor(GnssStatusEvent(t, 16, 14, 35f, 5f))
+                localizer.onSensor(GnssStatusEvent(t, 16, 14, 35f, if (rel >= uniformFromMs) 0.5f else 5f))
             }
             if (step % 50 == 0) {
                 val d = if (rel >= visualFromMs) oneHot(minOf(n, (eMeters / 10.0).toInt())) else null
@@ -127,6 +128,17 @@ class LocalizerTest {
         val worst = late.maxOf { truthErrorM(it) }
         assertTrue(worst <= 15.0, "late error=$worst")
         assertTrue(late.all { it.mode == NavMode.GNSS && it.health == GnssHealth.GOOD }, "late: ${late.map { it.mode to it.health }.distinct()}")
+    }
+
+    @Test fun reinitWaitsWhileAnotherUntrustedReasonIsActive() {
+        // Защёлка снимается около 70 с, но UNIFORM_CN0 с 62 с держит UNTRUSTED: переинициализация ждёт.
+        val config = LocalizerConfig(monitorConfig = MonitorConfig(relockMaxSigmaM = 0.001))
+        val outputs = run(config, spoofStartMs = 40_000, spoofEndMs = 60_000, spoofNorthM = 200.0, uniformFromMs = 62_000)
+        val late = outputs.filter { it.tMs >= t0 + 75_000 }
+        assertTrue(late.all { it.health == GnssHealth.UNTRUSTED && GnssReason.UNIFORM_CN0 in it.reasons })
+        // Переинициализация сбрасывает sigma к ~3 м, а установившийся фильтр держит ~4 м.
+        val window = outputs.filter { it.tMs >= t0 + 60_000 && it.tMs < t0 + 90_000 }
+        assertTrue(window.all { it.sigmaM > 3.5 }, "reinit applied: ${window.map { "%.1f".format(it.sigmaM) }}")
     }
 
     @Test fun monitorOffAlwaysUsesGnss() {

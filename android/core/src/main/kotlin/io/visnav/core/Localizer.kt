@@ -120,7 +120,9 @@ class Localizer(private val pack: RefPack, private val config: LocalizerConfig =
         } else {
             monitor.onFix(ev, null, null, null)
         }
-        if (monitor.consumeReinit()) {
+        // Переинициализируем только когда нет других причин UNTRUSTED (например UNIFORM_CN0 или JUMP):
+        // иначе запрос остаётся отложенным до их снятия.
+        if (monitor.hasPendingReinit() && monitor.assess(t).health != GnssHealth.UNTRUSTED && monitor.consumeReinit()) {
             val psi = if (brg != null && spd != null && spd >= 3f) Math.toRadians(brg.toDouble()) else ekf.x[2]
             val v = spd?.toDouble() ?: ekf.x[3]
             val psiSigma = Math.toRadians(sigma(ev.bearingAccDeg, DEFAULT_HEADING_ACC_DEG_UPDATE, MIN_HEADING_SIGMA_DEG))

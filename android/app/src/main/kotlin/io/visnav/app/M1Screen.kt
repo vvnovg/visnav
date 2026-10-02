@@ -47,7 +47,7 @@ fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
             Text("Точность GPS: ${s.gpsAccM?.let { "%.0f м".format(it) } ?: "нет сигнала"}")
             s.navMode?.let { m ->
                 Text("${modeLabel(m)}${s.sigmaM?.let { " ±${Math.round(it)} м" } ?: ""}", color = modeColor(m))
-                val reasons = s.gnssReasons.mapNotNull { reasonLabel(it) }
+                val reasons = s.gnssReasons.map { reasonLabel(it) }
                 if (reasons.isNotEmpty()) Text(reasons.joinToString(", "))
             }
             OutlinedButton(
@@ -75,8 +75,7 @@ private fun modeColor(m: NavMode) = when (m) {
     NavMode.DEAD_RECKONING -> Color(0xFFEF6C00)
 }
 
-/** FIX_GAP в списке брифа отсутствует: служебная причина, на экране не показывается. */
-private fun reasonLabel(r: GnssReason): String? = when (r) {
+private fun reasonLabel(r: GnssReason): String = when (r) {
     GnssReason.NO_FIX -> "нет фикса"
     GnssReason.FEW_SATS -> "мало спутников"
     GnssReason.LOW_CN0 -> "слабый сигнал"
@@ -85,5 +84,5 @@ private fun reasonLabel(r: GnssReason): String? = when (r) {
     GnssReason.JUMP -> "скачок"
     GnssReason.INNOVATION -> "расхождение с фильтром"
     GnssReason.UNIFORM_CN0 -> "признак подмены"
-    GnssReason.FIX_GAP -> null
+    GnssReason.FIX_GAP -> "перерыв фиксов"
 }

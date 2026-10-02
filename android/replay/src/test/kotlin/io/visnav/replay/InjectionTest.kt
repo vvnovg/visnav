@@ -133,7 +133,7 @@ class InjectionTest {
 
     // Увод 200 м за 30 с (6.7 м/с) отсекают сами ворота EKF даже при выключенном мониторе, поэтому он
     // не доказывает защиту. Медленный увод (50 м за 60 с) ворота проходит; без камеры, чтобы она не
-    // возвращала трек, это и показывает действие монитора.
+    // возвращала трек, это и показывает действие монитора. Детектор здесь — UNIFORM_CN0 (статус приёмника).
     @Test fun slowDragOffThatPassesTheEkfGateIsNotFused() {
         val s = SyntheticSession.session(dir(), uniformFromMs = 40_000, uniformToMs = 110_000, uniformCn0Std = 1f)
         val spoof = Spoof(T0 + 40_000, T0 + 110_000, 0.0, 50.0, 60_000)
@@ -143,8 +143,9 @@ class InjectionTest {
             .run(s, emptyList(), spoofs = listOf(spoof))
         val endErr = truthErrorM(inWindow(off, 40, 110).last())
         val fu = describe(firstUntrusted(on, T0 + 40_000), T0 + 40_000)
-        System.err.println("slow drag-off (50 m / 60 s, uniform CN0, no visual): monitor on P95 = $onP95 m, " +
-            "monitor off end error = $endErr m, first UNTRUSTED = $fu")
+        val firstUntrusted = firstUntrusted(on, T0 + 40_000)
+        assertTrue(firstUntrusted != null && GnssReason.UNIFORM_CN0 in firstUntrusted.reasons,
+            "first UNTRUSTED $fu, expected UNIFORM_CN0")
         assertTrue(onP95 <= 15.0, "monitor on P95=$onP95 (first UNTRUSTED $fu)")
         assertTrue(endErr >= 0.6 * 50.0, "monitor off end-of-window error=$endErr, expected >= 30 (0.6 x 50 m)")
     }
@@ -157,7 +158,7 @@ class InjectionTest {
         val window = inWindow(points, 40, 80)
         val maxErr = window.maxOf { truthErrorM(it) }
         val first = firstUntrusted(points, T0 + 40_000)
-        System.err.println("drag-off 200 m / 30 s without CN0 signature: max error in window = $maxErr m, " +
+        System.err.println("MEASURE: drag-off 200 m / 30 s without CN0 signature: max error in window = $maxErr m, " +
             "first UNTRUSTED = ${describe(first, T0 + 40_000)}")
         assertTrue(window.isNotEmpty())
         assertNotNull(first, "never UNTRUSTED")
@@ -167,7 +168,7 @@ class InjectionTest {
         val sub = Spoof(T0 + 40_000, T0 + 110_000, 0.0, 50.0, 60_000)
         val pts2 = Replayer(SyntheticSession.pack(), ReplayConfig()).run(s, emptyList(), spoofs = listOf(sub))
         val w2 = inWindow(pts2, 40, 110)
-        System.err.println("drag-off 50 m / 60 s, visual on, no CN0 signature: max error in window = " +
+        System.err.println("MEASURE: drag-off 50 m / 60 s, visual on, no CN0 signature: max error in window = " +
             "${w2.maxOf { truthErrorM(it) }} m, first UNTRUSTED = ${describe(firstUntrusted(pts2, T0 + 40_000), T0 + 40_000)}")
         assertTrue(w2.isNotEmpty())
     }

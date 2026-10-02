@@ -135,6 +135,9 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
         }
     }
 
+    /** Есть ли отложенная переинициализация (не сбрасывает её). */
+    fun hasPendingReinit(): Boolean = reinit
+
     /** true один раз после снятия фиксации по визуальному согласию: переинициализировать фильтр по GNSS. */
     fun consumeReinit(): Boolean = reinit.also { reinit = false }
 
