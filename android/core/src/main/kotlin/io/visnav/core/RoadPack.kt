@@ -19,8 +19,8 @@ data class TurnRestriction(val fromEdge: Int, val via: Int, val toEdge: Int, val
  * roadpack v1/v2 («VNRD»): дорожный граф OSM. Заголовок 16 байт (magic, version u16, reserved u16, nodeCount u32,
  * edgeCount u32), затем lats f64[n], lons f64[n], way i64[m], from i32[m], to i32[m], flags u8[m], cls u8[m]
  * (little-endian). v2 дополнительно: speedKmh u8[m] (0 = по классу), nameIdx i32[m] (-1 = без названия),
- nameCount u32 + names (u16 длина + UTF-8), restrictionCount u32 + по 13 байт (from i32, via i32, to i32, kind u8: 2 = only).
- Ребро — прямой отрезок между соседними узлами OSM-линии; по односторонней — только from → to.
+ * nameCount u32 + names (u16 длина + UTF-8), restrictionCount u32 + по 13 байт (from i32, via i32, to i32, kind u8:
+ * 1 = no, 2 = only). Ребро — прямой отрезок между соседними узлами OSM-линии; по односторонней — только from → to.
  */
 class RoadPack(
     val lats: DoubleArray, val lons: DoubleArray,
@@ -95,27 +95,27 @@ class RoadPack(
             val to = IntArray(m).also { b.asIntBuffer().get(it) }; b.position(b.position() + 4 * m)
             val flags = ByteArray(m).also { b.get(it) }
             val cls = ByteArray(m).also { b.get(it) }
-            var speed: ByteArray? = null; var nameIdx: IntArray? = null
-            var names: List<String> = emptyList(); var restrictions: List<TurnRestriction> = emptyList()
-            if (version == 2) {
-                speed = ByteArray(m).also { b.get(it) }
-                nameIdx = IntArray(m).also { b.asIntBuffer().get(it) }; b.position(b.position() + 4 * m)
-                val nc = b.int
-                require(nc >= 0) { "bad name count" }
-                names = List(nc) {
-                    val len = b.short.toInt() and 0xFFFF
-                    require(b.remaining() >= len) { "roadpack truncated in names" }
-                    ByteArray(len).also { b.get(it) }.toString(Charsets.UTF_8)
-                }
-                val rc = b.int
-                require(rc >= 0 && b.remaining().toLong() == 13L * rc) {
-                    "roadpack restriction table size mismatch (${b.remaining()} trailing bytes for $rc entries)"
-                }
-                restrictions = List(rc) { TurnRestriction(b.int, b.int, b.int, (b.get().toInt() and 0xFF) == 2) }
+            if (version == 1) return RoadPack(lats, lons, way, from, to, flags, cls)
+            val speed = ByteArray(m).also { b.get(it) }
+            val nameIdx = IntArray(m).also { b.asIntBuffer().get(it) }; b.position(b.position() + 4 * m)
+            val nc = b.int
+            require(nc >= 0 && nc.toLong() * 2 <= b.remaining()) { "bad name count $nc" }
+            val names = List(nc) {
+                val len = b.short.toInt() and 0xFFFF
+                require(b.remaining() >= len) { "roadpack truncated in names" }
+                ByteArray(len).also { b.get(it) }.toString(Charsets.UTF_8)
             }
-            return RoadPack(lats, lons, way, from, to, flags, cls,
-                speed ?: ByteArray(m) { RoadClass.defaultSpeedKmh(cls[it].toInt() and 0xFF).toByte() },
-                nameIdx ?: IntArray(m) { -1 }, names, restrictions)
+            val rc = b.int
+            require(rc >= 0 && b.remaining().toLong() == 13L * rc) {
+                "roadpack restriction table size mismatch (${b.remaining()} trailing bytes for $rc entries)"
+            }
+            val restrictions = List(rc) {
+                val f = b.int; val v = b.int; val t = b.int
+                val kind = b.get().toInt() and 0xFF
+                require(kind == 1 || kind == 2) { "bad restriction kind $kind" }
+                TurnRestriction(f, v, t, kind == 2)
+            }
+            return RoadPack(lats, lons, way, from, to, flags, cls, speed, nameIdx, names, restrictions)
         }
     }
 }

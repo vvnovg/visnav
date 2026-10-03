@@ -62,4 +62,10 @@ class RoadIndexTest {
         val idx = RoadIndex(pack, enu)
         assertEquals(setOf(0, 1, 2), idx.incident[1].toSet()); assertEquals(setOf(1), idx.incident[2].toSet())
     }
+
+    @Test fun selfLoopAppearsOnceInIncident() {
+        val pack = roadPackOf(enu, listOf(0.0 to 0.0, 100.0 to 0.0), listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 1, 1)))
+        val idx = RoadIndex(pack, enu)
+        assertEquals(listOf(0, 1), idx.incident[1].sorted()); assertEquals(listOf(0), idx.incident[0].toList())
+    }
 }

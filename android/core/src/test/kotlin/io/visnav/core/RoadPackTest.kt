@@ -66,4 +66,25 @@ class RoadPackTest {
     @Test fun defaultSpeedTable() {
         assertEquals(listOf(90, 70, 60, 50, 40, 30, 20, 10, 10), (1..9).map { RoadClass.defaultSpeedKmh(it) })
     }
+
+    @Test fun rejectsTruncatedV2() {
+        val raw = File(fixtureV2, "roadpack.bin").readBytes()
+        val bb = ByteBuffer.wrap(raw).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val n = bb.getInt(8); val m = bb.getInt(12)
+        val namesAt = 16 + 16 * n + 18 * m + 5 * m
+        for (cut in listOf(10, 16 + 8 * n, 16 + 16 * n + 18 * m + 2, namesAt + 2, namesAt + 5, raw.size - 7, raw.size - 1)) {
+            assertFailsWith<IllegalArgumentException>("cut=$cut") { RoadPack.parse(ByteBuffer.wrap(raw.copyOf(cut))) }
+        }
+        val huge = raw.copyOf()
+        ByteBuffer.wrap(huge).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(namesAt, 0x7FFFFFFF)
+        assertFailsWith<IllegalArgumentException> { RoadPack.parse(ByteBuffer.wrap(huge)) }
+    }
+
+    @Test fun rejectsBadRestrictionKind() {
+        val raw = File(fixtureV2, "roadpack.bin").readBytes()
+        for (bad in listOf(0, 3)) {
+            val c = raw.copyOf(); c[c.size - 1] = bad.toByte()
+            assertFailsWith<IllegalArgumentException>("kind=$bad") { RoadPack.parse(ByteBuffer.wrap(c)) }
+        }
+    }
 }
