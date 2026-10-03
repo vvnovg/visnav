@@ -139,4 +139,24 @@ class Ekf2dTest {
         assertFalse(ekf.updateLateral(0.0, 0.0, Math.PI / 2, 4.0))
         assertEquals(1000.0, ekf.x[1], 1e-9)
     }
+
+    @Test fun updateLateralMovesOnlyPosition() {
+        val f = filter(psi = PI / 4)
+        repeat(50) { f.predict(0.1, 0.02) }
+        assertTrue(f.p[2] != 0.0 && f.p[3] != 0.0 && f.p[4] != 0.0, "P must carry e-psi/e-v/e-bg cross terms")
+        val before = f.x.copyOf()
+        assertTrue(f.updateLateral(f.x[0] + 5.0, f.x[1] - 5.0, PI / 2, 4.0))
+        assertEquals(before[2], f.x[2], 0.0); assertEquals(before[3], f.x[3], 0.0); assertEquals(before[4], f.x[4], 0.0)
+        assertTrue(f.x[1] != before[1])
+    }
+
+    @Test fun lateralVarianceProjectsCovariance() {
+        val f = filter()
+        f.p.fill(0.0)
+        f.p[0] = 4.0; f.p[1] = 1.5; f.p[5] = 1.5; f.p[6] = 9.0 // Pee=4, Pen=1.5, Pnn=9
+        assertEquals(9.0, f.lateralVariance(PI / 2), 1e-12)
+        assertEquals(4.0, f.lateralVariance(0.0), 1e-12)
+        val th = PI / 4 // n = (cos, -sin) = (s, -s), s = sqrt(1/2): 0.5·(Pee + Pnn) − Pen
+        assertEquals(0.5 * (4.0 + 9.0) - 1.5, f.lateralVariance(th), 1e-12)
+    }
 }

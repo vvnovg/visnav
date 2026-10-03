@@ -2,6 +2,7 @@ package io.visnav.core
 
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.sqrt
 
 data class LocalizerConfig(
     val visual: Boolean = true,
@@ -16,7 +17,7 @@ data class LocalizerConfig(
     val fusedSigmaScale: Double = 3.0,
     val roadConstraint: Boolean = true,
     val minRoadConfidence: Double = 0.9,
-    val roadHeadingSigmaDeg: Double = 3.0,
+    val roadHeadingSigmaDeg: Double = 10.0,
     val gnssQuietMs: Double = 2000.0,
     val minRoadSpeedMps: Double = 2.0,
     val matchConfig: MatchConfig = MatchConfig(),
@@ -55,7 +56,11 @@ private fun sigma(v: Float?, default: Double, floor: Double): Double =
  * Общий конвейер локализации (фильтр M2a + монитор GNSS + режимы FR-15). Время — мс настенных часов.
  * С `monitor = false` ведёт себя как Replayer из M2a: режим всегда GNSS.
  */
-class Localizer(private val pack: RefPack, private val config: LocalizerConfig = LocalizerConfig(), private val roads: RoadPack? = null) {
+class Localizer(
+    private val pack: RefPack,
+    private val config: LocalizerConfig = LocalizerConfig(),
+    private val roads: RoadPack? = null,
+) {
     private val index = GeoIndex(pack)
     private val ekf = Ekf2d(config.filter)
     private val yaw = YawRate()
@@ -73,7 +78,8 @@ class Localizer(private val pack: RefPack, private val config: LocalizerConfig =
     private var lastGnssFusedT = Double.NEGATIVE_INFINITY
 
     val initialized: Boolean get() = ekf.initialized
-    internal val headingSigmaRad: Double get() = kotlin.math.sqrt(ekf.headingVariance())
+    internal val headingSigmaRad: Double get() = sqrt(ekf.headingVariance())
+    internal fun lateralSigmaAcross(theta: Double): Double = sqrt(ekf.lateralVariance(theta))
     val mode: NavMode get() = modes.mode
 
     private fun predictTo(t: Double) {
@@ -233,8 +239,12 @@ class Localizer(private val pack: RefPack, private val config: LocalizerConfig =
             val sigmaLat = RoadClass.lateralSigmaM(match.roadClass)
             // Нижняя граница дисперсии: дорога не делает фильтр увереннее половины своей сигмы, иначе
             // вернувшийся GNSS не проходит гейт и фильтр залипает на оси дороги.
-            val atFloor = ekf.lateralVariance(match.travelBearing) <= (sigmaLat / 2) * (sigmaLat / 2)
-            used = atFloor || ekf.updateLateral(match.e, match.n, match.travelBearing, sigmaLat)
+            val floor = (sigmaLat / 2) * (sigmaLat / 2)
+            val lat = ekf.lateralVariance(match.travelBearing)
+            val atFloor = lat <= floor
+            // Шум раздувается так, чтобы апостериорная дисперсия не опускалась ниже границы за один шаг.
+            val r = max(sigmaLat * sigmaLat, floor * lat / (lat - floor))
+            used = atFloor || ekf.updateLateral(match.e, match.n, match.travelBearing, sqrt(r))
             val headingSigma = Math.toRadians(config.roadHeadingSigmaDeg)
             if (used && ekf.x[3] >= config.matchConfig.minHeadingSpeedMps &&
                 ekf.headingVariance() > (headingSigma / 2) * (headingSigma / 2)

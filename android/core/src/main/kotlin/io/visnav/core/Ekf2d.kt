@@ -93,8 +93,8 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
 
     /**
      * Псевдоизмерение «на оси дороги»: прямая через (e0, n0) с азимутом theta (рад от севера по часовой).
-     * Само измерение чисто поперечное (невязка — смещение до прямой); при коррелированной P коэффициент
-     * усиления может сдвинуть и вдоль-дорожную компоненту состояния.
+     * Измерение чисто поперечное, а поправка применяется только к позиции (e, n): частичное обновление
+     * Шмидта, ψ, v и b_g дорога не трогает (ось OSM не точнее полосы и не должна уводить скорость/курс).
      */
     fun updateLateral(e0: Double, n0: Double, theta: Double, sigma: Double): Boolean {
         require(sigma > 0 && sigma.isFinite()) { "sigma must be positive and finite" }
@@ -102,7 +102,7 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
         val offset = ne * (x[0] - e0) + nn * (x[1] - n0)
         return update(
             arrayOf(doubleArrayOf(ne, nn, 0.0, 0.0, 0.0)), doubleArrayOf(-offset), doubleArrayOf(sigma * sigma),
-            config.gateChi2Scalar,
+            config.gateChi2Scalar, intArrayOf(0, 1),
         )
     }
 
@@ -126,8 +126,13 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
         return (ye * (s11 * ye - s01 * yn) + yn * (-s10 * ye + s00 * yn)) / det
     }
 
-    /** Общее обновление: H — строки (m ≤ 2), y — невязка, r — дисперсии шума (диагональ). */
-    private fun update(h: Array<DoubleArray>, y: DoubleArray, r: DoubleArray, gate: Double): Boolean {
+    /**
+     * Общее обновление: H — строки (m ≤ 2), y — невязка, r — дисперсии шума (диагональ). С `onlyStates`
+     * строки усиления остальных состояний обнуляются (форма Джозефа верна для любого K).
+     */
+    private fun update(
+        h: Array<DoubleArray>, y: DoubleArray, r: DoubleArray, gate: Double, onlyStates: IntArray? = null,
+    ): Boolean {
         check(initialized) { "filter not initialized" }
         if (y.any { !it.isFinite() }) return false
         val m = h.size
@@ -148,6 +153,7 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
         if (!(d2 <= gate)) return false
         // K = PHᵀ S⁻¹ (N×m)
         val k = Array(N) { i -> DoubleArray(m) { b -> (0 until m).sumOf { a -> pht[i][a] * sInv[a][b] } } }
+        if (onlyStates != null) for (i in 0 until N) if (i !in onlyStates) k[i].fill(0.0)
         for (i in 0 until N) x[i] += (0 until m).sumOf { a -> k[i][a] * y[a] }
         x[2] = wrapAngle(x[2])
         // Форма Джозефа: P = (I − KH) P (I − KH)ᵀ + K R Kᵀ
