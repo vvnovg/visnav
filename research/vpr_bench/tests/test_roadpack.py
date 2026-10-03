@@ -22,7 +22,7 @@ def fixture_graph() -> RoadGraph:
 
 
 def test_roundtrip(tmp_path):
-    write_roadpack(tmp_path, fixture_graph(), FIXTURE_META)
+    write_roadpack(tmp_path, fixture_graph(), FIXTURE_META, version=1)
     g, meta = read_roadpack(tmp_path)
     assert (tmp_path / "roadpack.bin").stat().st_size == 16 + 16 * 3 + 18 * 2
     np.testing.assert_array_equal(g.node_lons, [37.60, 37.60, 37.602])
@@ -32,7 +32,7 @@ def test_roundtrip(tmp_path):
 
 
 def test_committed_fixture_matches_writer(tmp_path):
-    write_roadpack(tmp_path, fixture_graph(), FIXTURE_META)
+    write_roadpack(tmp_path, fixture_graph(), FIXTURE_META, version=1)
     assert (tmp_path / "roadpack.bin").read_bytes() == (FIXTURE_DIR / "roadpack.bin").read_bytes()
     g, meta = read_roadpack(FIXTURE_DIR)
     assert meta["edge_count"] == 2 and list(g.edge_to) == [1, 2]
@@ -54,3 +54,62 @@ def test_rejects_edge_out_of_range():
     with pytest.raises(ValueError, match="range"):
         RoadGraph(g.node_lats, g.node_lons, g.edge_way, g.edge_from, np.array([1, 3], dtype=np.int32),
                   g.edge_flags, g.edge_class)
+
+
+from vpr_bench.roadpack import DEFAULT_SPEED_KMH, FLAG_ROUNDABOUT, KIND_NO, KIND_ONLY
+
+FIXTURE_V2_DIR = Path(__file__).parent / "data" / "roadpack_v2_fixture"
+
+
+def fixture_graph_v2() -> RoadGraph:
+    """fixture_graph() + скорость, названия (кириллица), круговое движение на ребре 1 и два запрета."""
+    g = fixture_graph()
+    return RoadGraph(
+        g.node_lats, g.node_lons, g.edge_way, g.edge_from, g.edge_to,
+        np.array([0, FLAG_ONEWAY | FLAG_TUNNEL | FLAG_ROUNDABOUT], dtype=np.uint8), g.edge_class,
+        edge_speed=np.array([20, 48], dtype=np.uint8), edge_name=np.array([0, -1], dtype=np.int32),
+        names=("Тверская улица",),
+        restrictions=np.array([[0, 1, 1, KIND_NO], [1, 1, 0, KIND_ONLY]], dtype=np.int32),
+    )
+
+
+def test_v2_roundtrip_and_fixture(tmp_path):
+    write_roadpack(tmp_path, fixture_graph_v2(), FIXTURE_META)
+    g, meta = read_roadpack(tmp_path)
+    assert meta["format"] == "VNRD/2"
+    assert list(g.edge_speed) == [20, 48] and list(g.edge_name) == [0, -1] and g.names == ("Тверская улица",)
+    assert g.restrictions.tolist() == [[0, 1, 1, KIND_NO], [1, 1, 0, KIND_ONLY]]
+    assert (tmp_path / "roadpack.bin").read_bytes() == (FIXTURE_V2_DIR / "roadpack.bin").read_bytes()
+
+
+def test_v2_defaults_without_attributes(tmp_path):
+    write_roadpack(tmp_path, fixture_graph(), FIXTURE_META)  # v2 по умолчанию
+    g, _ = read_roadpack(tmp_path)
+    assert list(g.edge_speed) == [DEFAULT_SPEED_KMH[7], DEFAULT_SPEED_KMH[3]]
+    assert list(g.edge_name) == [-1, -1] and g.names == () and len(g.restrictions) == 0
+
+
+def test_v1_file_reads_with_defaults():
+    g, meta = read_roadpack(FIXTURE_DIR)
+    assert meta["format"] == "VNRD/1"
+    assert list(g.edge_speed) == [DEFAULT_SPEED_KMH[7], DEFAULT_SPEED_KMH[3]] and g.names == ()
+
+
+def test_v1_writer_rejects_attributes(tmp_path):
+    with pytest.raises(ValueError, match="v1"):
+        write_roadpack(tmp_path, fixture_graph_v2(), FIXTURE_META, version=1)
+
+
+def test_v2_rejects_trailing_bytes(tmp_path):
+    write_roadpack(tmp_path, fixture_graph_v2(), FIXTURE_META)
+    p = tmp_path / "roadpack.bin"
+    p.write_bytes(p.read_bytes() + b"\x00")
+    with pytest.raises(ValueError, match="trailing"):
+        read_roadpack(tmp_path)
+
+
+def test_bad_restriction_rejected():
+    g = fixture_graph()
+    with pytest.raises(ValueError, match="restriction"):
+        RoadGraph(g.node_lats, g.node_lons, g.edge_way, g.edge_from, g.edge_to, g.edge_flags, g.edge_class,
+                  restrictions=np.array([[0, 1, 5, KIND_NO]], dtype=np.int32))
