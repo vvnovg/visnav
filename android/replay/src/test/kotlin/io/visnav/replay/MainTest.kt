@@ -119,4 +119,10 @@ class MainTest {
         val e = assertFailsWith<IllegalArgumentException> { loadRoads(createTempDirectory().toFile()) }
         assertTrue(e.message!!.contains("roadpack"))
     }
+
+    @Test fun parseDestAcceptsAndRejects() {
+        assertEquals(55.75 to 37.6, parseDest("55.75,37.6"))
+        assertEquals(null, parseDest("55.75")); assertEquals(null, parseDest("95,37")); assertEquals(null, parseDest("a,b"))
+        assertEquals(null, parseDest("NaN,37"))
+    }
 }
