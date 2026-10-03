@@ -168,4 +168,20 @@ class Ekf2dTest {
         assertEquals(e0, f.x[0], 1e-9)
         assertTrue(f.x[1] != n0)
     }
+
+    @Test fun inflatePositionRaisesDiagonalAndDecouplesPosition() {
+        val f = filter(psi = PI / 4)
+        repeat(50) { f.predict(0.1, 0.02) }
+        assertTrue(f.updatePosition(f.x[0] + 1.0, f.x[1] - 1.0, 3.0)) // корреляции позиции с ψ, v, b_g ≠ 0
+        val pee = f.p[0]
+        assertTrue(f.p[2] != 0.0 && f.p[1] != 0.0)
+        f.inflatePosition(400.0)
+        assertTrue(f.p[0] >= 400.0 && f.p[6] >= 400.0)
+        for (i in 0 until 2) for (j in 0 until 5) if (i != j) {
+            assertEquals(0.0, f.p[i * 5 + j], "P[$i,$j]"); assertEquals(0.0, f.p[j * 5 + i], "P[$j,$i]")
+        }
+        for (i in 0 until 5) for (j in 0 until 5) assertEquals(f.p[i * 5 + j], f.p[j * 5 + i], 1e-12, "symmetry $i,$j")
+        f.inflatePosition(pee / 1000) // меньше текущей: диагональ не уменьшается
+        assertEquals(400.0, f.p[0], 1e-9)
+    }
 }

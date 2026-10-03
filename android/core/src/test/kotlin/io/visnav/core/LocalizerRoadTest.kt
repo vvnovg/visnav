@@ -27,10 +27,11 @@ class LocalizerRoadTest {
     private fun run(
         config: LocalizerConfig, roads: RoadPack?, biasRadS: Float = 0.005f, speed: Double = 10.0,
         onEnd: (Localizer) -> Unit = {}, onFrame: (Localizer, LocalizerOutput) -> Unit = { _, _ -> },
+        lastStep: Int = 12_000, gnssStatus: Boolean = false,
     ): List<LocalizerOutput> {
         val localizer = Localizer(pack, config, roads)
         val out = ArrayList<LocalizerOutput>()
-        for (step in 0..12_000) {
+        for (step in 0..lastStep) {
             val tMs = t0 + step * 10L
             val t = tMs.toDouble()
             val rel = tMs - t0
@@ -38,6 +39,7 @@ class LocalizerRoadTest {
             localizer.onSensor(AccelEvent(t, 0f, 0f, 9.81f + 0.3f * sin(step.toFloat())))
             localizer.onSensor(GyroEvent(t, 0f, 0f, if (inGap) biasRadS else 0f))
             if (step % 100 == 0 && !inGap) {
+                if (gnssStatus) localizer.onSensor(GnssStatusEvent(t, 16, 14, 35f, 5f)) // обычный, не подменный
                 val ll = enu.toLatLon(step * 0.01 * speed, 0.0)
                 val fixSpeed = (if (step == 0) maxOf(speed, 3.0) else speed).toFloat() // инициализация требует >= 3 м/с
                 localizer.onSensor(LocEvent(t, ll[0], ll[1], 3f, fixSpeed, 0.3f, 90f, 2f))
@@ -100,7 +102,6 @@ class LocalizerRoadTest {
             // с 38 с дисперсия выросла до границы; раньше она ниже границы из-за слитого GNSS, а не дороги
             if (o.tMs - t0 in 38_000 until 90_000) minAcross = minOf(minAcross, l.lateralSigmaAcross(Math.PI / 2))
         }).filter(::inGap)
-        println("FIXMETRIC minAcross=$minAcross floor=$floor")
         assertTrue(gap.isNotEmpty() && minAcross >= floor, "min lateral sigma $minAcross < $floor")
     }
 
@@ -158,21 +159,55 @@ class LocalizerRoadTest {
         return errs to cross
     }
 
-    /** Без восстановления курса по невязке с дорогой ошибка вдоль дороги копится (дрейф курса не в модели). */
+    /**
+     * Дуга с дрейфом гироскопа в пропуске GNSS: полная ошибка позиции (до истинной точки, включая вдоль-дорожную
+     * составляющую) с дорогой остаётся ≤ 12 м, без дороги — > 30 м.
+     */
     @Test
     fun curvedRoadGapStaysOnRoad() {
         val (with, _) = runArc(LocalizerConfig(visual = false), arcRoads())
         val (without, _) = runArc(LocalizerConfig(visual = false), null)
         assertTrue(without.max() > 30.0, "drift without roads must exist: ${without.max()}")
-        println("FIXMETRIC arcAlong with=${with.max()} without=${without.max()}")
-        assertTrue(with.max() <= 12.0, "with roads: ${with.max()}")
+        assertTrue(with.max() <= 12.0, "with roads: ${with.max()} (without: ${without.max()})")
     }
 
     @Test fun curvedRoadGapKeepsCrossTrackError() {
         val (_, with) = runArc(LocalizerConfig(visual = false), arcRoads())
         val (_, without) = runArc(LocalizerConfig(visual = false), null)
-        println("FIXMETRIC arcCrossWith=${with.max()} arcCrossWithout=${without.max()}")
         assertTrue(without.max() > 30.0, "drift without roads must exist: ${without.max()}")
-        assertTrue(with.max() <= 12.0, "with roads: ${with.max()}")
+        assertTrue(with.max() <= 12.0, "with roads: ${with.max()} (without: ${without.max()})")
     }
+
+    /**
+     * Истинной дороги нет в OSM, единственная дорога way 2 идёт параллельно в x м к северу. В пропуске GNSS
+     * дорога утягивает фильтр на себя; вернувшийся GNSS (обычный статус спутников) должен вывести фильтр
+     * обратно («выход по GPS»), а не объявляться подменой (INNOVATION).
+     */
+    private fun missingTrueRoad(x: Double) {
+        val b = straightRoad(-200.0, x, 2000.0, x, 25.0, 2, 0)
+        val out = run(
+            LocalizerConfig(visual = false), roadPackOf(enu, b.first, b.second), lastStep = 15_000, gnssStatus = true,
+        )
+        fun errM(o: LocalizerOutput): Double {
+            val en = enu.toEn(o.lat, o.lon)
+            return hypot(en[0] - (o.tMs - t0) / 1000.0 * 10.0, en[1])
+        }
+        val gapUsed = out.filter(::inGap).count { it.road?.used == true }
+        val after = out.filter { it.tMs - t0 >= 90_000 }
+        val innov = after.filter { it.health == GnssHealth.UNTRUSTED && GnssReason.INNOVATION in it.reasons }
+        val late = out.filter { it.tMs - t0 >= 115_000 }
+        val maxLate = late.maxOf(::errM)
+        val maxGapErr = out.filter(::inGap).maxOf(::errM)
+        val gnssBack = after.firstOrNull { it.mode == NavMode.GNSS }?.let { (it.tMs - t0) / 1000.0 }
+        val lastBad = after.lastOrNull { errM(it) > 5.0 }?.let { (it.tMs - t0) / 1000.0 }
+        val m = "x=$x gapUsed=$gapUsed maxGapErr=$maxGapErr maxErrFrom115=$maxLate gnssBackAt=$gnssBack " +
+            "lastErrOver5mAt=$lastBad innovationRows=${innov.size}"
+        assertTrue(gapUsed > 0, "road used in gap: $m")
+        assertTrue(innov.isEmpty(), "INNOVATION after 90 s: $m")
+        assertTrue(late.isNotEmpty() && maxLate <= 5.0, "error from 115 s: $m")
+    }
+
+    @Test fun missingTrueRoadParallelAt18m() = missingTrueRoad(18.0)
+    @Test fun missingTrueRoadParallelAt25m() = missingTrueRoad(25.0)
+    @Test fun missingTrueRoadParallelAt40m() = missingTrueRoad(40.0)
 }

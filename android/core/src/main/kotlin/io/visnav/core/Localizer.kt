@@ -52,9 +52,24 @@ private const val DEFAULT_SPEED_ACC_UPDATE = 0.5
 private fun sigma(v: Float?, default: Double, floor: Double): Double =
     if (v != null && v.isFinite()) max(v.toDouble(), floor) else default
 
+private const val ROAD_HOLD_MS = 5_000.0
+private const val ROAD_REJECTS_TO_SUSPEND = 2
+private val ESCAPE_BLOCKERS = setOf(GnssReason.UNIFORM_CN0, GnssReason.JUMP, GnssReason.NO_FIX)
+
 /**
  * Общий конвейер локализации (фильтр M2a + монитор GNSS + режимы FR-15). Время — мс настенных часов.
  * С `monitor = false` ведёт себя как Replayer из M2a: режим всегда GNSS.
+ *
+ * «Удержание дорогой» (road-held): с последнего кадра, где дорога ограничила позицию (`road.used`), прошло
+ * не больше 5 с. Дорога сжимает поперечную P, и если истинной дороги нет в OSM, а рядом идёт параллельная,
+ * фильтр стоит на чужой дороге, и здоровый GNSS не проходит χ²-гейт. Поэтому, по решению владельца:
+ * - пока фильтр удержан дорогой, монитор не получает χ²-невязку (INNOVATION не считается): расхождение
+ *   со сжатым дорогой фильтром не должно объявлять настоящий GNSS подменой. Подмену в это время ловят
+ *   только UNIFORM_CN0, AGC_DROP, JUMP и NO_FIX — это принятый компромисс;
+ * - «выход по GPS»: фикс без UNIFORM_CN0/JUMP/NO_FIX, который гейт отверг бы, считается отказом (в любом
+ *   режиме, даже если фикс не применяется); после двух отказов подряд подсказка дорогой приостанавливается,
+ *   а неопределённость позиции раздувается до квадрата расстояния до фикса. Приостановка снимается, когда
+ *   GNSS-позиция принята фильтром.
  */
 class Localizer(
     private val pack: RefPack,
@@ -76,6 +91,9 @@ class Localizer(
     private var lastReasons: Set<GnssReason> = emptySet()
     private var matcher: MapMatcher? = null
     private var lastGnssFusedT = Double.NEGATIVE_INFINITY
+    private var lastRoadUsedT = Double.NEGATIVE_INFINITY
+    private var roadRejects = 0
+    private var roadSuspended = false
 
     val initialized: Boolean get() = ekf.initialized
     internal val headingSigmaRad: Double get() = sqrt(ekf.headingVariance())
@@ -136,14 +154,16 @@ class Localizer(
         predictTo(t)
         val en = enu!!.toEn(ev.lat, ev.lon)
         val posSigma = sigma(ev.accM, MIN_POS_SIGMA_M, MIN_POS_SIGMA_M)
+        val d2 = ekf.positionD2(en[0], en[1], posSigma)
+        val dist = hypot(en[0] - ekf.x[0], en[1] - ekf.x[1])
+        val roadHeld = t - lastRoadUsedT <= ROAD_HOLD_MS
         if (config.monitor) {
-            monitor.onFix(
-                ev, ekf.positionD2(en[0], en[1], posSigma),
-                hypot(en[0] - ekf.x[0], en[1] - ekf.x[1]), ekf.posSigma(),
-            )
+            // В удержании дорогой χ²-невязку не передаём: сжатая дорогой P не должна делать GNSS «подменой».
+            monitor.onFix(ev, if (roadHeld) null else d2, dist, ekf.posSigma())
         } else {
             monitor.onFix(ev, null, null, null)
         }
+        if (roadHeld) checkRoadEscape(t, d2, dist)
         // Переинициализируем только когда нет других причин UNTRUSTED (например UNIFORM_CN0 или JUMP):
         // иначе запрос остаётся отложенным до их снятия.
         if (monitor.hasPendingReinit() && monitor.assess(t).health != GnssHealth.UNTRUSTED && monitor.consumeReinit()) {
@@ -167,9 +187,24 @@ class Localizer(
         }
     }
 
+    /**
+     * «Выход по GPS»: фикс без признаков подмены (UNIFORM_CN0, JUMP, NO_FIX; INNOVATION не учитывается),
+     * который χ²-гейт отверг бы, — отказ. Два отказа подряд: дорога приостанавливается, P позиции
+     * раздувается до dist², чтобы следующий фикс прошёл гейт.
+     */
+    private fun checkRoadEscape(t: Double, d2: Double, dist: Double) {
+        val clean = monitor.assess(t).reasons.none { it in ESCAPE_BLOCKERS }
+        roadRejects = if (clean && d2 > config.filter.gateChi2Pos) roadRejects + 1 else 0
+        if (roadRejects >= ROAD_REJECTS_TO_SUSPEND) {
+            roadSuspended = true
+            ekf.inflatePosition(dist * dist)
+            roadRejects = 0
+        }
+    }
+
     private fun applyFix(ev: LocEvent, en: DoubleArray, posSigma: Double, scale: Double) {
         val spd = ev.speedMps; val brg = ev.bearingDeg
-        if (ekf.updatePosition(en[0], en[1], posSigma * scale)) lastGnssFusedT = ev.tMs
+        if (ekf.updatePosition(en[0], en[1], posSigma * scale)) { lastGnssFusedT = ev.tMs; roadSuspended = false }
         if (spd != null) {
             val spdSigma = sigma(ev.speedAccMps, DEFAULT_SPEED_ACC_UPDATE, MIN_SPEED_SIGMA_MPS)
             ekf.updateSpeed(spd.toDouble(), spdSigma * scale)
@@ -218,6 +253,7 @@ class Localizer(
             }
         }
         val road = matcher?.let { stepRoad(it, t) }
+        if (road?.used == true) lastRoadUsedT = t
         // Режим и состояние обновляются на каждом кадре, чтобы глушение без визуальных фиксаций
         // не оставляло режим GNSS навсегда, а VISUAL — не переходил в DEAD_RECKONING.
         if (config.monitor) updateMode(t)
@@ -228,11 +264,14 @@ class Localizer(
         )
     }
 
-    /** Шаг привязки к дороге; подсказка фильтру — только когда GNSS давно не сливался и привязка уверена. */
+    /**
+     * Шаг привязки к дороге; подсказка фильтру — только когда GNSS давно не сливался, привязка уверена и
+     * дорога не приостановлена «выходом по GPS» (тогда привязка считается и сообщается, но `used` = false).
+     */
     private fun stepRoad(m: MapMatcher, t: Double): RoadInfo? {
         val match = m.step(ekf.x[0], ekf.x[1], ekf.posSigma(), ekf.x[2], ekf.x[3]) ?: return null
         var used = false
-        if (config.roadConstraint && t - lastGnssFusedT > config.gnssQuietMs &&
+        if (config.roadConstraint && !roadSuspended && t - lastGnssFusedT > config.gnssQuietMs &&
             match.confidence >= config.minRoadConfidence && match.fit && !match.nearJunction &&
             ekf.x[3] >= config.minRoadSpeedMps
         ) {

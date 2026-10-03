@@ -1,7 +1,9 @@
 package io.visnav.core
 
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -113,6 +115,20 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
         return ne * ne * p[idx(0, 0)] + 2 * ne * nn * p[idx(0, 1)] + nn * nn * p[idx(1, 1)]
     }
 
+    /**
+     * Раздувание неопределённости позиции: P[0,0] и P[1,1] не меньше minVar, внедиагональные элементы строк и
+     * столбцов 0 и 1 обнуляются (позиция забывает корреляции между осями и с ψ, v, b_g). P остаётся
+     * симметричной и положительно определённой.
+     */
+    fun inflatePosition(minVar: Double) {
+        require(minVar >= 0 && minVar.isFinite()) { "minVar must be non-negative and finite" }
+        for (i in 0 until 2) {
+            val d = max(p[idx(i, i)], minVar)
+            for (j in 0 until N) { p[idx(i, j)] = 0.0; p[idx(j, i)] = 0.0 }
+            p[idx(i, i)] = d
+        }
+    }
+
     fun headingVariance(): Double = p[idx(2, 2)]
 
     fun posSigma(): Double = sqrt(max(p[idx(0, 0)], p[idx(1, 1)]))
@@ -137,6 +153,10 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
         alongNormal: DoubleArray? = null,
     ): Boolean {
         check(initialized) { "filter not initialized" }
+        require(alongNormal == null || (h.size == 1 && alongNormal.size == 2)) { "alongNormal needs a scalar measurement" }
+        require(alongNormal == null || abs(hypot(alongNormal[0], alongNormal[1]) - 1.0) <= 1e-6) {
+            "alongNormal must be a unit vector"
+        }
         if (y.any { !it.isFinite() }) return false
         val m = h.size
         // PHᵀ (N×m)
