@@ -27,11 +27,10 @@ data class NavConfig(
     val arriveStopM: Double = 60.0,
     val backtrackM: Double = 15.0,
     /**
-     * Ветви маршрута не дальше ближайшей + branchSlackM: берётся самая ранняя не позади прогресса больше чем на
-     * aheadSlackM (самопересечения, разворот на узкой разделённой дороге); если таких нет — самая ранняя позади.
+     * Ветви маршрута не дальше ближайшей + branchSlackM: берётся ближайшая по маршруту к прогнозу прогресс + s·Δt
+     * (самопересечения, разворот на узкой разделённой дороге, стоянка с шумом позиции).
      */
     val branchSlackM: Double = 10.0,
-    val aheadSlackM: Double = 3.0,
     /** Окно поиска вперёд: max(200, 5·v, v·Δt + staleJumpM), не больше maxWindowM (Δt — с прошлого обновления). */
     val maxWindowM: Double = 2000.0,
     /** Скачок прогресса больше v·Δt + staleJumpM за одно обновление — подсказки на этом обновлении не выдаются. */
@@ -144,21 +143,17 @@ class RouteFollower(
         }
         val bestD = segD.minOrNull() ?: Double.POSITIVE_INFINITY
         // Ветви — локальные минимумы расстояния вдоль маршрута (конец отрезка не ветвь, если проекция уходит на
-        // соседний отрезок). Из ветвей не дальше bestD + branchSlackM берётся самая ранняя впереди (не позади
-        // прогресса больше чем на aheadSlackM): на самопересечении прогресс не перескакивает на дальнюю ветвь, а на
-        // развороте узкой разделённой дороги не цепляется за встречную ветвь позади. Нет ветвей впереди — самая
-        // ранняя позади.
-        var ahead: Double? = null
-        var behind: Double? = null
+        // соседний отрезок). Из ветвей не дальше bestD + branchSlackM берётся ближайшая по маршруту к прогнозу
+        // progress + s·Δt (s — фактическая скорость, без нижней границы): на самопересечении и на развороте узкой
+        // разделённой дороги прогресс не перескакивает на другую ветвь, в том числе на стоянке.
+        val predicted = progressM + (if (speedMps.isFinite()) speedMps else 0.0) * (dtS ?: 0.0)
+        var chosen: Double? = null
         for (k in segI.indices) {
             if (segT[k] >= 1.0 && k + 1 < segI.size && segI[k + 1] == segI[k] + 1 && segT[k + 1] > 0.0) continue
             if (segT[k] <= 0.0 && k > 0 && segI[k - 1] == segI[k] - 1 && segT[k - 1] < 1.0) continue
             if (segAt[k] < lo || segD[k] > bestD + config.branchSlackM) continue
-            if (segAt[k] >= progressM - config.aheadSlackM) {
-                if (ahead == null || segAt[k] < ahead) ahead = segAt[k]
-            } else if (behind == null || segAt[k] < behind) behind = segAt[k]
+            if (chosen == null || abs(segAt[k] - predicted) < abs(chosen - predicted)) chosen = segAt[k]
         }
-        val chosen = ahead ?: behind
         val before = progressM
         if (chosen != null) progressM = chosen.coerceAtLeast(0.0)
         // Маршрут построен без курса: при первом достоверном курсе на маршруте в начале пути проверяем направление.

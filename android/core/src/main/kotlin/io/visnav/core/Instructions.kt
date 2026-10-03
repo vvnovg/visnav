@@ -41,7 +41,7 @@ object Instructions {
         ManeuverType.SHARP_RIGHT -> "резко направо"
         ManeuverType.UTURN -> "разворот"
         ManeuverType.CONTINUE -> "прямо"
-        ManeuverType.ROUNDABOUT -> "на кольцо"
+        ManeuverType.ROUNDABOUT -> "на кольце ${ordinal(m.exit)} съезд"
         ManeuverType.DEPART, ManeuverType.ARRIVE -> action(m)
     }
 

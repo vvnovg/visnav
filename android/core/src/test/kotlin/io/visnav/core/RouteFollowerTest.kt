@@ -350,4 +350,43 @@ class RouteFollowerTest {
         assertTrue(r.ev.filterIsInstance<NavEvent.Prompt>().none { it.maneuver == turn && it.tMs >= tGap })
         assertEquals(1, r.ev.count { it is NavEvent.RouteReady })
     }
+
+    /**
+     * Разворот на узкой разделённой дороге с манёвром: на восток по n=0 (одностороннее, дальше до (700,0)), у (500,0)
+     * перемычка на юг до (500,−sep) (одностороннее), по n=−sep на запад (одностороннее, от (700,−sep) до (−200,−sep));
+     * от (100,−sep) на юг двусторонняя до (100,−200). Оба узла перемычки — перекрёстки, их повороты сливаются в UTURN.
+     */
+    private fun uturnRoad(sep: Double): RoadIndex {
+        val nodes = ArrayList<Pair<Double, Double>>()
+        fun add(e: Double, n: Double): Int { nodes += e to n; return nodes.size - 1 }
+        val edges = ArrayList<EdgeSpec>()
+        fun chain(ids: List<Int>, way: Long, flags: Int = 0) {
+            for (i in 0 until ids.size - 1) edges += EdgeSpec(ids[i], ids[i + 1], way, flags)
+        }
+        val ow = RoadPack.FLAG_ONEWAY
+        val east = (0..7).map { add(100.0 * it, 0.0) }
+        val west = (7 downTo -2).map { add(100.0 * it, -sep) }
+        chain(east, 1, ow); chain(listOf(east[5], west[2]), 2, ow); chain(west, 3, ow)
+        chain(listOf(west[6]) + listOf(-100.0, -200.0).map { add(100.0, it) }, 4)
+        return RoadIndex(roadPackOf(enu, nodes, edges), enu)
+    }
+
+    @Test fun standstillJitterBeforeNarrowUTurnKeepsProgress() {
+        val sep = 8.0
+        val f = RouteFollower(uturnRoad(sep), 100.0, -150.0)
+        val r = Run(f)
+        r.path(listOf(0.0 to 0.0, 450.0 to 0.0))
+        r.at(450.0, 0.0, psi = kotlin.math.PI / 2)
+        val uturn = f.maneuvers.indexOfFirst { it.type == ManeuverType.UTURN }
+        assertTrue(uturn > 0, "maneuvers ${f.maneuvers.map { it.type }}")
+        // Стоим 30 с в 50 м до разворота; каждое 4-е обновление позиция на 5 м позади (шум вдоль дороги).
+        val stopStart = r.progress.size
+        for (k in 0 until 60) r.at(if (k % 4 == 3) 445.0 else 450.0, 0.0, psi = kotlin.math.PI / 2, v = 0.0)
+        val stopped = r.progress.subList(stopStart - 1, r.progress.size)
+        val maxJump = stopped.zipWithNext { a, b -> b - a }.maxOrNull()!!
+        assertTrue(maxJump <= 30.0, "progress jumped $maxJump m while stopped")
+        r.path(listOf(450.0 to 0.0, 500.0 to 0.0, 500.0 to -sep, 100.0 to -sep, 100.0 to -150.0))
+        assertTrue(r.ev.filterIsInstance<NavEvent.Prompt>().any { it.maneuver == uturn && it.stage == PromptStage.NOW },
+            "prompts ${r.ev.filterIsInstance<NavEvent.Prompt>().map { it.maneuver to it.stage }}")
+    }
 }
