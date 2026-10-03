@@ -12,6 +12,8 @@ import io.visnav.core.Localizer
 import io.visnav.core.LocalizerConfig
 import io.visnav.core.NavMode
 import io.visnav.core.RefPack
+import io.visnav.core.RoadInfo
+import io.visnav.core.RoadPack
 import io.visnav.core.SensorEvent
 import kotlin.math.PI
 import kotlin.math.cos
@@ -44,6 +46,7 @@ data class ReplayConfig(
     val k: Int = 5,
     val filter: FilterConfig = FilterConfig(),
     val monitor: Boolean = true,
+    val roadConstraint: Boolean = true,
 )
 
 /** Состояние визуальной фиксации на кадре: "off" (визуальный режим выключен), "no_desc" (нет
@@ -55,10 +58,11 @@ data class TrajPoint(
     val visState: String, val stationary: Boolean,
     val mode: NavMode, val health: GnssHealth, val reasons: Set<GnssReason>,
     val injected: String? = null,
+    val road: RoadInfo? = null,
 )
 
 /** Прогон записанной сессии через общий [Localizer] с искусственными пропаданиями, глушением и подменой GNSS. */
-class Replayer(private val pack: RefPack, private val config: ReplayConfig) {
+class Replayer(private val pack: RefPack, private val config: ReplayConfig, private val roads: RoadPack? = null) {
     fun run(
         session: SessionData, outages: List<Outage>,
         jams: List<Jam> = emptyList(), spoofs: List<Spoof> = emptyList(),
@@ -68,7 +72,9 @@ class Replayer(private val pack: RefPack, private val config: ReplayConfig) {
             LocalizerConfig(
                 visual = config.visual, acceptSim = config.acceptSim, minRadiusM = config.minRadiusM,
                 maxRadiusM = config.maxRadiusM, k = config.k, filter = config.filter, monitor = config.monitor,
+                roadConstraint = config.roadConstraint,
             ),
+            roads,
         )
         fun inOutage(t: Double) = outages.any { it.contains(t) }
         fun injected(t: Double): String? = when {
@@ -91,7 +97,7 @@ class Replayer(private val pack: RefPack, private val config: ReplayConfig) {
                     val o = localizer.onFrame(ev.tMs, desc) ?: continue
                     out.add(TrajPoint(
                         o.tMs, o.lat, o.lon, o.sigmaM, inOutage(t), o.visSim, o.visAccepted, o.visState,
-                        o.stationary, o.mode, o.health, o.reasons, injected(t),
+                        o.stationary, o.mode, o.health, o.reasons, injected(t), o.road,
                     ))
                 }
                 is LocEvent -> {

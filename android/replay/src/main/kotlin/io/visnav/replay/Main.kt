@@ -5,6 +5,8 @@ import io.visnav.core.ClockEvent
 import io.visnav.core.GyroEvent
 import io.visnav.core.RefPack
 import io.visnav.core.RefPackMeta
+import io.visnav.core.RoadPack
+import io.visnav.core.RoadPackMeta
 import io.visnav.core.SensorEvent
 import java.io.File
 import java.nio.ByteBuffer
@@ -14,7 +16,7 @@ import kotlin.system.exitProcess
 
 private const val USAGE =
     "usage: replay --session <prefix> --refpack <dir> --out <file> [--outage START_S:LEN_S]... [--jam START_S:LEN_S]... " +
-        "[--spoof START_S:LEN_S:EAST_M:NORTH_M[:RAMP_S]]... [--no-visual] [--no-monitor]"
+        "[--spoof START_S:LEN_S:EAST_M:NORTH_M[:RAMP_S]]... [--no-visual] [--no-monitor] [--roads DIR] [--no-road-constraint]"
 private const val FIRST_SENSOR_TIME_TOLERANCE_MS = 5_000.0
 private const val CLOCK_DRIFT_WARN_MS = 1_000L
 
@@ -22,6 +24,7 @@ fun main(args: Array<String>) {
     var session: String? = null; var refpack: String? = null; var out: String? = null
     var visual = true
     var monitor = true
+    var roadsDir: String? = null; var roadConstraint = true
     val jamSpecs = mutableListOf<String>()
     val spoofSpecs = mutableListOf<String>()
     val outageSpecs = mutableListOf<String>()
@@ -36,6 +39,8 @@ fun main(args: Array<String>) {
             "--spoof" -> spoofSpecs += args.getOrNull(++i) ?: fail("--spoof needs START_S:LEN_S:EAST_M:NORTH_M[:RAMP_S]")
             "--no-visual" -> visual = false
             "--no-monitor" -> monitor = false
+            "--roads" -> roadsDir = args.getOrNull(++i) ?: fail("--roads needs DIR")
+            "--no-road-constraint" -> roadConstraint = false
             else -> fail("unknown argument ${args[i]}")
         }
         i++
@@ -85,13 +90,30 @@ fun main(args: Array<String>) {
         parseSpoof(spec, t0)
             ?: fail("bad --spoof $spec (expected START_S:LEN_S:EAST_M:NORTH_M[:RAMP_S], start >= 0, len > 0, ramp >= 0)")
     }
-    val config = ReplayConfig(visual = visual, monitor = monitor)
-    val points = Replayer(pack, config).run(data, outages, jams, spoofs)
+    val roads = roadsDir?.let { dir ->
+        try { loadRoads(File(dir)) } catch (e: IllegalArgumentException) { fail(e.message ?: "bad roadpack in $dir") }
+    }
+    val config = ReplayConfig(visual = visual, monitor = monitor, roadConstraint = roadConstraint)
+    val points = Replayer(pack, config, roads?.first).run(data, outages, jams, spoofs)
     if (visual && allFramesLackDescriptor(points)) {
         fail("visual mode: no frame had a descriptor (all vis_state=no_desc) — session/refpack mismatch?")
     }
-    TrajectoryWriter.write(File(out), data, config, outages, points, jams, spoofs)
-    println("${points.size} points (${points.count { it.inOutage }} in outages) -> $out")
+    TrajectoryWriter.write(File(out), data, config, outages, points, jams, spoofs, roads?.second?.createdAt)
+    println("${points.size} points (${points.count { it.inOutage }} in outages, ${points.count { it.road?.used == true }} with road constraint) -> $out")
+}
+
+/** Читает roadpack.json и roadpack.bin из каталога; бросает IllegalArgumentException с понятным текстом. */
+internal fun loadRoads(dir: File): Pair<RoadPack, RoadPackMeta> {
+    val json = File(dir, "roadpack.json")
+    val bin = File(dir, "roadpack.bin")
+    require(json.isFile) { "roadpack meta not found: $json" }
+    require(bin.isFile) { "roadpack data not found: $bin" }
+    val meta = RoadPackMeta.parse(json.readText())
+    val pack = RoadPack.parse(ByteBuffer.wrap(bin.readBytes()))
+    require(pack.nodeCount == meta.nodeCount && pack.edgeCount == meta.edgeCount) {
+        "roadpack counts differ from $json"
+    }
+    return pack to meta
 }
 
 /** The earliest IMU (gyro/accel) event, or null if there are none. Restricted to IMU on purpose:
