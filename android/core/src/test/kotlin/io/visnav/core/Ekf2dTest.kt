@@ -159,4 +159,29 @@ class Ekf2dTest {
         val th = PI / 4 // n = (cos, -sin) = (s, -s), s = sqrt(1/2): 0.5·(Pee + Pnn) − Pen
         assertEquals(0.5 * (4.0 + 9.0) - 1.5, f.lateralVariance(th), 1e-12)
     }
+
+    @Test fun inflateHeadingKeepsPsdAndMeetsVariances() {
+        val f = filter(psi = PI / 4)
+        repeat(50) { f.predict(0.1, 0.02) }
+        f.inflateHeading(0.09, 1e-4)
+        assertTrue(f.p[2 * 5 + 2] >= 0.09 && f.p[4 * 5 + 4] >= 1e-4)
+        for (i in 0 until 5) {
+            assertTrue(f.p[i * 5 + i] >= 0.0)
+            for (j in 0 until 5) assertEquals(f.p[i * 5 + j], f.p[j * 5 + i], 1e-12)
+        }
+        for (j in listOf(0, 1, 3)) assertEquals(0.0, f.p[2 * 5 + j], 0.0)
+        // PSD: |p_ij| <= sqrt(p_ii p_jj)
+        for (i in 0 until 5) for (j in 0 until 5) {
+            assertTrue(Math.abs(f.p[i * 5 + j]) <= Math.sqrt(f.p[i * 5 + i] * f.p[j * 5 + j]) + 1e-12)
+        }
+    }
+
+    @Test fun updateLateralDisplacesOnlyAlongTheNormalWithAnisotropicP() {
+        val f = filter(psi = PI / 4)
+        repeat(50) { f.predict(0.1, 0.02) }
+        val e0 = f.x[0]; val n0 = f.x[1]
+        assertTrue(f.updateLateral(e0 + 4.0, n0 - 4.0, PI / 2, 4.0)) // дорога на восток: смещение только по n
+        assertEquals(e0, f.x[0], 1e-9)
+        assertTrue(f.x[1] != n0)
+    }
 }

@@ -1,5 +1,6 @@
 package io.visnav.core
 
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.sqrt
@@ -37,6 +38,8 @@ data class LocalizerOutput(
     val road: RoadInfo? = null,
 )
 
+private const val HEADING_RESET_FRAMES = 3
+private const val MIN_BIAS_VAR_AFTER_RESET = 0.01 * 0.01
 private const val MIN_POS_SIGMA_M = 3.0
 private const val MIN_SPEED_SIGMA_MPS = 0.1
 private const val MIN_HEADING_SIGMA_DEG = 1.0
@@ -76,6 +79,10 @@ class Localizer(
     private var lastReasons: Set<GnssReason> = emptySet()
     private var matcher: MapMatcher? = null
     private var lastGnssFusedT = Double.NEGATIVE_INFINITY
+    private var headingInconsistent = 0
+    /** Диагностика: сколько раз курс восстанавливался по устойчивой невязке с курсом дороги. */
+    internal var headingResets = 0
+        private set
 
     val initialized: Boolean get() = ekf.initialized
     internal val headingSigmaRad: Double get() = sqrt(ekf.headingVariance())
@@ -153,6 +160,7 @@ class Localizer(
             val vSigma = sigma(ev.speedAccMps, DEFAULT_SPEED_ACC_UPDATE, MIN_SPEED_SIGMA_MPS)
             ekf.init(en[0], en[1], psi, v, posSigma, psiSigma, vSigma)
             matcher?.reset()
+            headingInconsistent = 0
             lastGnssFusedT = t
             return
         }
@@ -242,13 +250,26 @@ class Localizer(
             val floor = (sigmaLat / 2) * (sigmaLat / 2)
             val lat = ekf.lateralVariance(match.travelBearing)
             val atFloor = lat <= floor
-            // Шум раздувается так, чтобы апостериорная дисперсия не опускалась ниже границы за один шаг.
+            // Раздувание шума (R): шум раздувается так, чтобы апостериорная дисперсия не опускалась ниже границы за один шаг.
             val r = max(sigmaLat * sigmaLat, floor * lat / (lat - floor))
             used = atFloor || ekf.updateLateral(match.e, match.n, match.travelBearing, sqrt(r))
             val headingSigma = Math.toRadians(config.roadHeadingSigmaDeg)
-            if (used && ekf.x[3] >= config.matchConfig.minHeadingSpeedMps &&
-                ekf.headingVariance() > (headingSigma / 2) * (headingSigma / 2)
-            ) ekf.updateHeading(match.travelBearing, headingSigma)
+            if (used && ekf.x[3] >= config.matchConfig.minHeadingSpeedMps) {
+                // Фильтр может быть самоуверен по курсу (дрейф гироскопа не в модели). Если невязка с курсом дороги
+                // выходит за 3σ несколько кадров подряд, дисперсии ψ и b_g поднимаются и курс подтягивается.
+                // Кадр без прохождения условий (или медленнее порога курса) счётчик не меняет.
+                val res = wrapAngle(match.travelBearing - ekf.x[2])
+                val bound = 3 * sqrt(ekf.headingVariance() + headingSigma * headingSigma)
+                if (abs(res) > bound) headingInconsistent++ else headingInconsistent = 0
+                if (headingInconsistent >= HEADING_RESET_FRAMES) {
+                    ekf.inflateHeading(res * res, MIN_BIAS_VAR_AFTER_RESET)
+                    ekf.updateHeading(match.travelBearing, headingSigma)
+                    headingInconsistent = 0
+                    headingResets++
+                } else if (ekf.headingVariance() > (headingSigma / 2) * (headingSigma / 2)) {
+                    ekf.updateHeading(match.travelBearing, headingSigma)
+                }
+            }
         }
         val ll = enu!!.toLatLon(match.e, match.n)
         return RoadInfo(match.wayId, ll[0], ll[1], match.confidence, used)

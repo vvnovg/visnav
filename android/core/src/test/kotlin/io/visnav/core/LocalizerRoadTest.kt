@@ -5,7 +5,6 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.sin
-import kotlin.test.Ignore
 import kotlin.test.Test
 import kotlin.test.assertTrue
 
@@ -127,6 +126,8 @@ class LocalizerRoadTest {
     }
 
     /** Пары: расстояние до истинной точки и расстояние до истинной дуги (поперечная ошибка). */
+    private var arcResets = 0
+
     private fun runArc(config: LocalizerConfig, roads: RoadPack?): Pair<List<Double>, List<Double>> {
         val localizer = Localizer(pack, config, roads)
         val errs = ArrayList<Double>()
@@ -156,19 +157,18 @@ class LocalizerRoadTest {
                 }
             }
         }
+        arcResets = localizer.headingResets
         return errs to cross
     }
 
-    /**
-     * Пороги брифа не выполняются: дорога держит поперечную ошибку, но вдоль дороги ошибка накапливается
-     * из-за непогашенного дрейфа курса (поправка курса стоит за нижней границей дисперсии курса).
-     */
-    @Test @Ignore("along-track error on a curve exceeds 12 m with a lateral-only road update; see report")
+    /** Без восстановления курса по невязке с дорогой ошибка вдоль дороги копится (дрейф курса не в модели). */
+    @Test
     fun curvedRoadGapStaysOnRoad() {
         val (with, _) = runArc(LocalizerConfig(visual = false), arcRoads())
         val (without, _) = runArc(LocalizerConfig(visual = false), null)
         assertTrue(without.max() > 30.0, "drift without roads must exist: ${without.max()}")
-        assertTrue(with.max() <= 12.0, "with roads: ${with.max()}")
+        println("FIXMETRIC arcAlong with=${with.max()} without=${without.max()} resets=$arcResets")
+        assertTrue(with.max() <= 12.0, "with roads: ${with.max()} resets=$arcResets")
     }
 
     @Test fun curvedRoadGapKeepsCrossTrackError() {

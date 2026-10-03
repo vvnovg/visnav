@@ -93,8 +93,9 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
 
     /**
      * Псевдоизмерение «на оси дороги»: прямая через (e0, n0) с азимутом theta (рад от севера по часовой).
-     * Измерение чисто поперечное, а поправка применяется только к позиции (e, n): частичное обновление
-     * Шмидта, ψ, v и b_g дорога не трогает (ось OSM не точнее полосы и не должна уводить скорость/курс).
+     * Измерение и поправка чисто поперечные: ψ, v и b_g не меняются (частичное обновление Шмидта), а сдвиг
+     * позиции проецируется на нормаль. Без проекции при анизотропной P (вдоль дороги σ велика) K·y имеет
+     * вдоль-дорожную составляющую, и на дуге фильтр отставал от истины на ~1 м/с.
      */
     fun updateLateral(e0: Double, n0: Double, theta: Double, sigma: Double): Boolean {
         require(sigma > 0 && sigma.isFinite()) { "sigma must be positive and finite" }
@@ -102,7 +103,7 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
         val offset = ne * (x[0] - e0) + nn * (x[1] - n0)
         return update(
             arrayOf(doubleArrayOf(ne, nn, 0.0, 0.0, 0.0)), doubleArrayOf(-offset), doubleArrayOf(sigma * sigma),
-            config.gateChi2Scalar, intArrayOf(0, 1),
+            config.gateChi2Scalar, intArrayOf(0, 1), doubleArrayOf(ne, nn),
         )
     }
 
@@ -113,6 +114,19 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
     }
 
     fun headingVariance(): Double = p[idx(2, 2)]
+
+    /**
+     * Возврат доверия к курсу и смещению гироскопа, когда они явно несогласованы с внешним ориентиром:
+     * дисперсии ψ и b_g поднимаются не ниже заданных, их ковариации с остальными состояниями (и между собой)
+     * обнуляются. Результат — блочно-диагональная P из главных подматриц исходной P, то есть остаётся
+     * симметричной и неотрицательно определённой.
+     */
+    fun inflateHeading(minVarPsi: Double, minVarBias: Double) {
+        require(minVarPsi >= 0 && minVarBias >= 0) { "variances must be >= 0" }
+        for (s in intArrayOf(2, 4)) for (j in 0 until N) if (j != s) { p[idx(s, j)] = 0.0; p[idx(j, s)] = 0.0 }
+        p[idx(2, 2)] = max(p[idx(2, 2)], minVarPsi)
+        p[idx(4, 4)] = max(p[idx(4, 4)], minVarBias)
+    }
 
     fun posSigma(): Double = sqrt(max(p[idx(0, 0)], p[idx(1, 1)]))
 
@@ -128,10 +142,12 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
 
     /**
      * Общее обновление: H — строки (m ≤ 2), y — невязка, r — дисперсии шума (диагональ). С `onlyStates`
-     * строки усиления остальных состояний обнуляются (форма Джозефа верна для любого K).
+     * строки усиления остальных состояний обнуляются; с `alongNormal` (скалярное измерение, mask = позиция)
+     * поправка позиции дополнительно проецируется на нормаль. Форма Джозефа верна для любого K.
      */
     private fun update(
         h: Array<DoubleArray>, y: DoubleArray, r: DoubleArray, gate: Double, onlyStates: IntArray? = null,
+        alongNormal: DoubleArray? = null,
     ): Boolean {
         check(initialized) { "filter not initialized" }
         if (y.any { !it.isFinite() }) return false
@@ -154,6 +170,10 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
         // K = PHᵀ S⁻¹ (N×m)
         val k = Array(N) { i -> DoubleArray(m) { b -> (0 until m).sumOf { a -> pht[i][a] * sInv[a][b] } } }
         if (onlyStates != null) for (i in 0 until N) if (i !in onlyStates) k[i].fill(0.0)
+        if (alongNormal != null) { // поправка позиции только вдоль нормали: K_pos := n·(nᵀ K_pos)
+            val kn = alongNormal[0] * k[0][0] + alongNormal[1] * k[1][0]
+            k[0][0] = alongNormal[0] * kn; k[1][0] = alongNormal[1] * kn
+        }
         for (i in 0 until N) x[i] += (0 until m).sumOf { a -> k[i][a] * y[a] }
         x[2] = wrapAngle(x[2])
         // Форма Джозефа: P = (I − KH) P (I − KH)ᵀ + K R Kᵀ
