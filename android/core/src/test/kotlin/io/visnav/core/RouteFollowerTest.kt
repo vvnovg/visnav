@@ -244,13 +244,110 @@ class RouteFollowerTest {
         val pr = prompts.filter { it.maneuver == right }
         assertEquals(listOf(PromptStage.FAR, PromptStage.NEAR, PromptStage.NOW), pr.map { it.stage })
         assertEquals(null, pr[0].thenManeuver)
-        assertEquals("Через 100 м поверните направо, затем поверните налево", pr[1].text)
+        assertEquals("Через 100 м поверните направо, затем налево", pr[1].text)
         assertEquals(left, pr[1].thenManeuver)
-        assertEquals("Поверните направо, затем поверните налево", pr[2].text)
+        assertEquals("Поверните направо, затем налево", pr[2].text)
         assertEquals(left, pr[2].thenManeuver)
         // У второго манёвра «далеко» и «близко» уже покрыты цепочкой — звучит только «сейчас».
         assertEquals(listOf(PromptStage.NOW), prompts.filter { it.maneuver == left }.map { it.stage })
         assertTrue(NavFormat.event(pr[1], enu).contains("\"maneuver\":$right,\"then\":$left,\"stage\":\"near\""))
         assertEquals(1, ev.count { it is NavEvent.Arrived })
+    }
+
+    /**
+     * Разделённая дорога: на восток по n=0 (одностороннее) до (500,0), полукруглый разворот (одностороннее)
+     * на линию n=−gap, по ней на запад (одностороннее) до (−200,−gap); от (100,−gap) на юг двусторонняя до (100,−200).
+     */
+    private fun dividedRoad(gap: Double): Pair<RoadIndex, List<Pair<Double, Double>>> {
+        val nodes = ArrayList<Pair<Double, Double>>()
+        fun add(e: Double, n: Double): Int { nodes += e to n; return nodes.size - 1 }
+        val edges = ArrayList<EdgeSpec>()
+        fun chain(ids: List<Int>, way: Long, flags: Int = 0) {
+            for (i in 0 until ids.size - 1) edges += EdgeSpec(ids[i], ids[i + 1], way, flags)
+        }
+        val ow = RoadPack.FLAG_ONEWAY
+        val east = (0..5).map { add(100.0 * it, 0.0) }
+        val link = (1..5).map { k ->
+            val th = Math.toRadians(90.0 - 30.0 * k)
+            500.0 + gap / 2 * kotlin.math.cos(th) to -gap / 2 + gap / 2 * kotlin.math.sin(th)
+        }
+        val linkIds = link.map { add(it.first, it.second) }
+        val west = (5 downTo -2).map { add(100.0 * it, -gap) }
+        val south = listOf(west[4]) + listOf(-100.0, -200.0).map { add(100.0, it) }
+        chain(east, 1, ow); chain(listOf(east.last()) + linkIds + west.first(), 2, ow); chain(west, 3, ow); chain(south, 4)
+        return RoadIndex(roadPackOf(enu, nodes, edges), enu) to (listOf(50.0 to 0.0, 500.0 to 0.0) + link +
+            listOf(500.0 to -gap, 100.0 to -gap, 100.0 to -150.0))
+    }
+
+    @Test fun narrowDividedRoadUTurnKeepsProgress() {
+        for (gap in listOf(6.0, 8.0)) {
+            val (g, path) = dividedRoad(gap)
+            val f = RouteFollower(g, 100.0, -150.0)
+            val r = Run(f)
+            val trueArc = ArrayList<Double>()
+            var arc = 0.0
+            for (k in 1 until path.size) {
+                val (e0, n0) = path[k - 1]; val (e1, n1) = path[k]
+                val len = kotlin.math.hypot(e1 - e0, n1 - n0)
+                val psi = kotlin.math.atan2(e1 - e0, n1 - n0)
+                var s = 0.0
+                while (s < len) {
+                    r.at(e0 + (e1 - e0) * s / len, n0 + (n1 - n0) * s / len, psi = psi)
+                    trueArc += arc + s; s += 7.5
+                }
+                arc += len
+            }
+            // Путь до конца разворота (точка 7 — (500, −gap)); обратная ветка — следующие 400 м до (100, −gap).
+            // Южный участок не берём: после прибытия (за 25 м до конца) прогресс больше не обновляется.
+            val uturnEnd = path.zipWithNext().take(7).sumOf { (a, b) -> kotlin.math.hypot(b.first - a.first, b.second - a.second) }
+            val lag = trueArc.indices.filter { trueArc[it] >= uturnEnd && trueArc[it] <= uturnEnd + 400.0 }
+                .maxOf { trueArc[it] - r.progress[it] }
+            assertTrue(lag <= 20.0, "gap $gap: progress lags by $lag m on the return leg")
+            val m = r.ev.filterIsInstance<NavEvent.RouteReady>().single().maneuvers
+            val left = m.indexOfFirst { it.type == ManeuverType.LEFT }
+            assertTrue(left > 0, "gap $gap: maneuvers ${m.map { it.type }}")
+            assertTrue(r.ev.filterIsInstance<NavEvent.Prompt>().any { it.maneuver == left && it.stage == PromptStage.NOW },
+                "gap $gap: no NOW for the return-leg turn")
+        }
+    }
+
+    @Test fun passingNearDestEarlyDoesNotArrive() {
+        // На восток по n=0 до (600,0), на север до (600,20), на запад по n=20; цель (460,20). Маршрут проходит
+        // в 20 м от цели у (460,0), когда до конца ещё 300 м.
+        val nodes = ArrayList<Pair<Double, Double>>()
+        fun add(e: Double, n: Double): Int { nodes += e to n; return nodes.size - 1 }
+        val edges = ArrayList<EdgeSpec>()
+        fun chain(ids: List<Int>, way: Long) { for (i in 0 until ids.size - 1) edges += EdgeSpec(ids[i], ids[i + 1], way) }
+        val a = (0..6).map { add(100.0 * it, 0.0) }
+        val c = listOf(a.last()) + listOf(add(600.0, 20.0)) + (5 downTo 1).map { add(100.0 * it, 20.0) }
+        chain(a, 1); chain(c, 2)
+        val f = RouteFollower(RoadIndex(roadPackOf(enu, nodes, edges), enu), 460.0, 20.0,
+            routerConfig = RouterConfig(goalSlackM = 10.0))
+        val r = Run(f)
+        r.path(listOf(0.0 to 0.0, 600.0 to 0.0))
+        assertEquals(1, r.ev.count { it is NavEvent.RouteReady })
+        assertEquals(760.0, f.route!!.lengthM, 1.0)        // 600 + 20 + 140: у (460,0) до конца 300 м
+        assertEquals(0, r.ev.count { it is NavEvent.Arrived })
+        r.path(listOf(600.0 to 0.0, 600.0 to 20.0, 460.0 to 20.0))
+        r.at(460.0, 20.0)
+        assertEquals(1, r.ev.count { it is NavEvent.Arrived })
+    }
+
+    @Test fun longUpdateGapGivesNoStalePrompt() {
+        // Узлы через 10 м, чтобы прежнее окно (200 м) останавливало прогресс у самого поворота.
+        val (wn, we) = straightRoad(0.0, 0.0, 1000.0, 0.0, 10.0, 1, 0)
+        val (sn, se) = straightRoad(1000.0, 0.0, 1000.0, -500.0, 10.0, 2, wn.size, startNode = wn.size - 1)
+        val (en, ee) = straightRoad(1000.0, 0.0, 1300.0, 0.0, 10.0, 3, wn.size + sn.size, startNode = wn.size - 1)
+        val g = RoadIndex(roadPackOf(enu, wn + sn + en, we + se + ee), enu)
+        val f = RouteFollower(g, 1000.0, -400.0)
+        val r = Run(f)
+        r.path(listOf(0.0 to 0.0, 795.0 to 0.0))            // последняя точка — 787,5 м
+        val turn = f.maneuvers.indexOfFirst { it.type == ManeuverType.RIGHT }
+        assertTrue(turn > 0)
+        r.t += 14_500                                         // 15 с без обновлений: 225 м при 15 м/с
+        val tGap = r.t
+        r.path(listOf(1000.0 to -12.5, 1000.0 to -200.0))
+        assertTrue(r.ev.filterIsInstance<NavEvent.Prompt>().none { it.maneuver == turn && it.tMs >= tGap })
+        assertEquals(1, r.ev.count { it is NavEvent.RouteReady })
     }
 }

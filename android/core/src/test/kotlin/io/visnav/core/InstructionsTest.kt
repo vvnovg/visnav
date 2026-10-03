@@ -30,4 +30,14 @@ class InstructionsTest {
         assertEquals("Вы прибыли", Instructions.prompt(m(ManeuverType.ARRIVE), null))
         assertEquals("12-й", Instructions.ordinal(12))
     }
+
+    @Test fun shortActions() {
+        val expected = mapOf(
+            ManeuverType.LEFT to "налево", ManeuverType.RIGHT to "направо", ManeuverType.SLIGHT_LEFT to "левее",
+            ManeuverType.SLIGHT_RIGHT to "правее", ManeuverType.SHARP_LEFT to "резко налево",
+            ManeuverType.SHARP_RIGHT to "резко направо", ManeuverType.UTURN to "разворот", ManeuverType.CONTINUE to "прямо",
+            ManeuverType.ROUNDABOUT to "на кольцо",
+        )
+        for ((t, text) in expected) assertEquals(text, Instructions.shortAction(m(t, "Улица", exit = 2)))
+    }
 }

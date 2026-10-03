@@ -19,21 +19,32 @@ data class NavConfig(
     val offRouteHoldMs: Long = 4000L,
     val rerouteCooldownMs: Long = 10_000L,
     val arriveM: Double = 25.0,
-    /** Прибытие по прямой до цели. */
+    /** Прибытие по прямой до цели — только если по маршруту осталось не больше arriveDirectRemainingM. */
     val arriveDirectM: Double = 30.0,
-    /** Прибытие при остановке (скорость < arriveStopMps) не дальше arriveStopM по маршруту. */
+    val arriveDirectRemainingM: Double = 200.0,
+    /** Прибытие при остановке (конечная скорость < arriveStopMps) не дальше arriveStopM по маршруту. */
     val arriveStopMps: Double = 1.0,
     val arriveStopM: Double = 60.0,
     val backtrackM: Double = 15.0,
-    /** Ветви маршрута не дальше ближайшей + branchSlackM: берётся самая ранняя по маршруту (самопересечения). */
+    /**
+     * Ветви маршрута не дальше ближайшей + branchSlackM: берётся самая ранняя не позади прогресса больше чем на
+     * aheadSlackM (самопересечения, разворот на узкой разделённой дороге); если таких нет — самая ранняя позади.
+     */
     val branchSlackM: Double = 10.0,
+    val aheadSlackM: Double = 3.0,
+    /** Окно поиска вперёд: max(200, 5·v, v·Δt + staleJumpM), не больше maxWindowM (Δt — с прошлого обновления). */
+    val maxWindowM: Double = 2000.0,
     /** Скачок прогресса больше v·Δt + staleJumpM за одно обновление — подсказки на этом обновлении не выдаются. */
     val staleJumpM: Double = 50.0,
     /** Маршрут не «захвачен» (машина ещё не была ближе порога): перестроение — только после сдвига и выдержки. */
     val unacquiredMoveM: Double = 100.0,
     val unacquiredWaitMs: Long = 30_000L,
-    /** Проверка направления маршрута, построенного без курса: только пока прогресс меньше этого. */
+    /**
+     * Проверка направления маршрута, построенного без курса: пока прогресс меньше headingCheckM и только когда
+     * маршрут захвачен или машина ближе headingCheckNearM к нему.
+     */
     val headingCheckM: Double = 50.0,
+    val headingCheckNearM: Double = 15.0,
     val minSpeedMps: Double = 5.0,
 )
 
@@ -113,21 +124,13 @@ class RouteFollower(
             if (tMs - lastRouteAttempt < config.rerouteCooldownMs) return emptyList()
             return listOf(plan(tMs, e, n, psi, reroute = false))
         }
-        // Маршрут построен без курса: при первом достоверном курсе в начале пути проверяем направление.
-        if (!plannedWithHeading && !headingChecked && psi != null) {
-            headingChecked = true
-            val b = initialBearing(r)
-            if (progressM < config.headingCheckM && b != null && abs(wrapAngle(psi - b)) > PI / 2) {
-                return listOf(plan(tMs, e, n, psi, reroute = false))
-            }
-        }
         val speed = if (speedMps.isFinite()) speedMps else 0.0
         val v = max(speed, config.minSpeedMps)
         val sigma = if (sigmaM.isFinite()) sigmaM else 0.0
         val threshold = max(config.offRouteM, min(config.offRouteSigmaK * sigma, config.offRouteSigmaCapM))
         // Прогресс: проекции на отрезки в окне вокруг текущего прогресса.
         val lo = progressM - config.backtrackM
-        val hi = progressM + max(200.0, 5 * v)
+        val hi = progressM + min(config.maxWindowM, maxOf(200.0, 5 * v, v * (dtS ?: 0.0) + config.staleJumpM))
         val segI = ArrayList<Int>(); val segT = ArrayList<Double>(); val segD = ArrayList<Double>(); val segAt = ArrayList<Double>()
         for (i in 1 until r.points.size) {
             if (r.cumM[i] < lo || r.cumM[i - 1] > hi) continue
@@ -141,17 +144,31 @@ class RouteFollower(
         }
         val bestD = segD.minOrNull() ?: Double.POSITIVE_INFINITY
         // Ветви — локальные минимумы расстояния вдоль маршрута (конец отрезка не ветвь, если проекция уходит на
-        // соседний отрезок). Из ветвей не дальше bestD + branchSlackM берётся самая ранняя: на самопересечении
-        // прогресс не перескакивает на дальнюю ветвь.
-        var chosen: Double? = null
+        // соседний отрезок). Из ветвей не дальше bestD + branchSlackM берётся самая ранняя впереди (не позади
+        // прогресса больше чем на aheadSlackM): на самопересечении прогресс не перескакивает на дальнюю ветвь, а на
+        // развороте узкой разделённой дороги не цепляется за встречную ветвь позади. Нет ветвей впереди — самая
+        // ранняя позади.
+        var ahead: Double? = null
+        var behind: Double? = null
         for (k in segI.indices) {
             if (segT[k] >= 1.0 && k + 1 < segI.size && segI[k + 1] == segI[k] + 1 && segT[k + 1] > 0.0) continue
             if (segT[k] <= 0.0 && k > 0 && segI[k - 1] == segI[k] - 1 && segT[k - 1] < 1.0) continue
             if (segAt[k] < lo || segD[k] > bestD + config.branchSlackM) continue
-            if (chosen == null || segAt[k] < chosen) chosen = segAt[k]
+            if (segAt[k] >= progressM - config.aheadSlackM) {
+                if (ahead == null || segAt[k] < ahead) ahead = segAt[k]
+            } else if (behind == null || segAt[k] < behind) behind = segAt[k]
         }
+        val chosen = ahead ?: behind
         val before = progressM
         if (chosen != null) progressM = chosen.coerceAtLeast(0.0)
+        // Маршрут построен без курса: при первом достоверном курсе на маршруте в начале пути проверяем направление.
+        if (!plannedWithHeading && !headingChecked && psi != null && (acquired || bestD <= config.headingCheckNearM)) {
+            headingChecked = true
+            val b = initialBearing(r)
+            if (progressM < config.headingCheckM && b != null && abs(wrapAngle(psi - b)) > PI / 2) {
+                return listOf(plan(tMs, e, n, psi, reroute = false))
+            }
+        }
         // Съезд с маршрута.
         val off = bestD > threshold
         if (off) {
@@ -167,9 +184,9 @@ class RouteFollower(
         }
         val out = ArrayList<NavEvent>()
         val remaining = r.lengthM - progressM
-        if (remaining <= config.arriveM || hypot(e - destE, n - destN) <= config.arriveDirectM ||
-            (speed < config.arriveStopMps && remaining <= config.arriveStopM)
-        ) {
+        val direct = remaining <= config.arriveDirectRemainingM && hypot(e - destE, n - destN) <= config.arriveDirectM
+        val stopped = speedMps.isFinite() && speedMps < config.arriveStopMps && remaining <= config.arriveStopM
+        if (remaining <= config.arriveM || direct || stopped) {
             arrived = true
             out += NavEvent.Prompt(tMs, maneuvers.lastIndex, PromptStage.NOW, Instructions.prompt(maneuvers.last(), null), 0.0)
             out += NavEvent.Arrived(tMs)
@@ -191,7 +208,7 @@ class RouteFollower(
         fun chained(text: String): String {
             if (j == null) return text
             spoken.add(key(j, PromptStage.FAR)); spoken.add(key(j, PromptStage.NEAR))
-            return text + ", затем " + Instructions.action(maneuvers[j])
+            return text + ", затем " + Instructions.shortAction(maneuvers[j])
         }
         when {
             dist <= now && m.type != ManeuverType.ARRIVE && spoken.add(key(i, PromptStage.NOW)) -> {

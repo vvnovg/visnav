@@ -17,8 +17,7 @@ object Instructions {
         }
     }
 
-    /** Действие манёвра со строчной буквы, без расстояния и улицы («поверните налево»). */
-    internal fun action(m: Maneuver): String = when (m.type) {
+    private fun action(m: Maneuver): String = when (m.type) {
         ManeuverType.LEFT -> "поверните налево"
         ManeuverType.RIGHT -> "поверните направо"
         ManeuverType.SLIGHT_LEFT -> "держитесь левее"
@@ -30,6 +29,20 @@ object Instructions {
         ManeuverType.ROUNDABOUT -> "на круговом движении ${ordinal(m.exit)} съезд"
         ManeuverType.DEPART -> "начните движение"
         ManeuverType.ARRIVE -> "пункт назначения"
+    }
+
+    /** Краткое действие для цепочки «…, затем налево»: без глагола, расстояния и улицы. */
+    fun shortAction(m: Maneuver): String = when (m.type) {
+        ManeuverType.LEFT -> "налево"
+        ManeuverType.RIGHT -> "направо"
+        ManeuverType.SLIGHT_LEFT -> "левее"
+        ManeuverType.SLIGHT_RIGHT -> "правее"
+        ManeuverType.SHARP_LEFT -> "резко налево"
+        ManeuverType.SHARP_RIGHT -> "резко направо"
+        ManeuverType.UTURN -> "разворот"
+        ManeuverType.CONTINUE -> "прямо"
+        ManeuverType.ROUNDABOUT -> "на кольцо"
+        ManeuverType.DEPART, ManeuverType.ARRIVE -> action(m)
     }
 
     fun prompt(m: Maneuver, distM: Double?): String {
