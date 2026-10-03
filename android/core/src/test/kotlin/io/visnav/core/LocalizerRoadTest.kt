@@ -21,7 +21,10 @@ class LocalizerRoadTest {
         return roadPackOf(enu, a.first + b.first, a.second + b.second)
     }
 
-    private fun run(config: LocalizerConfig, roads: RoadPack?, biasRadS: Float = 0.005f): List<LocalizerOutput> {
+    private fun run(
+        config: LocalizerConfig, roads: RoadPack?, biasRadS: Float = 0.005f, speed: Double = 10.0,
+        onEnd: (Localizer) -> Unit = {},
+    ): List<LocalizerOutput> {
         val localizer = Localizer(pack, config, roads)
         val out = ArrayList<LocalizerOutput>()
         for (step in 0..12_000) {
@@ -32,10 +35,11 @@ class LocalizerRoadTest {
             localizer.onSensor(AccelEvent(t, 0f, 0f, 9.81f + 0.3f * sin(step.toFloat())))
             localizer.onSensor(GyroEvent(t, 0f, 0f, if (inGap) biasRadS else 0f))
             if (step % 100 == 0 && !inGap) {
-                val ll = enu.toLatLon(step * 0.1, 0.0)
-                localizer.onSensor(LocEvent(t, ll[0], ll[1], 3f, 10f, 0.3f, 90f, 2f))
+                val ll = enu.toLatLon(step * 0.01 * speed, 0.0)
+                localizer.onSensor(LocEvent(t, ll[0], ll[1], 3f, (if (step == 0) maxOf(speed, 3.0) else speed).toFloat(), 0.3f, 90f, 2f))
             }
             if (step % 50 == 0) localizer.onFrame(tMs, null)?.let { out.add(it) }
+            if (step == 8_999) onEnd(localizer)
         }
         return out
     }
@@ -67,5 +71,36 @@ class LocalizerRoadTest {
         val gap = run(LocalizerConfig(visual = false, roadConstraint = false), roads()).filter(::inGap)
         assertTrue(gap.all { it.road != null && !it.road!!.used })
         assertTrue(gap.maxOf(::lateralErrM) > 30.0)
+    }
+
+    private fun offsetRoads(): RoadPack {
+        val a = straightRoad(-200.0, 8.0, 1500.0, 8.0, 100.0, 1, 0)
+        return roadPackOf(enu, a.first, a.second)
+    }
+
+    @Test fun offsetCenterlineDoesNotBlockGnssReturn() {
+        val out = run(LocalizerConfig(visual = false), offsetRoads())
+        val gap = out.filter(::inGap)
+        val maxGap = gap.maxOf(::lateralErrM)
+        val at105 = out.first { it.tMs - t0 >= 105_000 }
+        assertTrue(gap.all { it.road?.used == true }, "constraint used in gap")
+        assertTrue(maxGap <= 12.0, "gap error: $maxGap")
+        assertTrue(lateralErrM(at105) <= 4.0, "error at 105 s: ${lateralErrM(at105)}")
+    }
+
+    @Test fun lateralVarianceNeverCollapsesBelowFloor() {
+        val gap = run(LocalizerConfig(visual = false), roads()).filter(::inGap)
+        val floor = 0.5 * RoadClass.lateralSigmaM(RoadClass.RESIDENTIAL) - 0.1
+        assertTrue(gap.all { it.sigmaM >= floor }, "min sigma ${gap.minOf { it.sigmaM }}")
+    }
+
+    @Test fun noHeadingConstraintBelowHeadingSpeed() {
+        var slow = 0.0; var fast = 0.0
+        val cfg = LocalizerConfig(visual = false)
+        val slowOut = run(cfg, roads(), speed = 2.5) { slow = Math.toDegrees(it.headingSigmaRad) }
+        run(cfg, roads(), speed = 10.0) { fast = Math.toDegrees(it.headingSigmaRad) }
+        assertTrue(slowOut.filter(::inGap).any { it.road?.used == true }, "road used at 2.5 m/s")
+        assertTrue(fast <= 5.0 + 1.0, "heading constrained at speed: $fast")
+        assertTrue(slow > 2 * fast, "heading not constrained when slow: $slow vs $fast")
     }
 }

@@ -16,13 +16,16 @@ data class LocalizerConfig(
     val fusedSigmaScale: Double = 3.0,
     val roadConstraint: Boolean = true,
     val minRoadConfidence: Double = 0.9,
-    val roadHeadingSigmaDeg: Double = 10.0,
+    val roadHeadingSigmaDeg: Double = 3.0,
     val gnssQuietMs: Double = 2000.0,
     val minRoadSpeedMps: Double = 2.0,
     val matchConfig: MatchConfig = MatchConfig(),
 )
 
-/** Привязка к дороге на кадре: OSM way, точка на оси, уверенность, применена ли подсказка фильтру. */
+/**
+ * Привязка к дороге на кадре: OSM way, точка на оси, уверенность. `used` — дорога ограничивает позицию:
+ * поперечная подсказка принята либо пропущена только потому, что дисперсия уже на нижней границе.
+ */
 data class RoadInfo(val wayId: Long, val lat: Double, val lon: Double, val confidence: Double, val used: Boolean)
 
 /** visState: "off", "no_desc", "empty_window", "below", "gated", "ok" (см. M2a). */
@@ -70,6 +73,7 @@ class Localizer(private val pack: RefPack, private val config: LocalizerConfig =
     private var lastGnssFusedT = Double.NEGATIVE_INFINITY
 
     val initialized: Boolean get() = ekf.initialized
+    internal val headingSigmaRad: Double get() = kotlin.math.sqrt(ekf.headingVariance())
     val mode: NavMode get() = modes.mode
 
     private fun predictTo(t: Double) {
@@ -226,8 +230,15 @@ class Localizer(private val pack: RefPack, private val config: LocalizerConfig =
             match.confidence >= config.minRoadConfidence && match.fit && !match.nearJunction &&
             ekf.x[3] >= config.minRoadSpeedMps
         ) {
-            used = ekf.updateLateral(match.e, match.n, match.travelBearing, RoadClass.lateralSigmaM(match.roadClass))
-            if (used) ekf.updateHeading(match.travelBearing, Math.toRadians(config.roadHeadingSigmaDeg))
+            val sigmaLat = RoadClass.lateralSigmaM(match.roadClass)
+            // Нижняя граница дисперсии: дорога не делает фильтр увереннее половины своей сигмы, иначе
+            // вернувшийся GNSS не проходит гейт и фильтр залипает на оси дороги.
+            val atFloor = ekf.lateralVariance(match.travelBearing) <= (sigmaLat / 2) * (sigmaLat / 2)
+            used = atFloor || ekf.updateLateral(match.e, match.n, match.travelBearing, sigmaLat)
+            val headingSigma = Math.toRadians(config.roadHeadingSigmaDeg)
+            if (used && ekf.x[3] >= config.matchConfig.minHeadingSpeedMps &&
+                ekf.headingVariance() > (headingSigma / 2) * (headingSigma / 2)
+            ) ekf.updateHeading(match.travelBearing, headingSigma)
         }
         val ll = enu!!.toLatLon(match.e, match.n)
         return RoadInfo(match.wayId, ll[0], ll[1], match.confidence, used)

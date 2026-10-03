@@ -93,7 +93,8 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
 
     /**
      * Псевдоизмерение «на оси дороги»: прямая через (e0, n0) с азимутом theta (рад от севера по часовой).
-     * Невязка — поперечное смещение до прямой; вдоль дороги состояние не тянется.
+     * Само измерение чисто поперечное (невязка — смещение до прямой); при коррелированной P коэффициент
+     * усиления может сдвинуть и вдоль-дорожную компоненту состояния.
      */
     fun updateLateral(e0: Double, n0: Double, theta: Double, sigma: Double): Boolean {
         require(sigma > 0 && sigma.isFinite()) { "sigma must be positive and finite" }
@@ -104,6 +105,14 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
             config.gateChi2Scalar,
         )
     }
+
+    /** Дисперсия позиции поперёк направления theta: n·P[0:2,0:2]·nᵀ, n = (cos θ, −sin θ). */
+    fun lateralVariance(theta: Double): Double {
+        val ne = cos(theta); val nn = -sin(theta)
+        return ne * ne * p[idx(0, 0)] + 2 * ne * nn * p[idx(0, 1)] + nn * nn * p[idx(1, 1)]
+    }
+
+    fun headingVariance(): Double = p[idx(2, 2)]
 
     fun posSigma(): Double = sqrt(max(p[idx(0, 0)], p[idx(1, 1)]))
 
