@@ -109,7 +109,8 @@ class M1Controller(private val context: Context) {
             }
             bundle = b
             analyzer.set(FrameAnalyzer(intervalMs = 500, inputW = b.meta.inputW, inputH = b.meta.inputH))
-            _state.update { it.copy(loaded = true, roadsLoaded = b.roads != null, status = "База: ${b.pack.count} эталонов, модель ${b.meta.model}") }
+            _state.update { it.copy(loaded = true, roadsLoaded = b.roads != null,
+                status = "База: ${b.pack.count} эталонов, модель ${b.meta.model}") }
             // Parity — диагностика, а не условие готовности: провал не должен блокировать запись.
             try {
                 val parity = ParityCheck.runIfPresent(dataDir, b.embedder, File(logDir, "parity.json"))
@@ -349,7 +350,9 @@ class M1Controller(private val context: Context) {
                 if (failedCount > 0) append(" · ошибок записи датчиков: $failedCount")
                 for (err in closeErrors) append("; $err")
             }
-            _state.update { it.copy(running = false, status = "Ошибка запуска: ${e.message}$suffix") }
+            _state.update { it.copy(running = false, status = "Ошибка запуска: ${e.message}$suffix",
+                navMode = null, sigmaM = null,
+                gnssReasons = emptySet(), road = null) }
         }
     }
 
@@ -399,7 +402,9 @@ class M1Controller(private val context: Context) {
                 if (failedCount > 0) append(" · журнал датчиков прерван после ошибки записи")
                 for (err in closeErrors) append(" · $err")
             }
-            _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}$suffix") }
+            _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}$suffix",
+                navMode = null, sigmaM = null,
+                gnssReasons = emptySet(), road = null) }
         }
     }
 
@@ -443,7 +448,9 @@ class M1Controller(private val context: Context) {
             if (failedCount > 0) append(" · ошибок записи датчиков: $failedCount")
             for (err in closeErrors) append("; $err")
         }
-        _state.update { it.copy(running = false, status = "$message$suffix") }
+        _state.update { it.copy(running = false, status = "$message$suffix",
+                navMode = null, sigmaM = null,
+                gnssReasons = emptySet(), road = null) }
     }
 
     /** Освобождает камеру/GPS/логгер/модель. Вызывать один раз при уничтожении владельца. */

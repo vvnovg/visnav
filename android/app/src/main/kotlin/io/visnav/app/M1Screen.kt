@@ -54,8 +54,10 @@ fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
                     Text(s.road?.let { r ->
                         "Дорога: привязана, ${Math.round(r.confidence * 100)} %" + if (r.used) ", уточняет позицию" else ""
                     } ?: "Дорога: не найдена")
-                    Text("Дороги © участники OpenStreetMap", style = MaterialTheme.typography.bodySmall)
                 }
+            }
+            if (s.roadsLoaded) {
+                Text("Дороги © участники OpenStreetMap", style = MaterialTheme.typography.bodySmall)
             }
             OutlinedButton(
                 onClick = { controller.setMode(if (s.mode == PriorMode.GPS) PriorMode.VISUAL else PriorMode.GPS) },

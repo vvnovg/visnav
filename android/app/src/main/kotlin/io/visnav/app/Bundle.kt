@@ -24,8 +24,16 @@ object BundleLoader {
         val roadsBin = File(dir, "roadpack.bin")
         val roadsJson = File(dir, "roadpack.json")
         check(roadsBin.isFile == roadsJson.isFile) { "граф дорог: нужны оба файла, roadpack.bin и roadpack.json" }
-        val roadsMeta = if (roadsJson.isFile) RoadPackMeta.parse(roadsJson.readText()) else null
-        val roads = if (roadsBin.isFile) RoadPack.parse(ByteBuffer.wrap(roadsBin.readBytes())) else null
+        val roadsMeta = try {
+            if (roadsJson.isFile) RoadPackMeta.parse(roadsJson.readText()) else null
+        } catch (e: Exception) {
+            throw IllegalStateException("граф дорог: ${e.message}", e)
+        }
+        val roads = try {
+            if (roadsBin.isFile) RoadPack.parse(ByteBuffer.wrap(roadsBin.readBytes())) else null
+        } catch (e: Exception) {
+            throw IllegalStateException("граф дорог: ${e.message}", e)
+        }
         if (roads != null && roadsMeta != null) {
             check(roads.nodeCount == roadsMeta.nodeCount && roads.edgeCount == roadsMeta.edgeCount) {
                 "roadpack.bin не совпадает с roadpack.json"
