@@ -26,7 +26,7 @@ object NavFormat {
             "{\"t_ms\":${ev.tMs},\"ev\":\"route\",\"reroute\":${ev.reroute},\"length_m\":${num(ev.route.lengthM)}," +
                 "\"duration_s\":${num(ev.route.durationS)},\"polyline\":[$poly],\"maneuvers\":[$ms]}"
         }
-        is NavEvent.Prompt -> "{\"t_ms\":${ev.tMs},\"ev\":\"prompt\",\"maneuver\":${ev.maneuver}," +
+        is NavEvent.Prompt -> "{\"t_ms\":${ev.tMs},\"ev\":\"prompt\",\"maneuver\":${ev.maneuver},\"then\":${ev.thenManeuver ?: "null"}," +
             "\"stage\":\"${ev.stage.name.lowercase()}\",\"dist_m\":${num(ev.distM)},\"text\":${str(ev.text)}}"
         is NavEvent.Arrived -> "{\"t_ms\":${ev.tMs},\"ev\":\"arrive\"}"
         is NavEvent.RouteFailed -> "{\"t_ms\":${ev.tMs},\"ev\":\"route_failed\"}"

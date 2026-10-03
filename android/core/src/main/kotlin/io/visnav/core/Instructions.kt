@@ -17,7 +17,8 @@ object Instructions {
         }
     }
 
-    private fun action(m: Maneuver): String = when (m.type) {
+    /** Действие манёвра со строчной буквы, без расстояния и улицы («поверните налево»). */
+    internal fun action(m: Maneuver): String = when (m.type) {
         ManeuverType.LEFT -> "поверните налево"
         ManeuverType.RIGHT -> "поверните направо"
         ManeuverType.SLIGHT_LEFT -> "держитесь левее"
