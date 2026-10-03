@@ -22,6 +22,8 @@ class RoadIndex(val pack: RoadPack, val enu: Enu, private val cellM: Double = 50
     val degree = IntArray(pack.nodeCount)
     /** Расстояние по графу (без учёта направления) до ближайшего узла со степенью ≠ 2; дальше 200 м — бесконечность. */
     val junctionDist = DoubleArray(pack.nodeCount) { Double.POSITIVE_INFINITY }
+    /** Рёбра, касающиеся узла, независимо от направления (петля — один раз). */
+    val incident: Array<IntArray>
     val outNodes: Array<IntArray>
     val outLen: Array<DoubleArray>
     private val grid = HashMap<Long, MutableList<Int>>()
@@ -30,6 +32,7 @@ class RoadIndex(val pack: RoadPack, val enu: Enu, private val cellM: Double = 50
         for (i in 0 until pack.nodeCount) {
             val en = enu.toEn(pack.lats[i], pack.lons[i]); nodeE[i] = en[0]; nodeN[i] = en[1]
         }
+        val inc = Array(pack.nodeCount) { ArrayList<Int>() }
         val outN = Array(pack.nodeCount) { ArrayList<Int>() }
         val outL = Array(pack.nodeCount) { ArrayList<Double>() }
         for (k in 0 until pack.edgeCount) {
@@ -37,6 +40,7 @@ class RoadIndex(val pack: RoadPack, val enu: Enu, private val cellM: Double = 50
             val de = nodeE[b] - nodeE[a]; val dn = nodeN[b] - nodeN[a]
             length[k] = hypot(de, dn); bearing[k] = atan2(de, dn)
             degree[a]++; degree[b]++
+            inc[a].add(k); if (b != a) inc[b].add(k)
             outN[a].add(b); outL[a].add(length[k])
             if (!pack.oneway(k)) { outN[b].add(a); outL[b].add(length[k]) }
             for (cx in cell(minOf(nodeE[a], nodeE[b]))..cell(maxOf(nodeE[a], nodeE[b]))) {
@@ -59,6 +63,7 @@ class RoadIndex(val pack: RoadPack, val enu: Enu, private val cellM: Double = 50
                 if (nd <= JUNCTION_SEARCH_M && nd < junctionDist[v]) { junctionDist[v] = nd; jq.add(nd to v) }
             }
         }
+        incident = Array(pack.nodeCount) { inc[it].toIntArray() }
         outNodes = Array(pack.nodeCount) { outN[it].toIntArray() }
         outLen = Array(pack.nodeCount) { outL[it].toDoubleArray() }
     }

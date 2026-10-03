@@ -41,4 +41,29 @@ class RoadPackTest {
         assertEquals(6.0, RoadClass.lateralSigmaM(RoadClass.PRIMARY))
         assertEquals(4.0, RoadClass.lateralSigmaM(RoadClass.RESIDENTIAL))
     }
+
+    private val fixtureV2 = File("../../research/vpr_bench/tests/data/roadpack_v2_fixture")
+
+    @Test fun parsesV2Fixture() {
+        val pack = RoadPack.parse(ByteBuffer.wrap(File(fixtureV2, "roadpack.bin").readBytes()))
+        assertEquals("Тверская улица", pack.name(0)); assertEquals(null, pack.name(1))
+        assertEquals(20 / 3.6, pack.speedMps(0), 1e-9); assertEquals(48 / 3.6, pack.speedMps(1), 1e-9)
+        assertTrue(pack.roundabout(1)); assertFalse(pack.roundabout(0))
+        assertEquals(listOf(TurnRestriction(0, 1, 1, false), TurnRestriction(1, 1, 0, true)), pack.restrictions)
+    }
+
+    @Test fun v1FixtureGetsDefaults() {
+        val pack = RoadPack.parse(ByteBuffer.wrap(File(fixture, "roadpack.bin").readBytes()))
+        assertEquals(RoadClass.defaultSpeedKmh(RoadClass.RESIDENTIAL) / 3.6, pack.speedMps(0), 1e-9)
+        assertEquals(null, pack.name(0)); assertTrue(pack.restrictions.isEmpty())
+    }
+
+    @Test fun rejectsV2TrailingBytes() {
+        val raw = File(fixtureV2, "roadpack.bin").readBytes()
+        assertFailsWith<IllegalArgumentException> { RoadPack.parse(ByteBuffer.wrap(raw + byteArrayOf(0))) }
+    }
+
+    @Test fun defaultSpeedTable() {
+        assertEquals(listOf(90, 70, 60, 50, 40, 30, 20, 10, 10), (1..9).map { RoadClass.defaultSpeedKmh(it) })
+    }
 }
