@@ -10,8 +10,11 @@ object Instructions {
 
     fun distanceText(m: Double): String = when {
         m < 100 -> "${maxOf(10, (m / 10).roundToInt() * 10)} м"
-        m < 1000 -> "${(m / 50).roundToInt() * 50} м"
-        else -> "${"%.1f".format(java.util.Locale.ROOT, m / 1000).replace('.', ',')} км"
+        else -> {
+            val r = (m / 50).roundToInt() * 50
+            if (r < 1000) "$r м"
+            else "%.1f".format(java.util.Locale.ROOT, r / 1000.0).removeSuffix(".0").replace('.', ',') + " км"
+        }
     }
 
     private fun action(m: Maneuver): String = when (m.type) {
@@ -23,7 +26,7 @@ object Instructions {
         ManeuverType.SHARP_RIGHT -> "резко поверните направо"
         ManeuverType.UTURN -> "развернитесь"
         ManeuverType.CONTINUE -> "продолжайте прямо"
-        ManeuverType.ROUNDABOUT -> "на круговом движении — ${ordinal(m.exit)} съезд"
+        ManeuverType.ROUNDABOUT -> "на круговом движении ${ordinal(m.exit)} съезд"
         ManeuverType.DEPART -> "начните движение"
         ManeuverType.ARRIVE -> "пункт назначения"
     }

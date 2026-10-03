@@ -36,9 +36,96 @@ class ManeuversTest {
         val idx = RoadIndex(p, enu)
         val slight = buildManeuvers(assertNotNull(Router(idx).route(0.0, 0.0, null, 600.0, 150.0)), idx)
         assertEquals(ManeuverType.SLIGHT_LEFT, slight[1].type)       // ≈27° влево
+        // Прямо на Г: конкурент Б уходит на ≈27° левее курса, маршрут правее его — это развилка, а не «прямо».
         val straight = buildManeuvers(assertNotNull(Router(idx).route(0.0, 0.0, null, 600.0, 0.0)), idx)
-        assertEquals(ManeuverType.CONTINUE, straight[1].type)        // прямо, сменилась улица
+        assertEquals(ManeuverType.SLIGHT_RIGHT, straight[1].type)
         assertEquals("Г", straight[1].street)
+    }
+
+    @Test fun continueOnlyWhenStreetNameChangesToNonNull() {
+        // Боковая улица под 90° — не конкурент; прямо.
+        val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 600.0 to 0.0, 300.0 to 300.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2), EdgeSpec(1, 3, 3))
+        val renamed = RoadIndex(named(nodes, edges, listOf("А", "Б", "В")), enu)
+        val ms = buildManeuvers(assertNotNull(Router(renamed).route(0.0, 0.0, null, 600.0, 0.0)), renamed)
+        assertEquals(listOf(ManeuverType.DEPART, ManeuverType.CONTINUE, ManeuverType.ARRIVE), types(ms))
+        val same = RoadIndex(named(nodes, edges, listOf("А", "А", "В")), enu)
+        assertEquals(2, buildManeuvers(assertNotNull(Router(same).route(0.0, 0.0, null, 600.0, 0.0)), same).size)
+        val unnamed = RoadIndex(named(nodes, edges, listOf("А", null, "В")), enu)
+        assertEquals(2, buildManeuvers(assertNotNull(Router(unnamed).route(0.0, 0.0, null, 600.0, 0.0)), unnamed).size)
+    }
+
+    @Test fun forkOfTwoUnnamedBranches() {
+        val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 600.0 to 52.9, 600.0 to -52.9)   // ветки ±10° от курса
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2), EdgeSpec(1, 3, 3))
+        val idx = RoadIndex(named(nodes, edges, listOf(null, null, null)), enu)
+        val right = buildManeuvers(assertNotNull(Router(idx).route(0.0, 0.0, null, 600.0, -52.9)), idx)
+        assertEquals(ManeuverType.SLIGHT_RIGHT, right[1].type)
+        val left = buildManeuvers(assertNotNull(Router(idx).route(0.0, 0.0, null, 600.0, 52.9)), idx)
+        assertEquals(ManeuverType.SLIGHT_LEFT, left[1].type)
+    }
+
+    @Test fun bendAtNodeWithInboundOnlyThirdEdgeIsNotAManeuver() {
+        // Излом 30° влево; третье ребро односторонне В узел (под 10° влево от курса) — выехать по нему нельзя.
+        val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 560.0 to 150.0, 600.0 to 52.9)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 1), EdgeSpec(3, 1, 2, RoadPack.FLAG_ONEWAY))
+        val idx = RoadIndex(named(nodes, edges, listOf("А", "А", "Б")), enu)
+        val ms = buildManeuvers(assertNotNull(Router(idx).route(0.0, 0.0, null, 560.0, 150.0)), idx)
+        assertEquals(listOf(ManeuverType.DEPART, ManeuverType.ARRIVE), types(ms))
+    }
+
+    @Test fun namedMotorwayWithUnnamedLinkIsFork() {
+        val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 600.0 to 0.0, 600.0 to -63.8)   // съезд 12° вправо
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 1), EdgeSpec(1, 3, 2))
+        val idx = RoadIndex(named(nodes, edges, listOf("МКАД", "МКАД", null)), enu)
+        val ms = buildManeuvers(assertNotNull(Router(idx).route(0.0, 0.0, null, 600.0, -63.8)), idx)
+        assertEquals(ManeuverType.SLIGHT_RIGHT, ms[1].type)
+    }
+
+    @Test fun uTurnThroughMedianGap() {
+        // Налево в разрыв 15 м и снова налево на встречную проезжую часть — один разворот.
+        val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 300.0 to 15.0, -100.0 to 15.0, 600.0 to 0.0, 600.0 to 15.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2), EdgeSpec(2, 3, 3), EdgeSpec(1, 4, 1), EdgeSpec(2, 5, 3))
+        val idx = RoadIndex(named(nodes, edges, listOf("А", "Разрыв", "Б", "А", "Б")), enu)
+        val router = Router(idx, RouterConfig(snapRadiusM = 5.0, destSnapRadiusM = 5.0))
+        val ms = buildManeuvers(assertNotNull(router.route(0.0, 0.0, null, -100.0, 15.0)), idx)
+        assertEquals(listOf(ManeuverType.DEPART, ManeuverType.UTURN, ManeuverType.ARRIVE), types(ms))
+        assertEquals("Б", ms[1].street)
+    }
+
+    @Test fun roundaboutSplitArmDoesNotCountEntryOnlyNode() {
+        // Восточный подъезд расщеплён: въезд-only в Ein, съезд-only из Eout, 12 м по кольцу. Выход на север — 2-й.
+        val nodes = listOf(0.0 to -50.0, 49.6 to -6.1, 49.6 to 6.1, 0.0 to 50.0, -50.0 to 0.0,
+            0.0 to -300.0, 300.0 to -6.1, 300.0 to 6.1, 0.0 to 300.0, -300.0 to 0.0)
+        val ring = RoadPack.FLAG_ONEWAY or RoadPack.FLAG_ROUNDABOUT
+        val edges = listOf(
+            EdgeSpec(0, 1, 10, ring), EdgeSpec(1, 2, 10, ring), EdgeSpec(2, 3, 10, ring), EdgeSpec(3, 4, 10, ring),
+            EdgeSpec(4, 0, 10, ring),
+            EdgeSpec(5, 0, 1), EdgeSpec(6, 1, 2, RoadPack.FLAG_ONEWAY), EdgeSpec(2, 7, 3, RoadPack.FLAG_ONEWAY),
+            EdgeSpec(3, 8, 4), EdgeSpec(4, 9, 5),
+        )
+        val idx = RoadIndex(named(nodes, edges, listOf(null, null, null, null, null, "Юг", "ВхВ", "ВыхВ", "Север", "Запад")), enu)
+        val ms = buildManeuvers(assertNotNull(Router(idx).route(0.0, -300.0, null, 0.0, 300.0)), idx)
+        assertEquals(listOf(ManeuverType.DEPART, ManeuverType.ROUNDABOUT, ManeuverType.ARRIVE), types(ms))
+        assertEquals(2, ms[1].exit); assertEquals("Север", ms[1].street)
+    }
+
+    @Test fun routeStartingOrEndingInsideRingHasNoRoundaboutManeuver() {
+        val nodes = listOf(0.0 to -50.0, 50.0 to 0.0, 0.0 to 50.0, -50.0 to 0.0,
+            0.0 to -300.0, 300.0 to 0.0, 0.0 to 300.0, -300.0 to 0.0)
+        val ring = RoadPack.FLAG_ONEWAY or RoadPack.FLAG_ROUNDABOUT
+        val edges = listOf(
+            EdgeSpec(0, 1, 10, ring), EdgeSpec(1, 2, 10, ring), EdgeSpec(2, 3, 10, ring), EdgeSpec(3, 0, 10, ring),
+            EdgeSpec(4, 0, 1), EdgeSpec(1, 5, 2), EdgeSpec(2, 6, 3), EdgeSpec(3, 7, 4),
+        )
+        val idx = RoadIndex(named(nodes, edges, listOf(null, null, null, null, "Юг", "Восток", "Север", "Запад")), enu)
+        val router = Router(idx, RouterConfig(snapRadiusM = 5.0, destSnapRadiusM = 5.0))
+        // Старт на кольце → съезд на север.
+        val fromRing = buildManeuvers(assertNotNull(router.route(25.0, -25.0, null, 0.0, 300.0)), idx)
+        assertEquals(listOf(ManeuverType.DEPART, ManeuverType.ARRIVE), types(fromRing))
+        // Финиш на кольце.
+        val toRing = buildManeuvers(assertNotNull(router.route(0.0, -300.0, null, 25.0, 25.0)), idx)
+        assertEquals(listOf(ManeuverType.DEPART, ManeuverType.ARRIVE), types(toRing))
     }
 
     @Test fun roundaboutExitNumber() {
