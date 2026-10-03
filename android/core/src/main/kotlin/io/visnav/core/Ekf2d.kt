@@ -91,6 +91,20 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
         )
     }
 
+    /**
+     * Псевдоизмерение «на оси дороги»: прямая через (e0, n0) с азимутом theta (рад от севера по часовой).
+     * Невязка — поперечное смещение до прямой; вдоль дороги состояние не тянется.
+     */
+    fun updateLateral(e0: Double, n0: Double, theta: Double, sigma: Double): Boolean {
+        require(sigma > 0 && sigma.isFinite()) { "sigma must be positive and finite" }
+        val ne = cos(theta); val nn = -sin(theta) // нормаль к направлению (sin θ, cos θ)
+        val offset = ne * (x[0] - e0) + nn * (x[1] - n0)
+        return update(
+            arrayOf(doubleArrayOf(ne, nn, 0.0, 0.0, 0.0)), doubleArrayOf(-offset), doubleArrayOf(sigma * sigma),
+            config.gateChi2Scalar,
+        )
+    }
+
     fun posSigma(): Double = sqrt(max(p[idx(0, 0)], p[idx(1, 1)]))
 
     /** χ²-расстояние фикса позиции до прогноза (как в гейте updatePosition), без изменения состояния. */

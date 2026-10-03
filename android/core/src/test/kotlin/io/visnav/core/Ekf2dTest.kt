@@ -123,4 +123,20 @@ class Ekf2dTest {
         assertContentEquals(before.first, f.x); assertContentEquals(before.second, f.p)
         assertFailsWith<IllegalArgumentException> { f.positionD2(0.0, 0.0, 0.0) }
     }
+
+    @Test fun updateLateralPullsOnlyAcrossTheRoad() {
+        val ekf = Ekf2d()
+        ekf.init(0.0, 10.0, Math.PI / 2, 10.0, 10.0, 0.1, 1.0)
+        // Дорога на восток через (0, 0): поперечное смещение = 10 м к северу.
+        assertTrue(ekf.updateLateral(0.0, 0.0, Math.PI / 2, 4.0))
+        assertTrue(ekf.x[1] < 3.0, "n=${ekf.x[1]}")
+        assertEquals(0.0, ekf.x[0], 1e-9)
+    }
+
+    @Test fun updateLateralIsGated() {
+        val ekf = Ekf2d()
+        ekf.init(0.0, 1000.0, Math.PI / 2, 10.0, 3.0, 0.1, 1.0)
+        assertFalse(ekf.updateLateral(0.0, 0.0, Math.PI / 2, 4.0))
+        assertEquals(1000.0, ekf.x[1], 1e-9)
+    }
 }

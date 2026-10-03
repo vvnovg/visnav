@@ -14,13 +14,23 @@ data class LocalizerConfig(
     val monitorConfig: MonitorConfig = MonitorConfig(),
     val modeConfig: ModeConfig = ModeConfig(),
     val fusedSigmaScale: Double = 3.0,
+    val roadConstraint: Boolean = true,
+    val minRoadConfidence: Double = 0.9,
+    val roadHeadingSigmaDeg: Double = 10.0,
+    val gnssQuietMs: Double = 2000.0,
+    val minRoadSpeedMps: Double = 2.0,
+    val matchConfig: MatchConfig = MatchConfig(),
 )
+
+/** Привязка к дороге на кадре: OSM way, точка на оси, уверенность, применена ли подсказка фильтру. */
+data class RoadInfo(val wayId: Long, val lat: Double, val lon: Double, val confidence: Double, val used: Boolean)
 
 /** visState: "off", "no_desc", "empty_window", "below", "gated", "ok" (см. M2a). */
 data class LocalizerOutput(
     val tMs: Long, val lat: Double, val lon: Double, val sigmaM: Double,
     val visSim: Float?, val visAccepted: Boolean?, val visState: String, val stationary: Boolean,
     val mode: NavMode, val health: GnssHealth, val reasons: Set<GnssReason>,
+    val road: RoadInfo? = null,
 )
 
 private const val MIN_POS_SIGMA_M = 3.0
@@ -42,7 +52,7 @@ private fun sigma(v: Float?, default: Double, floor: Double): Double =
  * Общий конвейер локализации (фильтр M2a + монитор GNSS + режимы FR-15). Время — мс настенных часов.
  * С `monitor = false` ведёт себя как Replayer из M2a: режим всегда GNSS.
  */
-class Localizer(private val pack: RefPack, private val config: LocalizerConfig = LocalizerConfig()) {
+class Localizer(private val pack: RefPack, private val config: LocalizerConfig = LocalizerConfig(), private val roads: RoadPack? = null) {
     private val index = GeoIndex(pack)
     private val ekf = Ekf2d(config.filter)
     private val yaw = YawRate()
@@ -56,6 +66,8 @@ class Localizer(private val pack: RefPack, private val config: LocalizerConfig =
     private var lastVisualOk: Double? = null
     private var lastHealth = GnssHealth.GOOD
     private var lastReasons: Set<GnssReason> = emptySet()
+    private var matcher: MapMatcher? = null
+    private var lastGnssFusedT = Double.NEGATIVE_INFINITY
 
     val initialized: Boolean get() = ekf.initialized
     val mode: NavMode get() = modes.mode
@@ -105,6 +117,8 @@ class Localizer(private val pack: RefPack, private val config: LocalizerConfig =
                 val vSigma = sigma(ev.speedAccMps, DEFAULT_SPEED_ACC_INIT, MIN_SPEED_SIGMA_MPS)
                 ekf.init(0.0, 0.0, Math.toRadians(brg.toDouble()), spd.toDouble(), posSigma, psiSigma, vSigma)
                 lastT = t
+                matcher = roads?.let { MapMatcher(RoadIndex(it, enu!!), config.matchConfig) }
+                lastGnssFusedT = t
                 monitor.onFix(ev, null, null, null) // первый фикс — тоже «последний фикс» для монитора
             }
             return
@@ -128,6 +142,8 @@ class Localizer(private val pack: RefPack, private val config: LocalizerConfig =
             val psiSigma = Math.toRadians(sigma(ev.bearingAccDeg, DEFAULT_HEADING_ACC_DEG_UPDATE, MIN_HEADING_SIGMA_DEG))
             val vSigma = sigma(ev.speedAccMps, DEFAULT_SPEED_ACC_UPDATE, MIN_SPEED_SIGMA_MPS)
             ekf.init(en[0], en[1], psi, v, posSigma, psiSigma, vSigma)
+            matcher?.reset()
+            lastGnssFusedT = t
             return
         }
         if (config.monitor) updateMode(t)
@@ -143,7 +159,7 @@ class Localizer(private val pack: RefPack, private val config: LocalizerConfig =
 
     private fun applyFix(ev: LocEvent, en: DoubleArray, posSigma: Double, scale: Double) {
         val spd = ev.speedMps; val brg = ev.bearingDeg
-        ekf.updatePosition(en[0], en[1], posSigma * scale)
+        if (ekf.updatePosition(en[0], en[1], posSigma * scale)) lastGnssFusedT = ev.tMs
         if (spd != null) {
             val spdSigma = sigma(ev.speedAccMps, DEFAULT_SPEED_ACC_UPDATE, MIN_SPEED_SIGMA_MPS)
             ekf.updateSpeed(spd.toDouble(), spdSigma * scale)
@@ -191,13 +207,29 @@ class Localizer(private val pack: RefPack, private val config: LocalizerConfig =
                 }
             }
         }
+        val road = matcher?.let { stepRoad(it, t) }
         // Режим и состояние обновляются на каждом кадре, чтобы глушение без визуальных фиксаций
         // не оставляло режим GNSS навсегда, а VISUAL — не переходил в DEAD_RECKONING.
         if (config.monitor) updateMode(t)
         val ll = enu!!.toLatLon(ekf.x[0], ekf.x[1])
         return LocalizerOutput(
             tMs, ll[0], ll[1], ekf.posSigma(), visSim, visOk, visState, stationary.isStationary(t),
-            modes.mode, lastHealth, lastReasons,
+            modes.mode, lastHealth, lastReasons, road,
         )
+    }
+
+    /** Шаг привязки к дороге; подсказка фильтру — только когда GNSS давно не сливался и привязка уверена. */
+    private fun stepRoad(m: MapMatcher, t: Double): RoadInfo? {
+        val match = m.step(ekf.x[0], ekf.x[1], ekf.posSigma(), ekf.x[2], ekf.x[3]) ?: return null
+        var used = false
+        if (config.roadConstraint && t - lastGnssFusedT > config.gnssQuietMs &&
+            match.confidence >= config.minRoadConfidence && match.fit && !match.nearJunction &&
+            ekf.x[3] >= config.minRoadSpeedMps
+        ) {
+            used = ekf.updateLateral(match.e, match.n, match.travelBearing, RoadClass.lateralSigmaM(match.roadClass))
+            if (used) ekf.updateHeading(match.travelBearing, Math.toRadians(config.roadHeadingSigmaDeg))
+        }
+        val ll = enu!!.toLatLon(match.e, match.n)
+        return RoadInfo(match.wayId, ll[0], ll[1], match.confidence, used)
     }
 }
