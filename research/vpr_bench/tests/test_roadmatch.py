@@ -47,3 +47,9 @@ def test_dense_nodes_parallel_roads():
     rnd = random.Random(4)
     snaps = match_track(net, _track([(rnd.gauss(0, 5), 10.0 * i) for i in range(300)]))
     assert sum(s is not None and s.way_id == 1 for s in snaps) >= 294
+
+
+def test_snap_reports_distance_to_road():
+    net = RoadNet(graph_from_lines([(1, line(0, -100, 0, 1100), 0, 7)]))
+    snaps = match_track(net, _track([(12.0, 10.0 * i) for i in range(50)]))
+    assert all(s is not None and abs(s.dist_m - 12.0) < 0.1 for s in snaps)

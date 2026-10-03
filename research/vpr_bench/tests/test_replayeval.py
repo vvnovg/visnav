@@ -310,3 +310,13 @@ def test_cli_mismatched_sessions(tmp_path):
     log.write_text("\n".join(log_lines) + "\n")
     out = tmp_path / "r.md"
     assert main(["replay-eval", "--traj", str(traj), "--log", str(log), "--out", str(out)]) == 2
+
+
+def test_report_shows_osm_attribution_when_roads_loaded(tmp_path):
+    p = _traj(tmp_path, lambda s: 4.0)
+    header, rows = read_trajectory(p)
+    plain = render_replay_report(evaluate_replay(header, rows, _frames()))
+    assert "OpenStreetMap" not in plain
+    header["roads"] = "2026-09-01T00:00:00Z"
+    report = render_replay_report(evaluate_replay(header, rows, _frames()))
+    assert "Дорожные данные © участники OpenStreetMap, ODbL 1.0." in report

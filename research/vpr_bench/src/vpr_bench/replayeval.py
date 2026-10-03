@@ -67,6 +67,7 @@ class ReplayResult:
     vis_counts: dict[str, int] = field(default_factory=dict)  # only populated when visual
     false_stationary_pct: float = float("nan")
     missed_stationary_pct: float = float("nan")
+    roads: str | None = None  # created_at графа дорог из заголовка replay
 
     def has_data(self, min_outage_dist_m: float = TABLE_MIN_OUTAGE_DIST_M) -> bool:
         """Check if there is data to evaluate: visual mode needs n_points > 0;
@@ -237,6 +238,7 @@ def evaluate_replay(
         vis_counts=whole_vis_counts if visual else {},
         false_stationary_pct=whole_false_pct,
         missed_stationary_pct=whole_missed_pct,
+        roads=header.get("roads"),
     )
 
 
@@ -305,4 +307,6 @@ def render_replay_report(r: ReplayResult, min_outage_dist_m: float = TABLE_MIN_O
             lines += ["", "Визуальные фиксации по пропаданиям:"]
             for i, o in enumerate(shown, start=1):
                 lines.append(f"- Пропадание {i} ({(o.end_ms - o.start_ms) / 1000:.0f} с): {_vis_state_line(o.vis_counts)}")
+    if r.roads:
+        lines += ["", "Дорожные данные © участники OpenStreetMap, ODbL 1.0."]
     return "\n".join(lines) + "\n"

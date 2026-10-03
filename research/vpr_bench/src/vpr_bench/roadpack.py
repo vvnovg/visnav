@@ -50,7 +50,7 @@ def write_roadpack(out_dir: Path, g: RoadGraph, meta: dict) -> Path:
         f.write(np.asarray(g.edge_flags, dtype="u1").tobytes())
         f.write(np.asarray(g.edge_class, dtype="u1").tobytes())
     full = {**meta, "format": "VNRD/1", "node_count": n, "edge_count": m}
-    (out_dir / "roadpack.json").write_text(json.dumps(full, ensure_ascii=False, indent=2) + "\n")
+    (out_dir / "roadpack.json").write_text(json.dumps(full, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return out_dir / "roadpack.bin"
 
 
@@ -78,5 +78,5 @@ def read_roadpack(dir_: Path) -> tuple[RoadGraph, dict]:
     way = take("<i8", m, 8)
     fr, to = take("<i4", m, 4), take("<i4", m, 4)
     flags, cls = take("u1", m, 1), take("u1", m, 1)
-    meta = json.loads((dir_ / "roadpack.json").read_text())
+    meta = json.loads((dir_ / "roadpack.json").read_text(encoding="utf-8"))
     return RoadGraph(lats, lons, way, fr.astype(np.int32), to.astype(np.int32), flags, cls), meta

@@ -24,6 +24,7 @@ class Snap:
     way_id: int
     lat: float
     lon: float
+    dist_m: float  # расстояние от точки GPS до точки привязки на оси дороги
 
 
 @dataclass(frozen=True)
@@ -141,7 +142,7 @@ def match_track(net: RoadNet, track: list[TrackPoint], radius_m: float = 30.0, s
         for i, states, _, back in reversed(chain):
             s = states[j]
             lat, lon = net.to_ll(s.pe, s.pn)
-            out[i] = Snap(int(net.g.edge_way[s.edge]), lat, lon)
+            out[i] = Snap(int(net.g.edge_way[s.edge]), lat, lon, s.dist)
             j = back[j]
         chain.clear()
 
