@@ -67,15 +67,23 @@ class Router(private val index: RoadIndex, private val config: RouterConfig = Ro
         return only.isEmpty() || only.any { it.toEdge == toEdge }
     }
 
+    /**
+     * Маршрут от точки старта до цели. headingRad должен быть null, если машина не едет со скоростью ≥ 3 м/с с
+     * достоверным курсом: на малой скорости курс — шум. Ответственность за это — на вызывающем.
+     */
     fun route(fromE: Double, fromN: Double, headingRad: Double?, toE: Double, toN: Double): Route? {
         val startsAll = candidates(fromE, fromN, config.snapRadiusM)
         val goalsAll = candidates(toE, toN, config.destSnapRadiusM)
         if (startsAll.isEmpty() || goalsAll.isEmpty()) return null
-        val nearestStart = startsAll.minOf { it.proj.distM }
-        val near = startsAll.filter { it.proj.distM <= nearestStart + config.startSlackM }
-        // С курсом — только кандидаты, в чью сторону едем (иначе штраф за встречное направление остаётся).
-        val starts = if (headingRad == null) near else
-            near.filter { abs(wrapAngle(headingRad - travelBearing(it.proj.edge, it.forward))) <= PI / 2 }.ifEmpty { near }
+        fun withinSlack(cs: List<Cand>): List<Cand> {
+            val nearestStart = cs.minOf { it.proj.distM }
+            return cs.filter { it.proj.distM <= nearestStart + config.startSlackM }
+        }
+        // С курсом: сначала кандидаты, в чью сторону едем (≤ 90°), затем запас startSlackM внутри них; если таких нет —
+        // запас по всем кандидатам (штраф за встречное направление тогда остаётся).
+        val starts = (if (headingRad == null) null else
+            startsAll.filter { abs(wrapAngle(headingRad - travelBearing(it.proj.edge, it.forward))) <= PI / 2 }
+                .takeIf { it.isNotEmpty() }?.let { withinSlack(it) }) ?: withinSlack(startsAll)
         val nearest = goalsAll.minOf { it.proj.distM }
         val goals = goalsAll.filter { it.proj.distM <= nearest + config.goalSlackM }
         val goalOf = HashMap<Int, MutableList<Cand>>()

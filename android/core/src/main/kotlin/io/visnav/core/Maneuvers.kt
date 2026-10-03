@@ -49,7 +49,7 @@ private fun dist(a: DoubleArray, b: DoubleArray): Double = hypot(b[0] - a[0], b[
 
 /**
  * Азимут соперника: от узла v по его геометрии на ~25 м (через узлы степени 2), чтобы изгиб дороги сразу за
- * перекрёстком не искажал сравнение; null, если из v по ребру ехать нельзя.
+ * перекрёстком не искажал сравнение (останавливается на ближайшем перекрёстке, в отличие от окна маршрута); null, если из v по ребру ехать нельзя.
  */
 private fun rivalBearing(index: RoadIndex, edge: Int, v: Int): Double? {
     val first = outBearing(index, edge, v) ?: return null

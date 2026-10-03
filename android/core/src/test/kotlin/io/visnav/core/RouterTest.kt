@@ -62,7 +62,8 @@ class RouterTest {
 
     @Test fun startHeadingAvoidsDrivingAgainstIt() {
         // Двусторонняя прямая по n=0 (проспекты, 60 км/ч) и квартал через n=100; машина смотрит на восток,
-        // цель — узел (300, 0) в 150 м позади. Объезд квартала: 650 м ≈ 54 с; «против курса»: 9 с + штраф 60 с.
+        // цель — узел (300, 0) в 150 м позади. Объезд квартала: 650 м ≈ 54 с; «против курса»: 9 с + штраф 60 с. Проходит из-за жёсткого фильтра: кандидат
+        // «на запад» (>90° от курса) отбрасывается до поиска, штраф не нужен.
         val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 600.0 to 0.0, 600.0 to 100.0, 300.0 to 100.0)
         val p = RoadClass.PRIMARY
         val edges = listOf(EdgeSpec(0, 1, 1, cls = p), EdgeSpec(1, 2, 1, cls = p), EdgeSpec(2, 3, 2, cls = p),
@@ -135,7 +136,7 @@ class RouterTest {
 
     @Test fun uTurnAtDeadEndWhenHeadingAway() {
         // Двусторонняя дорога (0,0)→(300,0)→(350,0), тупик в (350,0). Машина в (250,0) смотрит на восток, цель (100,0)
-        // позади. Против курса: 150 м ≈ 27 с + 60 с; через тупик: 50 + 50 + 50 + 200 = 350 м ≈ 63 с + 5 с за разворот.
+        // позади. Жёсткий фильтр оставляет только старт «на восток», поэтому разворот в тупике — единственный путь (без фильтра: против курса 150 м ≈ 27 с + 60 с, через тупик: 50 + 50 + 50 + 200 = 350 м ≈ 63 с + 5 с за разворот).
         val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 350.0 to 0.0)
         val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 1))
         val r = assertNotNull(Router(RoadIndex(pack(nodes, edges), enu)).route(250.0, 0.0, Math.PI / 2, 100.0, 0.0))
@@ -185,5 +186,28 @@ class RouterTest {
     @Test fun startWithoutHeadingPicksNearerCarriageway() {
         val r = assertNotNull(Router(dual()).route(500.0, 2.0, null, 100.0, 15.0))
         assertTrue(r.steps[0].edge == 0 && r.steps[0].forward)
+    }
+
+    @Test fun headingFilterAloneKeepsCarriageway() {
+        // Обе проезжие части в пределах запаса (по 7,5 м); цель позади на встречной. Без фильтра по курсу
+        // встречная (400 м, штраф 60 с) выигрывает у объезда через конец (3,5 км).
+        val r = assertNotNull(Router(dual()).route(500.0, 7.5, Math.PI / 2, 100.0, 15.0))
+        assertTrue(r.steps[0].edge == 0 && r.steps[0].forward)
+    }
+
+    @Test fun gpsBiasTowardFarCarriagewayWithHeading() {
+        // Смещение GPS: до встречной 3 м, до своей 12 м (вне запаса 8 м от ближайшей) — курс решает раньше запаса.
+        val r = assertNotNull(Router(dual()).route(500.0, 12.0, Math.PI / 2, 100.0, 15.0))
+        assertTrue(r.steps[0].edge == 0 && r.steps[0].forward)
+    }
+
+    @Test fun wrongHeadingPenaltyViaFallback() {
+        // Односторонняя дорога на восток, курс на запад: единственный кандидат против курса остаётся (запасной
+        // путь), и штраф входит в стоимость.
+        val nodes = listOf(0.0 to 0.0, 1000.0 to 0.0)
+        val router = Router(RoadIndex(pack(nodes, listOf(EdgeSpec(0, 1, 1, RoadPack.FLAG_ONEWAY))), enu))
+        val plain = assertNotNull(router.route(500.0, 0.0, null, 800.0, 0.0))
+        val west = assertNotNull(router.route(500.0, 0.0, -Math.PI / 2, 800.0, 0.0))
+        assertEquals(plain.durationS + RouterConfig().wrongHeadingPenaltyS, west.durationS, 1e-6)
     }
 }
