@@ -5,7 +5,7 @@ import pytest
 from vpr_bench.m2cli import main
 from vpr_bench.osmgraph import RawRestriction, RawWay, build_graph, direction, road_class, speed_kmh, street_name
 from vpr_bench.roadpack import (
-    DEFAULT_SPEED_KMH, FLAG_BRIDGE, FLAG_ONEWAY, FLAG_ROUNDABOUT, FLAG_TUNNEL, KIND_NO, KIND_ONLY, read_roadpack)
+    DEFAULT_SPEED_KMH, FLAG_BRIDGE, FLAG_LINK, FLAG_ONEWAY, FLAG_ROUNDABOUT, FLAG_TUNNEL, KIND_NO, KIND_ONLY, read_roadpack)
 
 
 def test_road_class_filters():
@@ -29,6 +29,13 @@ def test_direction():
 
 def _way(i, tags, *nodes):
     return RawWay(i, {"highway": "residential", **tags}, list(nodes))
+
+
+def test_link_flag():
+    a, b, c = (1, 55.75, 37.60), (2, 55.751, 37.60), (3, 55.752, 37.60)
+    g = build_graph([_way(10, {"highway": "motorway_link"}, a, b), _way(11, {"highway": "primary"}, b, c)])
+    flags = {int(w): int(f) for w, f in zip(g.edge_way, g.edge_flags)}
+    assert flags[10] & FLAG_LINK and not flags[11] & FLAG_LINK
 
 
 def test_build_graph_edges_flags_and_shared_nodes():

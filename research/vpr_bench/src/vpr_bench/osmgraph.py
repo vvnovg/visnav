@@ -10,7 +10,7 @@ import numpy as np
 
 from vpr_bench.geo import BBox
 from vpr_bench.roadpack import (
-    DEFAULT_SPEED_KMH, FLAG_BRIDGE, FLAG_ONEWAY, FLAG_ROUNDABOUT, FLAG_TUNNEL, KIND_NO, KIND_ONLY, RoadGraph)
+    DEFAULT_SPEED_KMH, FLAG_BRIDGE, FLAG_LINK, FLAG_ONEWAY, FLAG_ROUNDABOUT, FLAG_TUNNEL, KIND_NO, KIND_ONLY, RoadGraph)
 
 ROAD_CLASS = {
     "motorway": 1, "motorway_link": 1, "trunk": 2, "trunk_link": 2, "primary": 3, "primary_link": 3,
@@ -96,6 +96,8 @@ def _flags(tags: dict[str, str], d: int) -> int:
         f |= FLAG_BRIDGE
     if tags.get("junction") in ("roundabout", "circular"):
         f |= FLAG_ROUNDABOUT
+    if tags.get("highway", "").endswith("_link"):
+        f |= FLAG_LINK
     return f
 
 

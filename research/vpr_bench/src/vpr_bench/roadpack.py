@@ -14,6 +14,7 @@ FLAG_ONEWAY = 1
 FLAG_TUNNEL = 2
 FLAG_BRIDGE = 4
 FLAG_ROUNDABOUT = 8
+FLAG_LINK = 16   # highway=*_link (съезды); класс — родительский
 KIND_NO = 1
 KIND_ONLY = 2
 # Скорость для оценки времени в пути по классу дороги, км/ч (общая с Kotlin RoadClass.defaultSpeedKmh).

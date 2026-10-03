@@ -10,7 +10,7 @@ class InstructionsTest {
         assertEquals("80 м", Instructions.distanceText(78.0))
         assertEquals("10 м", Instructions.distanceText(3.0))
         assertEquals("350 м", Instructions.distanceText(362.0))
-        assertEquals("1,3 км", Instructions.distanceText(1234.0))  // сначала до 50 м: 1250
+        assertEquals("1,2 км", Instructions.distanceText(1234.0))
         assertEquals("1 км", Instructions.distanceText(975.0))
         assertEquals("1 км", Instructions.distanceText(995.0))
         assertEquals("1 км", Instructions.distanceText(1000.0))

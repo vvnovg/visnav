@@ -13,7 +13,7 @@ object Instructions {
         else -> {
             val r = (m / 50).roundToInt() * 50
             if (r < 1000) "$r м"
-            else "%.1f".format(java.util.Locale.ROOT, r / 1000.0).removeSuffix(".0").replace('.', ',') + " км"
+            else "%.1f".format(java.util.Locale.ROOT, (m / 100).roundToInt() / 10.0).removeSuffix(".0").replace('.', ',') + " км"
         }
     }
 

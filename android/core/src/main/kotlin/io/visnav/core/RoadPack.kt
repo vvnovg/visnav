@@ -17,7 +17,7 @@ data class TurnRestriction(val fromEdge: Int, val via: Int, val toEdge: Int, val
 
 /**
  * roadpack v1/v2 («VNRD»): дорожный граф OSM. Заголовок 16 байт (magic, version u16, reserved u16, nodeCount u32,
- * edgeCount u32), затем lats f64[n], lons f64[n], way i64[m], from i32[m], to i32[m], flags u8[m], cls u8[m]
+ * edgeCount u32), затем lats f64[n], lons f64[n], way i64[m], from i32[m], to i32[m], flags u8[m] (1 oneway, 2 tunnel, 4 bridge, 8 roundabout, 16 link = highway=*_link), cls u8[m]
  * (little-endian). v2 дополнительно: speedKmh u8[m] (0 = по классу), nameIdx i32[m] (-1 = без названия),
  * nameCount u32 + names (u16 длина + UTF-8), restrictionCount u32 + по 13 байт (from i32, via i32, to i32, kind u8:
  * 1 = no, 2 = only). Ребро — прямой отрезок между соседними узлами OSM-линии; по односторонней — только from → to.
@@ -54,6 +54,7 @@ class RoadPack(
     fun tunnel(edge: Int): Boolean = flags[edge].toInt() and FLAG_TUNNEL != 0
     fun roadClass(edge: Int): Int = cls[edge].toInt() and 0xFF
     fun roundabout(edge: Int): Boolean = flags[edge].toInt() and FLAG_ROUNDABOUT != 0
+    fun link(edge: Int): Boolean = flags[edge].toInt() and FLAG_LINK != 0
     fun name(edge: Int): String? = nameIdx[edge].let { if (it < 0) null else names[it] }
     fun speedMps(edge: Int): Double {
         val v = speedKmh[edge].toInt() and 0xFF
@@ -66,6 +67,7 @@ class RoadPack(
         const val FLAG_TUNNEL = 2
         const val FLAG_BRIDGE = 4
         const val FLAG_ROUNDABOUT = 8
+        const val FLAG_LINK = 16
         private const val HEADER_SIZE = 16
 
         fun parse(buf: ByteBuffer): RoadPack = try {

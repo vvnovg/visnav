@@ -87,10 +87,63 @@ class ManeuversTest {
     @Test fun namedMotorwayWithUnnamedLinkIsFork() {
         val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 600.0 to 0.0, 600.0 to -63.8)   // съезд 12° вправо
         val edges = listOf(EdgeSpec(0, 1, 1, cls = RoadClass.MOTORWAY), EdgeSpec(1, 2, 1, cls = RoadClass.MOTORWAY),
-            EdgeSpec(1, 3, 2, cls = RoadClass.MOTORWAY))   // съезд (_link) хранится с классом магистрали
+            EdgeSpec(1, 3, 2, RoadPack.FLAG_LINK, RoadClass.MOTORWAY))   // съезд (_link): класс магистрали
         val idx = RoadIndex(named(nodes, edges, listOf("МКАД", "МКАД", null)), enu)
         val ms = buildManeuvers(assertNotNull(Router(idx).route(0.0, 0.0, null, 600.0, -63.8)), idx)
         assertEquals(ManeuverType.SLIGHT_RIGHT, ms[1].type)
+    }
+
+    @Test fun zeroLengthWindowAtStartNodeFallsBackToEdgeBearing() {
+        // Старт ровно в узле перекрёстка (t = 1 на первом ребре): окно входа нулевое. Прямо — манёвра нет.
+        val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 600.0 to 0.0, 300.0 to 300.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 1), EdgeSpec(1, 3, 2))
+        val idx = RoadIndex(named(nodes, edges, listOf("А", "А", "Б")), enu)
+        val r = Route(
+            listOf(RouteStep(0, true), RouteStep(1, true)),
+            listOf(doubleArrayOf(300.0, 0.0), doubleArrayOf(300.0, 0.0), doubleArrayOf(600.0, 0.0)),
+            doubleArrayOf(0.0, 0.0, 300.0), 0.0)
+        assertEquals(listOf(ManeuverType.DEPART, ManeuverType.ARRIVE), types(buildManeuvers(r, idx)))
+    }
+
+    @Test fun zeroLengthWindowAtGoalNodeFallsBackToEdgeBearing() {
+        val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 600.0 to 0.0, 300.0 to 300.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 1), EdgeSpec(1, 3, 2))
+        val idx = RoadIndex(named(nodes, edges, listOf("А", "А", "Б")), enu)
+        val r = Route(
+            listOf(RouteStep(0, true), RouteStep(1, true)),
+            listOf(doubleArrayOf(0.0, 0.0), doubleArrayOf(300.0, 0.0), doubleArrayOf(300.0, 0.0)),
+            doubleArrayOf(0.0, 300.0, 300.0), 0.0)
+        assertEquals(listOf(ManeuverType.DEPART, ManeuverType.ARRIVE), types(buildManeuvers(r, idx)))
+    }
+
+    @Test fun rivalIsMeasuredAlongItsOwnGeometry() {
+        // Основная дорога: 5 м под 6° вправо, затем уходит влево (за 25 м в среднем ≈14° влево); съезд — 4° вправо.
+        // По первому сегменту съезд был бы левее основной (4° < 6°) → SLIGHT_LEFT; по окну 25 м он правее → SLIGHT_RIGHT.
+        val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 304.973 to -0.523, 600.0 to 100.0, 399.76 to -6.976)
+        val edges = listOf(EdgeSpec(0, 1, 1, cls = RoadClass.MOTORWAY), EdgeSpec(1, 2, 2, cls = RoadClass.MOTORWAY),
+            EdgeSpec(2, 3, 2, cls = RoadClass.MOTORWAY), EdgeSpec(1, 4, 3, RoadPack.FLAG_LINK, RoadClass.MOTORWAY))
+        val idx = RoadIndex(named(nodes, edges, listOf(null, null, null, null)), enu)
+        val ms = buildManeuvers(assertNotNull(Router(idx).route(0.0, 0.0, null, 399.76, -6.976)), idx)
+        assertEquals(ManeuverType.SLIGHT_RIGHT, ms[1].type)
+    }
+
+    @Test fun straightPastLinkIsNoManeuver() {
+        val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 600.0 to 0.0, 600.0 to -63.8)   // съезд 12° вправо
+        val edges = listOf(EdgeSpec(0, 1, 1, cls = RoadClass.MOTORWAY), EdgeSpec(1, 2, 1, cls = RoadClass.MOTORWAY),
+            EdgeSpec(1, 3, 2, RoadPack.FLAG_LINK, RoadClass.MOTORWAY))
+        val idx = RoadIndex(named(nodes, edges, listOf("МКАД", "МКАД", null)), enu)
+        val ms = buildManeuvers(assertNotNull(Router(idx).route(0.0, 0.0, null, 600.0, 0.0)), idx)
+        assertEquals(listOf(ManeuverType.DEPART, ManeuverType.ARRIVE), types(ms))
+    }
+
+    @Test fun mergedTurnsOf90And50AreNotAUTurn() {
+        // Налево 90° и через 20 м ещё налево ≈50°: общий поворот ≈140° (< 150), а не сумма углов с окнами.
+        val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 300.0 to 20.0, 70.2 to 212.8, 600.0 to 0.0, 600.0 to 20.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2), EdgeSpec(2, 3, 3), EdgeSpec(1, 4, 1), EdgeSpec(2, 5, 3))
+        val idx = RoadIndex(named(nodes, edges, listOf("А", "Перемычка", "Б", "А", "Б")), enu)
+        val ms = buildManeuvers(assertNotNull(Router(idx).route(0.0, 0.0, null, 70.2, 212.8)), idx)
+        assertEquals(listOf(ManeuverType.DEPART, ManeuverType.LEFT, ManeuverType.ARRIVE), types(ms))
+        assertEquals(-140.0, ms[1].angleDeg, 1.0)
     }
 
     @Test fun uTurnThroughMedianGap() {
