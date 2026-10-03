@@ -126,8 +126,6 @@ class LocalizerRoadTest {
     }
 
     /** Пары: расстояние до истинной точки и расстояние до истинной дуги (поперечная ошибка). */
-    private var arcResets = 0
-
     private fun runArc(config: LocalizerConfig, roads: RoadPack?): Pair<List<Double>, List<Double>> {
         val localizer = Localizer(pack, config, roads)
         val errs = ArrayList<Double>()
@@ -157,7 +155,6 @@ class LocalizerRoadTest {
                 }
             }
         }
-        arcResets = localizer.headingResets
         return errs to cross
     }
 
@@ -167,8 +164,8 @@ class LocalizerRoadTest {
         val (with, _) = runArc(LocalizerConfig(visual = false), arcRoads())
         val (without, _) = runArc(LocalizerConfig(visual = false), null)
         assertTrue(without.max() > 30.0, "drift without roads must exist: ${without.max()}")
-        println("FIXMETRIC arcAlong with=${with.max()} without=${without.max()} resets=$arcResets")
-        assertTrue(with.max() <= 12.0, "with roads: ${with.max()} resets=$arcResets")
+        println("FIXMETRIC arcAlong with=${with.max()} without=${without.max()}")
+        assertTrue(with.max() <= 12.0, "with roads: ${with.max()}")
     }
 
     @Test fun curvedRoadGapKeepsCrossTrackError() {

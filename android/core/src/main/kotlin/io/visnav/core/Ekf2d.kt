@@ -115,19 +115,6 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
 
     fun headingVariance(): Double = p[idx(2, 2)]
 
-    /**
-     * Возврат доверия к курсу и смещению гироскопа, когда они явно несогласованы с внешним ориентиром:
-     * дисперсии ψ и b_g поднимаются не ниже заданных, их ковариации с остальными состояниями (и между собой)
-     * обнуляются. Результат — блочно-диагональная P из главных подматриц исходной P, то есть остаётся
-     * симметричной и неотрицательно определённой.
-     */
-    fun inflateHeading(minVarPsi: Double, minVarBias: Double) {
-        require(minVarPsi >= 0 && minVarBias >= 0) { "variances must be >= 0" }
-        for (s in intArrayOf(2, 4)) for (j in 0 until N) if (j != s) { p[idx(s, j)] = 0.0; p[idx(j, s)] = 0.0 }
-        p[idx(2, 2)] = max(p[idx(2, 2)], minVarPsi)
-        p[idx(4, 4)] = max(p[idx(4, 4)], minVarBias)
-    }
-
     fun posSigma(): Double = sqrt(max(p[idx(0, 0)], p[idx(1, 1)]))
 
     /** χ²-расстояние фикса позиции до прогноза (как в гейте updatePosition), без изменения состояния. */
