@@ -36,6 +36,9 @@ class RawRestriction:
     kind: int      # KIND_NO | KIND_ONLY
 
 
+# Статистика последней сборки графа: число отброшенных запретов (неоднозначных или вне графа).
+STATS: dict[str, int] = {"restrictions_dropped": 0}
+
 _RU_SPEED = {"RU:urban": 60, "RU:rural": 90, "RU:motorway": 110, "RU:living_street": 20}
 
 
@@ -113,6 +116,7 @@ def build_graph(ways: Iterable[RawWay], keep: Callable[[float, float], bool] | N
     e_speed: list[int] = []
     e_name: list[int] = []
     names: list[str] = []
+    name_index: dict[str, int] = {}
 
     def inside(node: tuple[int, float, float]) -> bool:
         if keep is None:
@@ -139,9 +143,10 @@ def build_graph(ways: Iterable[RawWay], keep: Callable[[float, float], bool] | N
         if name is None:
             name_idx = -1
         else:
-            if name not in names:
+            if name not in name_index:
+                name_index[name] = len(names)
                 names.append(name)
-            name_idx = names.index(name)
+            name_idx = name_index[name]
         nodes = w.nodes if d >= 0 else list(reversed(w.nodes))
         for a, b in zip(nodes, nodes[1:]):
             if a[0] == b[0] or not (inside(a) or inside(b)):
@@ -157,17 +162,31 @@ def build_graph(ways: Iterable[RawWay], keep: Callable[[float, float], bool] | N
     for k, wid in enumerate(e_way):
         edges_of_way.setdefault(wid, []).append(k)
     rows: list[tuple[int, int, int, int]] = []
+    dropped = 0
+
+    def candidates(way_id: int, via: int, arriving: bool) -> list[int]:
+        # Односторонняя линия: въезжает в via только по ребру, которое в него приходит, выезжает — по уходящему.
+        out: list[int] = []
+        for k in edges_of_way.get(way_id, []):
+            if e_flags[k] & FLAG_ONEWAY:
+                if (e_to[k] if arriving else e_from[k]) == via:
+                    out.append(k)
+            elif e_from[k] == via or e_to[k] == via:
+                out.append(k)
+        return out
+
+    # Несколько строк ONLY с одним (from_edge, via) означают объединение разрешённых выездов.
     for r in restrictions:
         via = index.get(r.via_node)
-        if via is None:
+        fes = candidates(r.from_way, via, True) if via is not None else []
+        tes = candidates(r.to_way, via, False) if via is not None else []
+        # Линия проходит через via (больше одного кандидата) или части вне графа: запрет отбрасываем —
+        # потерянный запрет безопаснее неверного.
+        if len(fes) != 1 or len(tes) != 1:
+            dropped += 1
             continue
-
-        def touching(way_id: int) -> list[int]:
-            return [k for k in edges_of_way.get(way_id, []) if e_from[k] == via or e_to[k] == via]
-
-        for fe in touching(r.from_way):
-            for te in touching(r.to_way):
-                rows.append((fe, via, te, r.kind))
+        rows.append((fes[0], via, tes[0], r.kind))
+    STATS["restrictions_dropped"] = dropped
     return RoadGraph(
         np.array(lats, dtype=np.float64), np.array(lons, dtype=np.float64), np.array(e_way, dtype=np.int64),
         np.array(e_from, dtype=np.int32), np.array(e_to, dtype=np.int32),
@@ -218,6 +237,8 @@ def read_osm(path: Path, bbox: BBox | None = None) -> tuple[list[RawWay], list[R
         def relation(self, r) -> None:
             tags = {t.k: t.v for t in r.tags}
             if tags.get("type") != "restriction":
+                return
+            if "motorcar" in tags.get("except", ""):
                 return
             value = tags.get("restriction") or tags.get("restriction:motorcar") or ""
             kind = KIND_NO if value.startswith("no_") else KIND_ONLY if value.startswith("only_") else 0

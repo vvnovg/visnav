@@ -3,7 +3,7 @@ import json
 import pytest
 
 from vpr_bench.m2cli import main
-from vpr_bench.osmgraph import RawRestriction, RawWay, build_graph, direction, road_class, speed_kmh, street_name
+from vpr_bench.osmgraph import STATS, RawRestriction, RawWay, build_graph, direction, road_class, speed_kmh, street_name
 from vpr_bench.roadpack import (
     DEFAULT_SPEED_KMH, FLAG_BRIDGE, FLAG_ONEWAY, FLAG_ROUNDABOUT, FLAG_TUNNEL, KIND_NO, KIND_ONLY, read_roadpack)
 
@@ -114,19 +114,34 @@ def test_speed_and_name():
 def test_build_graph_names_speed_roundabout_restrictions():
     a, b, c, d = (1, 55.75, 37.60), (2, 55.751, 37.60), (3, 55.752, 37.60), (4, 55.751, 37.602)
     ways = [
-        _way(10, {"name": "Тверская улица", "maxspeed": "60"}, a, b, c),
-        _way(11, {"name": "Тверская улица"}, b, d),
+        _way(10, {"name": "Тверская улица", "maxspeed": "60"}, a, b),
+        _way(14, {"name": "Тверская улица"}, b, c),
+        _way(11, {}, b, d),
         _way(12, {"junction": "roundabout"}, d, c),
     ]
     rs = [RawRestriction(10, 2, 11, KIND_NO), RawRestriction(11, 2, 10, KIND_ONLY), RawRestriction(10, 99, 11, KIND_NO)]
     g = build_graph(ways, restrictions=rs)
     assert g.names == ("Тверская улица",)
-    assert list(g.edge_name) == [0, 0, 0, -1]
-    assert list(g.edge_speed) == [48, 48, DEFAULT_SPEED_KMH[7], DEFAULT_SPEED_KMH[7]]
+    assert list(g.edge_name) == [0, 0, -1, -1]
+    assert list(g.edge_speed) == [48, DEFAULT_SPEED_KMH[7], DEFAULT_SPEED_KMH[7], DEFAULT_SPEED_KMH[7]]
     assert g.edge_flags[3] & FLAG_ROUNDABOUT and g.edge_flags[3] & FLAG_ONEWAY
-    # way 10 касается узла b двумя рёбрами (0: a→b, 1: b→c); way 11 — одним (2: b→d); запрет с узлом 99 отброшен
-    assert sorted(map(tuple, g.restrictions.tolist())) == [
-        (0, 1, 2, KIND_NO), (1, 1, 2, KIND_NO), (2, 1, 0, KIND_ONLY), (2, 1, 1, KIND_ONLY)]
+    # рёбра: 0 — way 10 (a→b), 1 — way 14, 2 — way 11 (b→d), 3 — way 12; узел b имеет индекс 1; via=99 отброшен
+    assert sorted(map(tuple, g.restrictions.tolist())) == [(0, 1, 2, KIND_NO), (2, 1, 0, KIND_ONLY)]
+    assert STATS["restrictions_dropped"] == 1
+
+
+def test_through_way_restriction_dropped():
+    a, b, c, d = (1, 55.75, 37.60), (2, 55.751, 37.60), (3, 55.752, 37.60), (4, 55.751, 37.602)
+    g = build_graph([_way(20, {}, a, b, c), _way(21, {}, b, d)],
+                    restrictions=[RawRestriction(20, 2, 21, KIND_NO), RawRestriction(20, 2, 20, KIND_NO)])
+    assert len(g.restrictions) == 0 and STATS["restrictions_dropped"] == 2
+
+
+def test_oneway_direction_filter():
+    a, b, c = (1, 55.75, 37.60), (2, 55.751, 37.60), (3, 55.752, 37.60)
+    g = build_graph([_way(30, {"oneway": "yes"}, c, b), _way(31, {"oneway": "yes"}, a, b)],
+                    restrictions=[RawRestriction(30, 2, 31, KIND_NO)])
+    assert len(g.restrictions) == 0 and STATS["restrictions_dropped"] == 1
 
 
 OSM_RESTRICTION_XML = OSM_XML.replace("</osm>", """  <relation id="50" version="1">
@@ -150,10 +165,20 @@ def test_read_osm_restrictions(tmp_path):
 
 def test_pack_roads_writes_v2(tmp_path):
     pytest.importorskip("osmium")
-    (tmp_path / "t.osm").write_text(OSM_RESTRICTION_XML)
+    # way 10 проходит через узел 2, поэтому для упаковки берём запрет в узле 4: from way 11 (→4), to way 13 (3–4)
+    xml = OSM_XML.replace("</osm>", """  <relation id="51" version="1">
+    <member type="way" ref="11" role="from"/><member type="node" ref="4" role="via"/>
+    <member type="way" ref="13" role="to"/>
+    <tag k="type" v="restriction"/><tag k="restriction" v="no_left_turn"/>
+  </relation>
+</osm>
+""")
+    (tmp_path / "t.osm").write_text(xml)
     (tmp_path / "t.gpx").write_text(GPX)
     out = tmp_path / "roads"
     assert main(["pack-roads", "--pbf", str(tmp_path / "t.osm"), "--gpx", str(tmp_path / "t.gpx"),
                  "--out", str(out)]) == 0
     g, meta = read_roadpack(out)
-    assert meta["format"] == "VNRD/2" and len(g.restrictions) >= 1
+    assert meta["format"] == "VNRD/2" and meta["restrictions_dropped"] == 0
+    # рёбра: 0,1 — way 10; 2 — way 11 (2→4); 3 — way 13 (3→4); узел 4 имеет индекс 3
+    assert g.restrictions.tolist() == [[2, 3, 3, KIND_NO]]
