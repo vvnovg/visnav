@@ -17,6 +17,7 @@ data class Maneuver(
 
 private const val MERGE_M = 30.0
 private const val BEARING_WINDOW_M = 25.0
+private const val STRAIGHT_DEG = 20.0
 private const val FORK_DEG = 45.0
 private const val MERGED_UTURN_DEG = 150.0
 private val TURNS = setOf(
@@ -87,8 +88,12 @@ fun buildManeuvers(route: Route, index: RoadIndex): List<Maneuver> {
             val right = a > 0
             val street = pack.name(cur.edge)
             val type: ManeuverType? = if (mag < FORK_DEG) {
+                // Почти прямо (< 20°): развилка, только если конкурент не менее важен, чем наше ребро.
                 val rivals = index.incident[v].filter { it != prev.edge && it != cur.edge }.mapNotNull { e ->
-                    outBearing(index, e, v)?.takeIf { abs(Math.toDegrees(wrapAngle(it - bIn))) < FORK_DEG }
+                    val b = outBearing(index, e, v) ?: return@mapNotNull null
+                    if (abs(Math.toDegrees(wrapAngle(b - bIn))) >= FORK_DEG) return@mapNotNull null
+                    if (mag < STRAIGHT_DEG && (pack.cls[e].toInt() and 0xFF) > (pack.cls[cur.edge].toInt() and 0xFF)) return@mapNotNull null
+                    b
                 }
                 val rival = rivals.minByOrNull { abs(wrapAngle(bOut - it)) }
                 when {

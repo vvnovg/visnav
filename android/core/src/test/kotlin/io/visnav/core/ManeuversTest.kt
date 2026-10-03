@@ -31,12 +31,13 @@ class ManeuversTest {
 
     @Test fun slightAndSharpByAngle() {
         val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 600.0 to 150.0, 300.0 to 300.0, 600.0 to 0.0)
-        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2), EdgeSpec(1, 3, 3), EdgeSpec(1, 4, 4))
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2, cls = RoadClass.SECONDARY), EdgeSpec(1, 3, 3),
+            EdgeSpec(1, 4, 4, cls = RoadClass.SECONDARY))
         val p = named(nodes, edges, listOf("А", "Б", "В", "Г"))
         val idx = RoadIndex(p, enu)
         val slight = buildManeuvers(assertNotNull(Router(idx).route(0.0, 0.0, null, 600.0, 150.0)), idx)
         assertEquals(ManeuverType.SLIGHT_LEFT, slight[1].type)       // ≈27° влево
-        // Прямо на Г: конкурент Б уходит на ≈27° левее курса, маршрут правее его — это развилка, а не «прямо».
+        // Прямо на Г (класс 4): Б того же класса уходит на ≈27° левее, т.е. не менее важен — развилка, маршрут правее него.
         val straight = buildManeuvers(assertNotNull(Router(idx).route(0.0, 0.0, null, 600.0, 0.0)), idx)
         assertEquals(ManeuverType.SLIGHT_RIGHT, straight[1].type)
         assertEquals("Г", straight[1].street)
@@ -53,6 +54,15 @@ class ManeuversTest {
         assertEquals(2, buildManeuvers(assertNotNull(Router(same).route(0.0, 0.0, null, 600.0, 0.0)), same).size)
         val unnamed = RoadIndex(named(nodes, edges, listOf("А", null, "В")), enu)
         assertEquals(2, buildManeuvers(assertNotNull(Router(unnamed).route(0.0, 0.0, null, 600.0, 0.0)), unnamed).size)
+    }
+
+    @Test fun straightOnPrimaryPastMinorSideStreetIsNoManeuver() {
+        val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 600.0 to 0.0, 600.0 to 150.0)   // боковая под 26.6° влево
+        val edges = listOf(EdgeSpec(0, 1, 1, cls = RoadClass.PRIMARY), EdgeSpec(1, 2, 1, cls = RoadClass.PRIMARY),
+            EdgeSpec(1, 3, 2, cls = RoadClass.RESIDENTIAL))
+        val idx = RoadIndex(named(nodes, edges, listOf("А", "А", "Б")), enu)
+        val ms = buildManeuvers(assertNotNull(Router(idx).route(0.0, 0.0, null, 600.0, 0.0)), idx)
+        assertEquals(listOf(ManeuverType.DEPART, ManeuverType.ARRIVE), types(ms))
     }
 
     @Test fun forkOfTwoUnnamedBranches() {
@@ -76,7 +86,8 @@ class ManeuversTest {
 
     @Test fun namedMotorwayWithUnnamedLinkIsFork() {
         val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 600.0 to 0.0, 600.0 to -63.8)   // съезд 12° вправо
-        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 1), EdgeSpec(1, 3, 2))
+        val edges = listOf(EdgeSpec(0, 1, 1, cls = RoadClass.MOTORWAY), EdgeSpec(1, 2, 1, cls = RoadClass.MOTORWAY),
+            EdgeSpec(1, 3, 2, cls = RoadClass.MOTORWAY))   // съезд (_link) хранится с классом магистрали
         val idx = RoadIndex(named(nodes, edges, listOf("МКАД", "МКАД", null)), enu)
         val ms = buildManeuvers(assertNotNull(Router(idx).route(0.0, 0.0, null, 600.0, -63.8)), idx)
         assertEquals(ManeuverType.SLIGHT_RIGHT, ms[1].type)
