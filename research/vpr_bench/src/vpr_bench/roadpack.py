@@ -36,7 +36,10 @@ class RoadGraph:
     edge_speed: np.ndarray | None = None    # uint8[m], км/ч; None — по классу
     edge_name: np.ndarray | None = None     # int32[m], индекс в names или -1
     names: tuple[str, ...] = ()
-    restrictions: np.ndarray | None = None  # int32[k, 4]: from_edge, via_node, to_edge, kind
+    # int32[k, 4]: from_edge, via_node, to_edge, kind. Несколько строк ONLY с одним (from_edge, via)
+    # означают объединение разрешённых выездов.
+    restrictions: np.ndarray | None = None
+    restrictions_dropped: int = 0  # отброшено неоднозначных запретов при сборке; не сериализуется
 
     def __post_init__(self) -> None:
         n, m = len(self.node_lats), len(self.edge_from)

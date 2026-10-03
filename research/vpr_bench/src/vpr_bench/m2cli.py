@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _pack_roads(args) -> int:
     from vpr_bench.db_builder import Corridor
-    from vpr_bench.osmgraph import STATS, build_graph, read_osm
+    from vpr_bench.osmgraph import build_graph, read_osm
     from vpr_bench.query import clean_track, parse_gpx
 
     tracks = [parse_gpx(p) for p in args.gpx]
@@ -61,7 +61,7 @@ def _pack_roads(args) -> int:
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "source": args.pbf.name, "buffer_m": args.buffer_m,
         "attribution": "© участники OpenStreetMap, ODbL 1.0",
-        "restrictions_dropped": STATS["restrictions_dropped"],
+        "restrictions_dropped": graph.restrictions_dropped,
     }
     write_roadpack(args.out, graph, meta)
     print(f"nodes={len(graph.node_lats)} edges={len(graph.edge_from)} -> {args.out}")

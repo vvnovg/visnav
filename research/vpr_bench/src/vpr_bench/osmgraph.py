@@ -36,9 +36,6 @@ class RawRestriction:
     kind: int      # KIND_NO | KIND_ONLY
 
 
-# Статистика последней сборки графа: число отброшенных запретов (неоднозначных или вне графа).
-STATS: dict[str, int] = {"restrictions_dropped": 0}
-
 _RU_SPEED = {"RU:urban": 60, "RU:rural": 90, "RU:motorway": 110, "RU:living_street": 20}
 
 
@@ -175,24 +172,26 @@ def build_graph(ways: Iterable[RawWay], keep: Callable[[float, float], bool] | N
                 out.append(k)
         return out
 
-    # Несколько строк ONLY с одним (from_edge, via) означают объединение разрешённых выездов.
     for r in restrictions:
         via = index.get(r.via_node)
-        fes = candidates(r.from_way, via, True) if via is not None else []
-        tes = candidates(r.to_way, via, False) if via is not None else []
-        # Линия проходит через via (больше одного кандидата) или части вне графа: запрет отбрасываем —
-        # потерянный запрет безопаснее неверного.
+        if via is None or r.from_way not in edges_of_way or r.to_way not in edges_of_way:
+            continue  # вне графа: молча пропускаем, не считаем
+        fes = candidates(r.from_way, via, True)
+        tes = candidates(r.to_way, via, False)
+        if not fes and not tes:
+            continue
+        # Неоднозначно внутри графа (линия проходит через via или у одной стороны нет кандидатов):
+        # запрет отбрасываем и считаем — потерянный запрет безопаснее неверного.
         if len(fes) != 1 or len(tes) != 1:
             dropped += 1
             continue
         rows.append((fes[0], via, tes[0], r.kind))
-    STATS["restrictions_dropped"] = dropped
     return RoadGraph(
         np.array(lats, dtype=np.float64), np.array(lons, dtype=np.float64), np.array(e_way, dtype=np.int64),
         np.array(e_from, dtype=np.int32), np.array(e_to, dtype=np.int32),
         np.array(e_flags, dtype=np.uint8), np.array(e_cls, dtype=np.uint8),
         edge_speed=np.array(e_speed, dtype=np.uint8), edge_name=np.array(e_name, dtype=np.int32),
-        names=tuple(names), restrictions=np.array(rows, dtype=np.int32).reshape(len(rows), 4),
+        names=tuple(names), restrictions=np.array(rows, dtype=np.int32).reshape(len(rows), 4), restrictions_dropped=dropped,
     )
 
 

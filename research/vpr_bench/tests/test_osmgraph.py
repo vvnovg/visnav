@@ -3,7 +3,7 @@ import json
 import pytest
 
 from vpr_bench.m2cli import main
-from vpr_bench.osmgraph import STATS, RawRestriction, RawWay, build_graph, direction, road_class, speed_kmh, street_name
+from vpr_bench.osmgraph import RawRestriction, RawWay, build_graph, direction, road_class, speed_kmh, street_name
 from vpr_bench.roadpack import (
     DEFAULT_SPEED_KMH, FLAG_BRIDGE, FLAG_ONEWAY, FLAG_ROUNDABOUT, FLAG_TUNNEL, KIND_NO, KIND_ONLY, read_roadpack)
 
@@ -127,21 +127,21 @@ def test_build_graph_names_speed_roundabout_restrictions():
     assert g.edge_flags[3] & FLAG_ROUNDABOUT and g.edge_flags[3] & FLAG_ONEWAY
     # рёбра: 0 — way 10 (a→b), 1 — way 14, 2 — way 11 (b→d), 3 — way 12; узел b имеет индекс 1; via=99 отброшен
     assert sorted(map(tuple, g.restrictions.tolist())) == [(0, 1, 2, KIND_NO), (2, 1, 0, KIND_ONLY)]
-    assert STATS["restrictions_dropped"] == 1
+    assert g.restrictions_dropped == 0  # via=99 вне графа: не считается
 
 
 def test_through_way_restriction_dropped():
     a, b, c, d = (1, 55.75, 37.60), (2, 55.751, 37.60), (3, 55.752, 37.60), (4, 55.751, 37.602)
     g = build_graph([_way(20, {}, a, b, c), _way(21, {}, b, d)],
                     restrictions=[RawRestriction(20, 2, 21, KIND_NO), RawRestriction(20, 2, 20, KIND_NO)])
-    assert len(g.restrictions) == 0 and STATS["restrictions_dropped"] == 2
+    assert len(g.restrictions) == 0 and g.restrictions_dropped == 2
 
 
 def test_oneway_direction_filter():
     a, b, c = (1, 55.75, 37.60), (2, 55.751, 37.60), (3, 55.752, 37.60)
     g = build_graph([_way(30, {"oneway": "yes"}, c, b), _way(31, {"oneway": "yes"}, a, b)],
                     restrictions=[RawRestriction(30, 2, 31, KIND_NO)])
-    assert len(g.restrictions) == 0 and STATS["restrictions_dropped"] == 1
+    assert len(g.restrictions) == 0 and g.restrictions_dropped == 1
 
 
 OSM_RESTRICTION_XML = OSM_XML.replace("</osm>", """  <relation id="50" version="1">
