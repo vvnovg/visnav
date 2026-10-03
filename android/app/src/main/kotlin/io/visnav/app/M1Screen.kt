@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -49,6 +50,12 @@ fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
                 Text("${modeLabel(m)}${s.sigmaM?.let { " ±${Math.round(it)} м" } ?: ""}", color = modeColor(m))
                 val reasons = s.gnssReasons.map { reasonLabel(it) }
                 if (reasons.isNotEmpty()) Text(reasons.joinToString(", "))
+                if (s.roadsLoaded) {
+                    Text(s.road?.let { r ->
+                        "Дорога: привязана, ${Math.round(r.confidence * 100)} %" + if (r.used) ", уточняет позицию" else ""
+                    } ?: "Дорога: не найдена")
+                    Text("Дороги © участники OpenStreetMap", style = MaterialTheme.typography.bodySmall)
+                }
             }
             OutlinedButton(
                 onClick = { controller.setMode(if (s.mode == PriorMode.GPS) PriorMode.VISUAL else PriorMode.GPS) },
