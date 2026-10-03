@@ -53,7 +53,7 @@ def _ways_near(times: list[float], snaps: list[Snap | None], t: float, window_s:
 
 
 def evaluate_roads(header: dict, rows: list[TrajRow], log_frames: list[FieldFrame], net: RoadNet,
-                   min_speed_mps: float = 2.0, tol_m: float = 5.0, window_s: float = 3.0) -> RoadResult:
+                   min_speed_mps: float = 2.0, tol_m: float = 5.0, window_s: float = 1.5) -> RoadResult:
     has = header.get("roads") is not None
     roads, constraint = header.get("roads"), header.get("road_constraint")
     if not has:
@@ -129,7 +129,7 @@ def render_road_report(r: RoadResult) -> str:
                       "| начало, с от старта | длительность, с |", "|---|---|"]
             lines += [f"| {s:.0f} | {d:.1f} |" for s, d in r.wrong_spans]
         lines += ["", "Эталон — офлайн-привязка очищенного GPS-трека к тому же графу (HMM с обратным проходом). "
-                      "Строка верна, если OSM way совпадает с way любой эталонной привязки в пределах ±3 с или точка на дороге "
+                      "Строка верна, если OSM way совпадает с way любой эталонной привязки в пределах ±1.5 с или точка на дороге "
                       "ближе 5 м к эталонной."]
     lines += ["", "Дорожные данные © участники OpenStreetMap, ODbL 1.0.", ""]
     return "\n".join(lines)

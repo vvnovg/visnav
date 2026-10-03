@@ -124,11 +124,22 @@ def test_no_truth_rows_reported_as_share_of_moving_rows(tmp_path):
     assert _report_line(r, "- Без эталонной привязки") == f"- Без эталонной привязки: {r.no_truth_pct:.1f} % строк в движении"
 
 
+def _way_split(tmp_path, window_s):
+    # Одна линия разбита на way 1 (n < 1005) и way 3 (n ≥ 1005). Онлайн-точка отстаёт на 10 м (1 с) вдоль
+    # дороги: на 101 с строка ещё на way 1 (n = 1000), эталон уже на way 3 (n = 1010), 10 м > допуска 5 м —
+    # верно только по эталону в окне ±1.5 с (на 100 с эталон на way 1).
+    graph = graph_from_lines([(1, line(0, -100, 0, 1005), 0, 7), (3, line(0, 1005, 0, 2100), 0, 7)])
+    header, rows = read_trajectory(_write(tmp_path, way=lambda s: 1 if 10.0 * s - 10.0 < 1005.0 else 3))
+    rows = [dataclasses.replace(r, road_lat=offset_m(LAT0, LON0, 0.0, (r.t_ms - T0) / 100.0 - 10.0)[0]) for r in rows]
+    return evaluate_roads(header, rows, _frames(), RoadNet(graph), window_s=window_s)
+
+
 def test_way_split_counts_lagging_rows_correct(tmp_path):
-    # Одна линия разбита на way 1 (n < 1000) и way 3 (n ≥ 1000). Онлайн-точка отстаёт на 15 м вдоль дороги:
-    # у стыка строка ещё на way 1, а эталон уже на way 3 — верно по эталону в окне ±3 с.
-    graph = graph_from_lines([(1, line(0, -100, 0, 1000), 0, 7), (3, line(0, 1000, 0, 2100), 0, 7)])
-    header, rows = read_trajectory(_write(tmp_path, way=lambda s: 1 if 10.0 * s - 15.0 < 1000.0 else 3))
-    rows = [dataclasses.replace(r, road_lat=offset_m(LAT0, LON0, 0.0, (r.t_ms - T0) / 100.0 - 15.0)[0]) for r in rows]
-    r = evaluate_roads(header, rows, _frames(), RoadNet(graph))
+    r = _way_split(tmp_path, 1.5)
     assert r.n_rows > 150 and r.correct_pct == 100.0
+
+
+def test_way_split_without_window_counts_lagging_row_wrong(tmp_path):
+    # Контроль: без окна строка у стыка неверна — тест выше проверяет именно окно.
+    r = _way_split(tmp_path, 0.0)
+    assert r.correct_pct < 100.0
