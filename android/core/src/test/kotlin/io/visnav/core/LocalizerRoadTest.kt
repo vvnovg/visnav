@@ -210,4 +210,76 @@ class LocalizerRoadTest {
     @Test fun missingTrueRoadParallelAt18m() = missingTrueRoad(18.0)
     @Test fun missingTrueRoadParallelAt25m() = missingTrueRoad(25.0)
     @Test fun missingTrueRoadParallelAt40m() = missingTrueRoad(40.0)
+
+    /**
+     * Общий сценарий: истина едет на восток 10 м/с по n = 0, кадры 2 Гц, статус спутников обычный. fixN(rel) —
+     * северная координата фикса GNSS (1 Гц) или null, если фикса нет; biased(rel) — смещён ли гироскоп.
+     */
+    private fun runScenario(
+        roads: RoadPack?, lastStep: Int, fixN: (Long) -> Double?, biased: (Long) -> Boolean = { false },
+    ): List<LocalizerOutput> {
+        val localizer = Localizer(pack, LocalizerConfig(visual = false), roads)
+        val out = ArrayList<LocalizerOutput>()
+        for (step in 0..lastStep) {
+            val tMs = t0 + step * 10L
+            val t = tMs.toDouble()
+            val rel = tMs - t0
+            localizer.onSensor(AccelEvent(t, 0f, 0f, 9.81f + 0.3f * sin(step.toFloat())))
+            localizer.onSensor(GyroEvent(t, 0f, 0f, if (biased(rel)) 0.005f else 0f))
+            val n = if (step % 100 == 0) fixN(rel) else null
+            if (n != null) {
+                localizer.onSensor(GnssStatusEvent(t, 16, 14, 35f, 5f))
+                val ll = enu.toLatLon(rel / 100.0, n)
+                localizer.onSensor(LocEvent(t, ll[0], ll[1], 3f, 10f, 0.3f, 90f, 2f))
+            }
+            if (step % 50 == 0) localizer.onFrame(tMs, null)?.let { out.add(it) }
+        }
+        return out
+    }
+
+    private fun truthErrM(o: LocalizerOutput): Double {
+        val en = enu.toEn(o.lat, o.lon)
+        return hypot(en[0] - (o.tMs - t0) / 100.0, en[1])
+    }
+
+    private fun at(out: List<LocalizerOutput>, sec: Int) = out.first { it.tMs - t0 >= sec * 1000L }
+
+    private class SpoofRun(val flaggedAtS: Double?, val errs: List<Double>) {
+        override fun toString() = "flaggedAt=$flaggedAtS err60/90/119=$errs"
+    }
+
+    /** Короткое глушение 30–34 с, затем подмена со сдвигом на север до 120 с. */
+    private fun shortJamThenSpoof(offsetM: Double, roads: RoadPack?): SpoofRun {
+        val out = runScenario(roads, 12_000, { rel ->
+            when {
+                rel < 30_000 -> 0.0
+                rel < 34_000 -> null
+                else -> offsetM
+            }
+        })
+        val flagged = out.filter { it.tMs - t0 >= 34_000 }
+            .firstOrNull { GnssReason.INNOVATION in it.reasons || it.health == GnssHealth.UNTRUSTED }
+        return SpoofRun(flagged?.let { (it.tMs - t0) / 1000.0 }, listOf(60, 90, 119).map { truthErrM(at(out, it)) })
+    }
+
+    /** Истинная дорога в графе (n = 0, рядом параллельная в 25 м): подмена на 80 и 300 м отвергается, как без дорог. */
+    @Test fun shortJamThenSpoofIsRejectedWithRoads() {
+        for (offset in listOf(80.0, 300.0)) {
+            val with = shortJamThenSpoof(offset, roads())
+            val m = "offset=$offset with roads: $with; without roads: ${shortJamThenSpoof(offset, null)}"
+            assertTrue(with.flaggedAtS != null, "spoof flagged: $m")
+            assertTrue(with.errs.all { it <= 15.0 }, "error vs truth: $m")
+        }
+    }
+
+    /** Выход по GPS 90–95 с, затем GNSS снова пропал: приостановка не должна залипнуть. */
+    @Test fun escapeThenGnssLostAgainKeepsRoadConstraint() {
+        val b = straightRoad(-200.0, 25.0, 2500.0, 25.0, 25.0, 2, 0)
+        val gap = { rel: Long -> rel in 30_000 until 90_000 || rel >= 95_000 }
+        val out = runScenario(roadPackOf(enu, b.first, b.second), 20_000, { rel -> if (gap(rel)) null else 0.0 }, gap)
+        val second = out.filter { it.tMs - t0 >= 100_000 }
+        val used = second.count { it.road?.used == true }
+        val escaped = out.filter { it.tMs - t0 in 90_000 until 95_000 }.map { truthErrM(it) }.minOrNull()
+        assertTrue(used >= second.size * 80 / 100, "road used $used of ${second.size} from 100 s; min err 90–95 s $escaped")
+    }
 }
