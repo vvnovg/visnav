@@ -24,6 +24,8 @@ data class RouterConfig(
     val destSnapRadiusM: Double = 150.0,
     /** Финиш — только на дорогах не дальше ближайшей к цели + goalSlackM. */
     val goalSlackM: Double = 25.0,
+    /** Старт — только на дорогах не дальше ближайшей к точке старта + startSlackM (параллельные проезжие части). */
+    val startSlackM: Double = 8.0,
     val maxCandidateWays: Int = 4,
     val turnPenaltyS: Double = 5.0,
     val wrongHeadingPenaltyS: Double = 60.0,
@@ -66,9 +68,14 @@ class Router(private val index: RoadIndex, private val config: RouterConfig = Ro
     }
 
     fun route(fromE: Double, fromN: Double, headingRad: Double?, toE: Double, toN: Double): Route? {
-        val starts = candidates(fromE, fromN, config.snapRadiusM)
+        val startsAll = candidates(fromE, fromN, config.snapRadiusM)
         val goalsAll = candidates(toE, toN, config.destSnapRadiusM)
-        if (starts.isEmpty() || goalsAll.isEmpty()) return null
+        if (startsAll.isEmpty() || goalsAll.isEmpty()) return null
+        val nearestStart = startsAll.minOf { it.proj.distM }
+        val near = startsAll.filter { it.proj.distM <= nearestStart + config.startSlackM }
+        // С курсом — только кандидаты, в чью сторону едем (иначе штраф за встречное направление остаётся).
+        val starts = if (headingRad == null) near else
+            near.filter { abs(wrapAngle(headingRad - travelBearing(it.proj.edge, it.forward))) <= PI / 2 }.ifEmpty { near }
         val nearest = goalsAll.minOf { it.proj.distM }
         val goals = goalsAll.filter { it.proj.distM <= nearest + config.goalSlackM }
         val goalOf = HashMap<Int, MutableList<Cand>>()

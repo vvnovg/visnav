@@ -168,4 +168,22 @@ class RouterTest {
         assertNull(router.route(50.0, 0.0, null, 5000.0, 5000.0))
         assertNull(router.route(5000.0, 5000.0, null, 50.0, 0.0))
     }
+
+    // Две односторонние проезжие части в 15 м друг от друга; разрывы — только на концах (2 км).
+    private fun dual(): RoadIndex {
+        val nodes = listOf(0.0 to 0.0, 2000.0 to 0.0, 2000.0 to 15.0, 0.0 to 15.0)
+        val edges = listOf(EdgeSpec(0, 1, 1, RoadPack.FLAG_ONEWAY), EdgeSpec(1, 2, 3), EdgeSpec(2, 3, 2, RoadPack.FLAG_ONEWAY))
+        return RoadIndex(pack(nodes, edges), enu)
+    }
+
+    @Test fun startWithHeadingStaysOnCarriagewayItPointsAlong() {
+        // Цель на встречной части в 100 м позади: ближайший путь — по встречной, но едем на восток.
+        val r = assertNotNull(Router(dual()).route(500.0, 2.0, Math.PI / 2, 100.0, 15.0))
+        assertTrue(r.steps[0].edge == 0 && r.steps[0].forward)
+    }
+
+    @Test fun startWithoutHeadingPicksNearerCarriageway() {
+        val r = assertNotNull(Router(dual()).route(500.0, 2.0, null, 100.0, 15.0))
+        assertTrue(r.steps[0].edge == 0 && r.steps[0].forward)
+    }
 }
