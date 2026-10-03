@@ -10,7 +10,10 @@ data class RouteStep(val edge: Int, val forward: Boolean)
 
 /**
  * Маршрут: points[0] — проекция старта, points[i] (1 ≤ i < steps.size) — узел между шагами i−1 и i, последняя —
- * проекция финиша; cumM — накопленная длина до каждой точки; durationS — оценка времени в пути.
+ * проекция финиша; cumM — накопленная длина до каждой точки.
+ *
+ * durationS — стоимость маршрута для поиска, а не чистое время в пути: кроме времени езды по рёбрам включает
+ * штрафы за повороты (turnPenaltyS) и за старт против курса (wrongHeadingPenaltyS). Это оценка.
  */
 class Route(val steps: List<RouteStep>, val points: List<DoubleArray>, val cumM: DoubleArray, val durationS: Double) {
     val lengthM: Double get() = cumM.last()
@@ -33,6 +36,9 @@ data class RouterConfig(
  */
 class Router(private val index: RoadIndex, private val config: RouterConfig = RouterConfig()) {
     private val pack = index.pack
+    /** Скорость для эвристики: не меньше самой быстрой дороги графа, чтобы h не переоценивала остаток пути. */
+    private val vmax: Double =
+        maxOf(config.maxSpeedMps, (0 until pack.edgeCount).maxOfOrNull { pack.speedMps(it) } ?: 0.0)
     private val byFromVia: Map<Long, List<TurnRestriction>> =
         pack.restrictions.groupBy { (it.fromEdge.toLong() shl 32) or it.via.toLong() }
 
@@ -77,7 +83,7 @@ class Router(private val index: RoadIndex, private val config: RouterConfig = Ro
         val goalPts = goals.map { doubleArrayOf(it.proj.e, it.proj.n) }
         fun h(s: Int): Double {
             val v = exitNode(s / 2, s % 2 == 0)
-            return goalPts.minOf { hypot(index.nodeE[v] - it[0], index.nodeN[v] - it[1]) } / config.maxSpeedMps
+            return goalPts.minOf { hypot(index.nodeE[v] - it[0], index.nodeN[v] - it[1]) } / vmax
         }
         val pq = PriorityQueue<Pair<Double, Int>>(compareBy { it.first })
         var bestTotal = Double.POSITIVE_INFINITY
@@ -118,7 +124,9 @@ class Router(private val index: RoadIndex, private val config: RouterConfig = Ro
                 if (k2 == edge && index.degree[v] > 1) continue
                 if (!allowed(edge, v, k2)) continue
                 val turn = abs(wrapAngle(travelBearing(k2, fwd2) - travelBearing(edge, s % 2 == 0)))
-                val entry = g0 + if (turn > PI / 4) config.turnPenaltyS else 0.0
+                // У ребра нулевой длины нет направления — поворот не определён, штраф не начисляется.
+                val degenerate = index.length[edge] == 0.0 || index.length[k2] == 0.0
+                val entry = g0 + if (!degenerate && turn > PI / 4) config.turnPenaltyS else 0.0
                 val s2 = state(k2, fwd2)
                 val speed2 = pack.speedMps(k2)
                 goalOf[s2]?.forEach { g ->

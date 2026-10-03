@@ -95,6 +95,73 @@ class RouterTest {
         assertEquals(1100.0, r.lengthM, 1e-6)
     }
 
+    @Test fun heuristicSpeedCoversFastestEdge() {
+        // Та же раскладка, но maxSpeedMps = 5 м/с при рёбрах 130 км/ч: без защиты h завышена в разы.
+        val nodes = listOf(500.0 to 600.0, 500.0 to 500.0, 0.0 to 500.0, 0.0 to 0.0, 500.0 to -60.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2), EdgeSpec(2, 3, 3), EdgeSpec(1, 4, 4), EdgeSpec(4, 3, 5))
+        val p = pack(nodes, edges, speeds = List(edges.size) { 130 })
+        val cfg = RouterConfig(turnPenaltyS = 0.0, maxSpeedMps = 5.0)
+        val r = assertNotNull(Router(RoadIndex(p, enu), cfg).route(500.0, 600.0, null, 0.0, -140.0))
+        assertEquals(listOf(1L, 2L, 3L), ways(r, p))
+    }
+
+    @Test fun onlyRestrictionsFormUnionOfExits() {
+        // Крест в узле 1, выходы — односторонние тупики (без разворота). С ребра 0: only → 1 и only → 2; выход 3 закрыт.
+        val nodes = listOf(-300.0 to 0.0, 0.0 to 0.0, 300.0 to 0.0, 0.0 to 300.0, 0.0 to -300.0)
+        val ow = RoadPack.FLAG_ONEWAY
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2, flags = ow), EdgeSpec(1, 3, 3, flags = ow),
+            EdgeSpec(1, 4, 4, flags = ow))
+        val free = Router(RoadIndex(pack(nodes, edges), enu))
+        assertNotNull(free.route(-300.0, 0.0, null, 0.0, -300.0))
+        val p = pack(nodes, edges, restrictions = listOf(TurnRestriction(0, 1, 1, only = true), TurnRestriction(0, 1, 2, only = true)))
+        val router = Router(RoadIndex(p, enu))
+        assertEquals(listOf(1L, 2L), ways(assertNotNull(router.route(-300.0, 0.0, null, 300.0, 0.0)), p))
+        assertEquals(listOf(1L, 3L), ways(assertNotNull(router.route(-300.0, 0.0, null, 0.0, 300.0)), p))
+        assertNull(router.route(-300.0, 0.0, null, 0.0, -300.0))
+    }
+
+    @Test fun goalBehindStartOnOnewayLoopsAround() {
+        // Односторонний квадрат 400×200 против часовой: 0→1→2→3→0, петля 1200 м. Старт (300,0), цель (100,0) на том же
+        // ребре в 200 м позади: маршрут — петля минус этот промежуток, 1000 м.
+        val nodes = listOf(0.0 to 0.0, 400.0 to 0.0, 400.0 to 200.0, 0.0 to 200.0)
+        val ow = RoadPack.FLAG_ONEWAY
+        val edges = listOf(EdgeSpec(0, 1, 1, flags = ow), EdgeSpec(1, 2, 2, flags = ow), EdgeSpec(2, 3, 3, flags = ow),
+            EdgeSpec(3, 0, 4, flags = ow))
+        val r = assertNotNull(Router(RoadIndex(pack(nodes, edges), enu)).route(300.0, 0.0, null, 100.0, 0.0))
+        assertEquals(RouteStep(0, true), r.steps.first()); assertEquals(RouteStep(0, true), r.steps.last())
+        assertEquals(5, r.steps.size)
+        assertEquals(1200.0 - 200.0, r.lengthM, 1e-6)
+    }
+
+    @Test fun uTurnAtDeadEndWhenHeadingAway() {
+        // Двусторонняя дорога (0,0)→(300,0)→(350,0), тупик в (350,0). Машина в (250,0) смотрит на восток, цель (100,0)
+        // позади. Против курса: 150 м ≈ 27 с + 60 с; через тупик: 50 + 50 + 50 + 200 = 350 м ≈ 63 с + 5 с за разворот.
+        val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 350.0 to 0.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 1))
+        val r = assertNotNull(Router(RoadIndex(pack(nodes, edges), enu)).route(250.0, 0.0, Math.PI / 2, 100.0, 0.0))
+        assertEquals(listOf(RouteStep(0, true), RouteStep(1, true), RouteStep(1, false), RouteStep(0, false)), r.steps)
+        assertEquals(350.0, r.lengthM, 1e-6)
+    }
+
+    @Test fun startExactlyAtNode() {
+        // Старт ровно в узле (100,0), где сходятся три дороги; цель — конец ветки на север.
+        val nodes = listOf(0.0 to 0.0, 100.0 to 0.0, 200.0 to 0.0, 100.0 to 100.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2), EdgeSpec(1, 3, 3))
+        val r = assertNotNull(Router(RoadIndex(pack(nodes, edges), enu)).route(100.0, 0.0, null, 100.0, 100.0))
+        assertEquals(listOf(RouteStep(2, true)), r.steps)
+        assertEquals(100.0, r.points[0][0], 1e-6); assertEquals(0.0, r.points[0][1], 1e-6)
+        assertEquals(100.0, r.lengthM, 1e-6)
+    }
+
+    @Test fun zeroLengthEdgeAddsNoTurnPenalty() {
+        // Узлы 1 и 2 совпадают (ребро нулевой длины); прямая 200 м по двору 20 км/ч — ровно 36 с без штрафов.
+        val nodes = listOf(0.0 to 0.0, 100.0 to 0.0, 100.0 to 0.0, 200.0 to 0.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 1), EdgeSpec(2, 3, 1))
+        val r = assertNotNull(Router(RoadIndex(pack(nodes, edges), enu)).route(0.0, 0.0, null, 200.0, 0.0))
+        assertEquals(200.0, r.lengthM, 1e-6)
+        assertEquals(200.0 / (20 / 3.6), r.durationS, 1e-6)
+    }
+
     @Test fun unreachableOrOffGraphReturnsNull() {
         val p = pack(listOf(0.0 to 0.0, 100.0 to 0.0), listOf(EdgeSpec(0, 1, 1)))
         val router = Router(RoadIndex(p, enu))
