@@ -40,6 +40,7 @@ data class LocalizerOutput(
     val visSim: Float?, val visAccepted: Boolean?, val visState: String, val stationary: Boolean,
     val mode: NavMode, val health: GnssHealth, val reasons: Set<GnssReason>,
     val road: RoadInfo? = null,
+    val psiRad: Double = Double.NaN, val speedMps: Double = Double.NaN,
 )
 
 private const val MIN_POS_SIGMA_M = 3.0
@@ -272,7 +273,7 @@ class Localizer(
         val ll = enu!!.toLatLon(ekf.x[0], ekf.x[1])
         return LocalizerOutput(
             tMs, ll[0], ll[1], ekf.posSigma(), visSim, visOk, visState, stationary.isStationary(t),
-            modes.mode, lastHealth, lastReasons, road,
+            modes.mode, lastHealth, lastReasons, road, ekf.x[2], ekf.x[3],
         )
     }
 
