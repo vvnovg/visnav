@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _pack_roads(args) -> int:
     from vpr_bench.db_builder import Corridor
-    from vpr_bench.osmgraph import build_graph, read_ways
+    from vpr_bench.osmgraph import build_graph, read_osm
     from vpr_bench.query import clean_track, parse_gpx
 
     tracks = [parse_gpx(p) for p in args.gpx]
@@ -52,7 +52,8 @@ def _pack_roads(args) -> int:
         print("error: need at least one non-empty --gpx or --log track", file=sys.stderr)
         return 2
     corridor = Corridor(tracks, args.buffer_m)
-    graph = build_graph(read_ways(args.pbf, corridor.bbox()), keep=corridor.contains)
+    ways, rs = read_osm(args.pbf, corridor.bbox())
+    graph = build_graph(ways, keep=corridor.contains, restrictions=rs)
     if len(graph.edge_from) == 0:
         print("error: no drivable roads in the corridor", file=sys.stderr)
         return 2

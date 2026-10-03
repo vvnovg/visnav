@@ -3,8 +3,9 @@ import json
 import pytest
 
 from vpr_bench.m2cli import main
-from vpr_bench.osmgraph import RawWay, build_graph, direction, road_class
-from vpr_bench.roadpack import FLAG_BRIDGE, FLAG_ONEWAY, FLAG_TUNNEL, read_roadpack
+from vpr_bench.osmgraph import RawRestriction, RawWay, build_graph, direction, road_class, speed_kmh, street_name
+from vpr_bench.roadpack import (
+    DEFAULT_SPEED_KMH, FLAG_BRIDGE, FLAG_ONEWAY, FLAG_ROUNDABOUT, FLAG_TUNNEL, KIND_NO, KIND_ONLY, read_roadpack)
 
 
 def test_road_class_filters():
@@ -97,3 +98,62 @@ def test_pack_roads_cli(tmp_path):
 def test_pack_roads_without_track_returns_2(tmp_path):
     (tmp_path / "t.osm").write_text(OSM_XML)
     assert main(["pack-roads", "--pbf", str(tmp_path / "t.osm"), "--out", str(tmp_path / "r")]) == 2
+
+
+def test_speed_and_name():
+    assert speed_kmh({"maxspeed": "60"}, 3) == 48
+    assert speed_kmh({"maxspeed": "RU:urban"}, 7) == 48
+    assert speed_kmh({"maxspeed": "130"}, 1) == 88   # ограничено 110 → 88
+    assert speed_kmh({"maxspeed": "30 mph"}, 7) == 39
+    assert speed_kmh({"maxspeed": "signals"}, 4) == DEFAULT_SPEED_KMH[4]
+    assert speed_kmh({}, 9) == DEFAULT_SPEED_KMH[9]
+    assert street_name({"name": "Тверская улица", "ref": "M1"}) == "Тверская улица"
+    assert street_name({"ref": "M1"}) == "M1" and street_name({}) is None
+
+
+def test_build_graph_names_speed_roundabout_restrictions():
+    a, b, c, d = (1, 55.75, 37.60), (2, 55.751, 37.60), (3, 55.752, 37.60), (4, 55.751, 37.602)
+    ways = [
+        _way(10, {"name": "Тверская улица", "maxspeed": "60"}, a, b, c),
+        _way(11, {"name": "Тверская улица"}, b, d),
+        _way(12, {"junction": "roundabout"}, d, c),
+    ]
+    rs = [RawRestriction(10, 2, 11, KIND_NO), RawRestriction(11, 2, 10, KIND_ONLY), RawRestriction(10, 99, 11, KIND_NO)]
+    g = build_graph(ways, restrictions=rs)
+    assert g.names == ("Тверская улица",)
+    assert list(g.edge_name) == [0, 0, 0, -1]
+    assert list(g.edge_speed) == [48, 48, DEFAULT_SPEED_KMH[7], DEFAULT_SPEED_KMH[7]]
+    assert g.edge_flags[3] & FLAG_ROUNDABOUT and g.edge_flags[3] & FLAG_ONEWAY
+    # way 10 касается узла b двумя рёбрами (0: a→b, 1: b→c); way 11 — одним (2: b→d); запрет с узлом 99 отброшен
+    assert sorted(map(tuple, g.restrictions.tolist())) == [
+        (0, 1, 2, KIND_NO), (1, 1, 2, KIND_NO), (2, 1, 0, KIND_ONLY), (2, 1, 1, KIND_ONLY)]
+
+
+OSM_RESTRICTION_XML = OSM_XML.replace("</osm>", """  <relation id="50" version="1">
+    <member type="way" ref="10" role="from"/><member type="node" ref="2" role="via"/>
+    <member type="way" ref="11" role="to"/>
+    <tag k="type" v="restriction"/><tag k="restriction" v="no_right_turn"/>
+  </relation>
+</osm>
+""")
+
+
+def test_read_osm_restrictions(tmp_path):
+    pytest.importorskip("osmium")
+    from vpr_bench.osmgraph import read_osm
+    p = tmp_path / "t.osm"
+    p.write_text(OSM_RESTRICTION_XML)
+    ways, rs = read_osm(p)
+    assert sorted(w.id for w in ways) == [10, 11, 13]
+    assert rs == [RawRestriction(10, 2, 11, KIND_NO)]
+
+
+def test_pack_roads_writes_v2(tmp_path):
+    pytest.importorskip("osmium")
+    (tmp_path / "t.osm").write_text(OSM_RESTRICTION_XML)
+    (tmp_path / "t.gpx").write_text(GPX)
+    out = tmp_path / "roads"
+    assert main(["pack-roads", "--pbf", str(tmp_path / "t.osm"), "--gpx", str(tmp_path / "t.gpx"),
+                 "--out", str(out)]) == 0
+    g, meta = read_roadpack(out)
+    assert meta["format"] == "VNRD/2" and len(g.restrictions) >= 1
