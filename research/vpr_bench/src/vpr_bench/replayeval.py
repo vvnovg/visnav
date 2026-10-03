@@ -32,6 +32,11 @@ class TrajRow:
     health: str | None = None
     reasons: tuple[str, ...] = ()
     injected: str | None = None
+    way_id: int | None = None
+    road_lat: float | None = None
+    road_lon: float | None = None
+    road_conf: float | None = None
+    road_used: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -119,6 +124,8 @@ def read_trajectory(path: Path, keep_null_pos: bool = False,
             int(r["t_ms"]), r["lat"], r["lon"], sigma_m, bool(r["outage"]),
             r.get("vis_state"), r.get("stationary"),
             r.get("mode"), r.get("health"), tuple(r.get("reasons") or ()), r.get("injected"),
+            way_id=r.get("way_id"), road_lat=r.get("road_lat"), road_lon=r.get("road_lon"),
+            road_conf=r.get("road_conf"), road_used=r.get("road_used"),
         ))
     # Sort rows by t_ms
     rows.sort(key=lambda row: row.t_ms)

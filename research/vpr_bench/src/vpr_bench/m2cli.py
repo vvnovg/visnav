@@ -9,7 +9,9 @@ from pathlib import Path
 from vpr_bench.fieldlog import gps_track, read_log
 from vpr_bench.monitoreval import evaluate_monitor, render_monitor_report
 from vpr_bench.replayeval import evaluate_replay, read_trajectory, render_replay_report
-from vpr_bench.roadpack import write_roadpack
+from vpr_bench.roadeval import evaluate_roads, render_road_report
+from vpr_bench.roadmatch import RoadNet
+from vpr_bench.roadpack import read_roadpack, write_roadpack
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,6 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--log", action="append", default=[], type=Path, help="журнал кадров сессии (.jsonl): его GPS-трек")
     pr.add_argument("--buffer-m", type=float, default=300.0)
     pr.add_argument("--out", required=True, type=Path)
+    rd = sub.add_parser("road-eval", help="оценить привязку к дорогам (NFR-3)")
+    rd.add_argument("--traj", required=True, type=Path)
+    rd.add_argument("--log", required=True, type=Path, help="журнал кадров сессии (.jsonl) — источник GPS")
+    rd.add_argument("--roads", required=True, type=Path, help="каталог roadpack")
+    rd.add_argument("--out", required=True, type=Path)
     return parser
 
 
@@ -64,11 +71,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "pack-roads":
         return _pack_roads(args)
     is_monitor = args.command == "monitor-eval"
-    header, rows = read_trajectory(args.traj, keep_null_pos=is_monitor, allow_fusion=is_monitor)
+    is_road = args.command == "road-eval"
+    header, rows = read_trajectory(args.traj, keep_null_pos=is_monitor, allow_fusion=is_monitor or is_road)
     log_header, frames = read_log(args.log)
     if log_header.get("started_ms") != header.get("session_started_ms"):
         print("error: trajectory and log are from different sessions", file=sys.stderr)
         return 2
+    if is_road:
+        graph, meta = read_roadpack(args.roads)
+        if header.get("roads") is not None and header["roads"] != meta.get("created_at"):
+            print("error: trajectory was made with a different roadpack", file=sys.stderr)
+            return 2
+        res = evaluate_roads(header, rows, frames, RoadNet(graph))
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(render_road_report(res))
+        print(f"correct={res.correct_pct:.1f} % rows={res.n_rows} -> {args.out}")
+        return 0
     if args.command == "monitor-eval":
         mon = evaluate_monitor(header, rows, frames)
         args.out.parent.mkdir(parents=True, exist_ok=True)
