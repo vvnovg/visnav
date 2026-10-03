@@ -272,6 +272,20 @@ class LocalizerRoadTest {
         }
     }
 
+    /**
+     * Подмена «тянет» на север со скоростью 10 м/с с 30 с. С дорогой допускается до +60 м к ошибке без дорог:
+     * 50 м — предел выхода по GPS (roadEscapeMaxM), плюс обычное слияние GNSS после выхода, пока не защёлкнется
+     * INNOVATION (она не считает фиксы ближе 30 м к фильтру). Измерено: ≈ 55 м с дорогой против ≈ 3 м без.
+     */
+    @Test fun rampSpoofWithRoadsNoWorseThanCap() {
+        fun maxErr(roads: RoadPack?) = runScenario(roads, 8_000, { rel ->
+            if (rel < 30_000) 0.0 else (rel - 30_000) / 100.0
+        }).maxOf(::truthErrM)
+        val without = maxErr(null)
+        val with = maxErr(roads())
+        assertTrue(with <= without + 60.0, "ramp spoof max error with roads $with, without $without")
+    }
+
     /** Выход по GPS 90–95 с, затем GNSS снова пропал: приостановка не должна залипнуть. */
     @Test fun escapeThenGnssLostAgainKeepsRoadConstraint() {
         val b = straightRoad(-200.0, 25.0, 2500.0, 25.0, 25.0, 2, 0)
