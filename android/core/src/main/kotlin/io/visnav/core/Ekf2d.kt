@@ -1,7 +1,9 @@
 package io.visnav.core
 
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -91,6 +93,44 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
         )
     }
 
+    /**
+     * Псевдоизмерение «на оси дороги»: прямая через (e0, n0) с азимутом theta (рад от севера по часовой).
+     * Измерение и поправка чисто поперечные: ψ, v и b_g не меняются (частичное обновление Шмидта), а сдвиг
+     * позиции проецируется на нормаль. Без проекции при анизотропной P (вдоль дороги σ велика) K·y имеет
+     * вдоль-дорожную составляющую, и на дуге фильтр отставал от истины на ~1 м/с.
+     */
+    fun updateLateral(e0: Double, n0: Double, theta: Double, sigma: Double): Boolean {
+        require(sigma > 0 && sigma.isFinite()) { "sigma must be positive and finite" }
+        val ne = cos(theta); val nn = -sin(theta) // нормаль к направлению (sin θ, cos θ)
+        val offset = ne * (x[0] - e0) + nn * (x[1] - n0)
+        return update(
+            arrayOf(doubleArrayOf(ne, nn, 0.0, 0.0, 0.0)), doubleArrayOf(-offset), doubleArrayOf(sigma * sigma),
+            config.gateChi2Scalar, intArrayOf(0, 1), doubleArrayOf(ne, nn),
+        )
+    }
+
+    /** Дисперсия позиции поперёк направления theta: n·P[0:2,0:2]·nᵀ, n = (cos θ, −sin θ). */
+    fun lateralVariance(theta: Double): Double {
+        val ne = cos(theta); val nn = -sin(theta)
+        return ne * ne * p[idx(0, 0)] + 2 * ne * nn * p[idx(0, 1)] + nn * nn * p[idx(1, 1)]
+    }
+
+    /**
+     * Раздувание неопределённости позиции: P[0,0] и P[1,1] не меньше minVar, внедиагональные элементы строк и
+     * столбцов 0 и 1 обнуляются (позиция забывает корреляции между осями и с ψ, v, b_g). P остаётся
+     * симметричной и положительно определённой.
+     */
+    fun inflatePosition(minVar: Double) {
+        require(minVar >= 0 && minVar.isFinite()) { "minVar must be non-negative and finite" }
+        for (i in 0 until 2) {
+            val d = max(p[idx(i, i)], minVar)
+            for (j in 0 until N) { p[idx(i, j)] = 0.0; p[idx(j, i)] = 0.0 }
+            p[idx(i, i)] = d
+        }
+    }
+
+    fun headingVariance(): Double = p[idx(2, 2)]
+
     fun posSigma(): Double = sqrt(max(p[idx(0, 0)], p[idx(1, 1)]))
 
     /** χ²-расстояние фикса позиции до прогноза (как в гейте updatePosition), без изменения состояния. */
@@ -103,9 +143,20 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
         return (ye * (s11 * ye - s01 * yn) + yn * (-s10 * ye + s00 * yn)) / det
     }
 
-    /** Общее обновление: H — строки (m ≤ 2), y — невязка, r — дисперсии шума (диагональ). */
-    private fun update(h: Array<DoubleArray>, y: DoubleArray, r: DoubleArray, gate: Double): Boolean {
+    /**
+     * Общее обновление: H — строки (m ≤ 2), y — невязка, r — дисперсии шума (диагональ). С `onlyStates`
+     * строки усиления остальных состояний обнуляются; с `alongNormal` (скалярное измерение, mask = позиция)
+     * поправка позиции дополнительно проецируется на нормаль. Форма Джозефа верна для любого K.
+     */
+    private fun update(
+        h: Array<DoubleArray>, y: DoubleArray, r: DoubleArray, gate: Double, onlyStates: IntArray? = null,
+        alongNormal: DoubleArray? = null,
+    ): Boolean {
         check(initialized) { "filter not initialized" }
+        require(alongNormal == null || (h.size == 1 && alongNormal.size == 2)) { "alongNormal needs a scalar measurement" }
+        require(alongNormal == null || abs(hypot(alongNormal[0], alongNormal[1]) - 1.0) <= 1e-6) {
+            "alongNormal must be a unit vector"
+        }
         if (y.any { !it.isFinite() }) return false
         val m = h.size
         // PHᵀ (N×m)
@@ -125,6 +176,11 @@ class Ekf2d(val config: FilterConfig = FilterConfig()) {
         if (!(d2 <= gate)) return false
         // K = PHᵀ S⁻¹ (N×m)
         val k = Array(N) { i -> DoubleArray(m) { b -> (0 until m).sumOf { a -> pht[i][a] * sInv[a][b] } } }
+        if (onlyStates != null) for (i in 0 until N) if (i !in onlyStates) k[i].fill(0.0)
+        if (alongNormal != null) { // поправка позиции только вдоль нормали: K_pos := n·(nᵀ K_pos)
+            val kn = alongNormal[0] * k[0][0] + alongNormal[1] * k[1][0]
+            k[0][0] = alongNormal[0] * kn; k[1][0] = alongNormal[1] * kn
+        }
         for (i in 0 until N) x[i] += (0 until m).sumOf { a -> k[i][a] * y[a] }
         x[2] = wrapAngle(x[2])
         // Форма Джозефа: P = (I − KH) P (I − KH)ᵀ + K R Kᵀ

@@ -32,6 +32,11 @@ class TrajRow:
     health: str | None = None
     reasons: tuple[str, ...] = ()
     injected: str | None = None
+    way_id: int | None = None
+    road_lat: float | None = None
+    road_lon: float | None = None
+    road_conf: float | None = None
+    road_used: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +67,7 @@ class ReplayResult:
     vis_counts: dict[str, int] = field(default_factory=dict)  # only populated when visual
     false_stationary_pct: float = float("nan")
     missed_stationary_pct: float = float("nan")
+    roads: str | None = None  # created_at графа дорог из заголовка replay
 
     def has_data(self, min_outage_dist_m: float = TABLE_MIN_OUTAGE_DIST_M) -> bool:
         """Check if there is data to evaluate: visual mode needs n_points > 0;
@@ -119,6 +125,8 @@ def read_trajectory(path: Path, keep_null_pos: bool = False,
             int(r["t_ms"]), r["lat"], r["lon"], sigma_m, bool(r["outage"]),
             r.get("vis_state"), r.get("stationary"),
             r.get("mode"), r.get("health"), tuple(r.get("reasons") or ()), r.get("injected"),
+            way_id=r.get("way_id"), road_lat=r.get("road_lat"), road_lon=r.get("road_lon"),
+            road_conf=r.get("road_conf"), road_used=r.get("road_used"),
         ))
     # Sort rows by t_ms
     rows.sort(key=lambda row: row.t_ms)
@@ -230,6 +238,7 @@ def evaluate_replay(
         vis_counts=whole_vis_counts if visual else {},
         false_stationary_pct=whole_false_pct,
         missed_stationary_pct=whole_missed_pct,
+        roads=header.get("roads"),
     )
 
 
@@ -298,4 +307,6 @@ def render_replay_report(r: ReplayResult, min_outage_dist_m: float = TABLE_MIN_O
             lines += ["", "Визуальные фиксации по пропаданиям:"]
             for i, o in enumerate(shown, start=1):
                 lines.append(f"- Пропадание {i} ({(o.end_ms - o.start_ms) / 1000:.0f} с): {_vis_state_line(o.vis_counts)}")
+    if r.roads:
+        lines += ["", "Дорожные данные © участники OpenStreetMap, ODbL 1.0."]
     return "\n".join(lines) + "\n"

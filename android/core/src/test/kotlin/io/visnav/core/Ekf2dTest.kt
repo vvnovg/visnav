@@ -123,4 +123,65 @@ class Ekf2dTest {
         assertContentEquals(before.first, f.x); assertContentEquals(before.second, f.p)
         assertFailsWith<IllegalArgumentException> { f.positionD2(0.0, 0.0, 0.0) }
     }
+
+    @Test fun updateLateralPullsOnlyAcrossTheRoad() {
+        val ekf = Ekf2d()
+        ekf.init(0.0, 10.0, Math.PI / 2, 10.0, 10.0, 0.1, 1.0)
+        // Дорога на восток через (0, 0): поперечное смещение = 10 м к северу.
+        assertTrue(ekf.updateLateral(0.0, 0.0, Math.PI / 2, 4.0))
+        assertTrue(ekf.x[1] < 3.0, "n=${ekf.x[1]}")
+        assertEquals(0.0, ekf.x[0], 1e-9)
+    }
+
+    @Test fun updateLateralIsGated() {
+        val ekf = Ekf2d()
+        ekf.init(0.0, 1000.0, Math.PI / 2, 10.0, 3.0, 0.1, 1.0)
+        assertFalse(ekf.updateLateral(0.0, 0.0, Math.PI / 2, 4.0))
+        assertEquals(1000.0, ekf.x[1], 1e-9)
+    }
+
+    @Test fun updateLateralMovesOnlyPosition() {
+        val f = filter(psi = PI / 4)
+        repeat(50) { f.predict(0.1, 0.02) }
+        assertTrue(f.p[2] != 0.0 && f.p[3] != 0.0 && f.p[4] != 0.0, "P must carry e-psi/e-v/e-bg cross terms")
+        val before = f.x.copyOf()
+        assertTrue(f.updateLateral(f.x[0] + 5.0, f.x[1] - 5.0, PI / 2, 4.0))
+        assertEquals(before[2], f.x[2], 0.0); assertEquals(before[3], f.x[3], 0.0); assertEquals(before[4], f.x[4], 0.0)
+        assertTrue(f.x[1] != before[1])
+    }
+
+    @Test fun lateralVarianceProjectsCovariance() {
+        val f = filter()
+        f.p.fill(0.0)
+        f.p[0] = 4.0; f.p[1] = 1.5; f.p[5] = 1.5; f.p[6] = 9.0 // Pee=4, Pen=1.5, Pnn=9
+        assertEquals(9.0, f.lateralVariance(PI / 2), 1e-12)
+        assertEquals(4.0, f.lateralVariance(0.0), 1e-12)
+        val th = PI / 4 // n = (cos, -sin) = (s, -s), s = sqrt(1/2): 0.5·(Pee + Pnn) − Pen
+        assertEquals(0.5 * (4.0 + 9.0) - 1.5, f.lateralVariance(th), 1e-12)
+    }
+
+    @Test fun updateLateralDisplacesOnlyAlongTheNormalWithAnisotropicP() {
+        val f = filter(psi = PI / 4)
+        repeat(50) { f.predict(0.1, 0.02) }
+        val e0 = f.x[0]; val n0 = f.x[1]
+        assertTrue(f.updateLateral(e0 + 4.0, n0 - 4.0, PI / 2, 4.0)) // дорога на восток: смещение только по n
+        assertEquals(e0, f.x[0], 1e-9)
+        assertTrue(f.x[1] != n0)
+    }
+
+    @Test fun inflatePositionRaisesDiagonalAndDecouplesPosition() {
+        val f = filter(psi = PI / 4)
+        repeat(50) { f.predict(0.1, 0.02) }
+        assertTrue(f.updatePosition(f.x[0] + 1.0, f.x[1] - 1.0, 3.0)) // корреляции позиции с ψ, v, b_g ≠ 0
+        val pee = f.p[0]
+        assertTrue(f.p[2] != 0.0 && f.p[1] != 0.0)
+        f.inflatePosition(400.0)
+        assertTrue(f.p[0] >= 400.0 && f.p[6] >= 400.0)
+        for (i in 0 until 2) for (j in 0 until 5) if (i != j) {
+            assertEquals(0.0, f.p[i * 5 + j], "P[$i,$j]"); assertEquals(0.0, f.p[j * 5 + i], "P[$j,$i]")
+        }
+        for (i in 0 until 5) for (j in 0 until 5) assertEquals(f.p[i * 5 + j], f.p[j * 5 + i], 1e-12, "symmetry $i,$j")
+        f.inflatePosition(pee / 1000) // меньше текущей: диагональ не уменьшается
+        assertEquals(400.0, f.p[0], 1e-9)
+    }
 }

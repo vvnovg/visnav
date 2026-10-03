@@ -5,7 +5,10 @@ import io.visnav.core.ClockEvent
 import io.visnav.core.FrameCaptureEvent
 import io.visnav.core.GyroEvent
 import io.visnav.core.LocEvent
+import java.io.File
+import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
+import kotlin.test.assertFailsWith
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
@@ -105,5 +108,15 @@ class MainTest {
             "10:5:NaN:200", "10:5:0:Infinity", "10:5:0:200:-1", "10:5:0:200:NaN", "10:5:x:200")) {
             assertNull(parseSpoof(bad, 0), bad)
         }
+    }
+
+    @Test fun loadRoadsReadsCrossLanguageFixture() {
+        val (pack, meta) = loadRoads(File("../../research/vpr_bench/tests/data/roadpack_fixture"))
+        assertEquals(2, pack.edgeCount); assertEquals("2026-10-02T00:00:00Z", meta.createdAt)
+    }
+
+    @Test fun loadRoadsFailsClearlyWithoutFiles() {
+        val e = assertFailsWith<IllegalArgumentException> { loadRoads(createTempDirectory().toFile()) }
+        assertTrue(e.message!!.contains("roadpack"))
     }
 }

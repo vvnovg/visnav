@@ -27,6 +27,7 @@ import io.visnav.core.TrajectoryFormat
 import io.visnav.core.LocalizationPipeline
 import io.visnav.core.PriorMode
 import io.visnav.core.PriorPolicy
+import io.visnav.core.RoadInfo
 import io.visnav.core.SensorLogFormat
 import io.visnav.core.SensorLogger
 import io.visnav.core.SessionHeader
@@ -55,6 +56,8 @@ data class UiState(
     val navMode: NavMode? = null,
     val sigmaM: Double? = null,
     val gnssReasons: Set<GnssReason> = emptySet(),
+    val roadsLoaded: Boolean = false,
+    val road: RoadInfo? = null,
 )
 
 /** Журнал траектории фильтра: заголовок и по строке на кадр. */
@@ -106,7 +109,8 @@ class M1Controller(private val context: Context) {
             }
             bundle = b
             analyzer.set(FrameAnalyzer(intervalMs = 500, inputW = b.meta.inputW, inputH = b.meta.inputH))
-            _state.update { it.copy(loaded = true, status = "База: ${b.pack.count} эталонов, модель ${b.meta.model}") }
+            _state.update { it.copy(loaded = true, roadsLoaded = b.roads != null,
+                status = "База: ${b.pack.count} эталонов, модель ${b.meta.model}") }
             // Parity — диагностика, а не условие готовности: провал не должен блокировать запись.
             try {
                 val parity = ParityCheck.runIfPresent(dataDir, b.embedder, File(logDir, "parity.json"))
@@ -163,7 +167,7 @@ class M1Controller(private val context: Context) {
             // дописываются к этому статусу через "it.status + ...", а не затираются им — раньше
             // финальный _state.update шёл последним и стирал их целиком.
             _state.update { it.copy(running = true, frames = 0, errors = 0, status = "Запись: ${mode.name}",
-                navMode = null, sigmaM = null, gnssReasons = emptySet()) }
+                navMode = null, sigmaM = null, gnssReasons = emptySet(), road = null) }
             logDir.mkdirs()
             val startedMs = System.currentTimeMillis()
             val base = "session-$startedMs-${mode.name.lowercase()}"
@@ -186,8 +190,8 @@ class M1Controller(private val context: Context) {
             descLog = dLog
             val fLog = FusionLog(File(logDir, "$base.fusion.jsonl"))
             fusionLog = fLog
-            fLog.line(TrajectoryFormat.fusionHeader(startedMs, b.meta.createdAt))
-            val localizer = Localizer(b.pack, LocalizerConfig())
+            fLog.line(TrajectoryFormat.fusionHeader(startedMs, b.meta.createdAt, b.roadsMeta?.createdAt))
+            val localizer = Localizer(b.pack, LocalizerConfig(), b.roads)
             val reorderer = EventReorderer()
             var sensorFailureReported = false
             var frameFailureReported = false
@@ -207,7 +211,7 @@ class M1Controller(private val context: Context) {
                         val out = localizer.onFrame(item.frameTMs, item.desc)
                         if (out != null) {
                             fLog.line(TrajectoryFormat.row(out, false, null))
-                            _state.update { it.copy(navMode = out.mode, sigmaM = out.sigmaM, gnssReasons = out.reasons) }
+                            _state.update { it.copy(navMode = out.mode, sigmaM = out.sigmaM, gnssReasons = out.reasons, road = out.road) }
                         }
                     } catch (e: Exception) {
                         // Сбой фильтра на кадре не останавливает запись.
@@ -346,7 +350,9 @@ class M1Controller(private val context: Context) {
                 if (failedCount > 0) append(" · ошибок записи датчиков: $failedCount")
                 for (err in closeErrors) append("; $err")
             }
-            _state.update { it.copy(running = false, status = "Ошибка запуска: ${e.message}$suffix") }
+            _state.update { it.copy(running = false, status = "Ошибка запуска: ${e.message}$suffix",
+                navMode = null, sigmaM = null,
+                gnssReasons = emptySet(), road = null) }
         }
     }
 
@@ -396,7 +402,9 @@ class M1Controller(private val context: Context) {
                 if (failedCount > 0) append(" · журнал датчиков прерван после ошибки записи")
                 for (err in closeErrors) append(" · $err")
             }
-            _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}$suffix") }
+            _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}$suffix",
+                navMode = null, sigmaM = null,
+                gnssReasons = emptySet(), road = null) }
         }
     }
 
@@ -440,7 +448,9 @@ class M1Controller(private val context: Context) {
             if (failedCount > 0) append(" · ошибок записи датчиков: $failedCount")
             for (err in closeErrors) append("; $err")
         }
-        _state.update { it.copy(running = false, status = "$message$suffix") }
+        _state.update { it.copy(running = false, status = "$message$suffix",
+                navMode = null, sigmaM = null,
+                gnssReasons = emptySet(), road = null) }
     }
 
     /** Освобождает камеру/GPS/логгер/модель. Вызывать один раз при уничтожении владельца. */
