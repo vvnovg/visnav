@@ -30,4 +30,11 @@ class TrajectoryFormatHeaderTest {
         assertTrue(TrajectoryFormat.fusionHeader(1L, "c", "r1").endsWith(",\"roads\":\"r1\"}"))
         assertTrue(TrajectoryFormat.fusionHeader(1L, "c").endsWith(",\"roads\":null}"))
     }
+
+    @Test fun fusionHeaderCarriesReorderDelay() {
+        val h = TrajectoryFormat.fusionHeader(1L, "c", "r1", reorderDelayMs = 500)
+        assertTrue(h.contains("\"reorder_delay_ms\":500"))
+        Json.parseToJsonElement(h)
+        assertTrue(!TrajectoryFormat.fusionHeader(1L, "c", "r1").contains("reorder_delay_ms"))
+    }
 }

@@ -66,4 +66,46 @@ class EventReordererTest {
         assertEquals(2, r.dropped)
         assertEquals(listOf(3.0, 4.0, 5.0), r.drainList(100).times())
     }
+
+    @Test fun latenessStatsPerSource() {
+        val r = EventReorderer(0)
+        r.push(ev(1000.0), 1100); r.push(ev(2000.0), 2300); r.push(ev(3000.0), 3200)
+        val imu = r.latenessSnapshotAndReset().getValue("imu")
+        assertEquals(LatenessStats(3, 200.0, 300.0, 300.0), imu)
+    }
+
+    @Test fun snapshotResetsWindow() {
+        val r = EventReorderer(0)
+        r.push(ev(1000.0), 1100)
+        assertEquals(1, r.latenessSnapshotAndReset().getValue("imu").n)
+        assertEquals(null, r.latenessSnapshotAndReset()["imu"])
+    }
+
+    @Test fun oldPushRecordsZeroLateness() {
+        val r = EventReorderer(0)
+        r.push(ev(1000.0))
+        assertEquals(LatenessStats(1, 0.0, 0.0, 0.0), r.latenessSnapshotAndReset().getValue("imu"))
+    }
+
+    @Test fun sourcesMappedByEventType() {
+        val r = EventReorderer(0)
+        r.push(ReorderItem.Frame(1, null), 11)
+        r.push(ReorderItem.Sensor(LocEvent(1.0, 55.0, 37.0, 3f, null, null, null, null)), 21)
+        r.push(ReorderItem.Sensor(GnssStatusEvent(1.0, 10, 8, 30f)), 31)
+        r.push(ReorderItem.Sensor(AccelEvent(1.0, 0f, 0f, 0f)), 41)
+        r.push(ReorderItem.Sensor(GyroUncalEvent(1.0, 0f, 0f, 0f, 0f, 0f, 0f)), 51)
+        r.push(ReorderItem.Sensor(AgcEvent(1.0, 1f, 1)), 61)
+        r.push(ReorderItem.Sensor(ClockEvent(1.0, 1, 1, 1)), 71)
+        val s = r.latenessSnapshotAndReset()
+        assertEquals(10.0, s.getValue("frame").max)
+        assertEquals(20.0, s.getValue("gnss_fix").max)
+        assertEquals(30.0, s.getValue("gnss_status").max)
+        assertEquals(LatenessStats(2, 40.0, 50.0, 50.0), s.getValue("imu"))
+        assertEquals(60.0, s.getValue("agc").max)
+        assertEquals(70.0, s.getValue("other").max)
+    }
+
+    @Test fun delayIsPublic() {
+        assertEquals(800L, EventReorderer(800).delayMs)
+    }
 }

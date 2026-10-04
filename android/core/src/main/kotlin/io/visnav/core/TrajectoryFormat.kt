@@ -12,9 +12,12 @@ object TrajectoryFormat {
     }
 
     /** Заголовок журнала fusion; строка refpack_created_at экранируется как JSON. */
-    fun fusionHeader(sessionStartedMs: Long, refpackCreatedAt: String, roadsCreatedAt: String? = null): String =
+    fun fusionHeader(
+        sessionStartedMs: Long, refpackCreatedAt: String, roadsCreatedAt: String? = null, reorderDelayMs: Long? = null,
+    ): String =
         "{\"type\":\"fusion\",\"monitor\":true,\"session_started_ms\":$sessionStartedMs," +
-            "\"refpack_created_at\":${JsonPrimitive(refpackCreatedAt)},\"roads\":${str(roadsCreatedAt)}}"
+            "\"refpack_created_at\":${JsonPrimitive(refpackCreatedAt)},\"roads\":${str(roadsCreatedAt)}" +
+            (if (reorderDelayMs != null) ",\"reorder_delay_ms\":$reorderDelayMs}" else "}")
 
     fun row(o: LocalizerOutput, inOutage: Boolean, injected: String?): String {
         val reasons = o.reasons.joinToString(",") { JsonPrimitive(it.name.lowercase()).toString() }
