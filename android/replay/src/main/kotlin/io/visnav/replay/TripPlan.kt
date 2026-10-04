@@ -19,7 +19,9 @@ import kotlin.math.hypot
 private const val TRIP_PLAN_USAGE =
     "usage: replay trip-plan --roads DIR --from LAT,LON --to LAT,LON [--via LAT,LON]... --out FILE.gpx"
 
-class TripRoute(val latLon: List<DoubleArray>, val lengthM: Double, val durationS: Double)
+/** turnsAtVia — нога после промежуточной точки начинается против курса прибытия (разворот на via; возможен только
+ * на графе с краями коридора, когда другого пути нет). */
+class TripRoute(val latLon: List<DoubleArray>, val lengthM: Double, val durationS: Double, val turnsAtVia: Boolean = false)
 
 /**
  * Маршрут через промежуточные точки: ноги по одной. Первая нога — от точки from без курса. Каждая следующая —
@@ -45,6 +47,7 @@ fun planTrip(pack: RoadPack, waypoints: List<DoubleArray>, config: RouterConfig 
     var length = 0.0; var duration = 0.0
     var cur = enu.toEn(waypoints[0][0], waypoints[0][1])
     var arrival: RouteStep? = null
+    var turnsAtVia = false
     for (w in waypoints.drop(1)) {
         val target = enu.toEn(w[0], w[1])
         val st = arrival
@@ -63,6 +66,7 @@ fun planTrip(pack: RoadPack, waypoints: List<DoubleArray>, config: RouterConfig 
             val sN = if (along > 0) cur[1] + dn / along * backM else cur[1]
             val heading = if (st.forward) index.bearing[e] else wrapAngle(index.bearing[e] + PI)
             r = nextRouter.route(sE, sN, heading, target[0], target[1]) ?: return null
+            if (r.startsAgainstHeading) turnsAtVia = true
             length -= backM; duration -= backM / pack.speedMps(e)
         }
         val legPts = r.points.map { enu.toLatLon(it[0], it[1]) }
@@ -82,7 +86,7 @@ fun planTrip(pack: RoadPack, waypoints: List<DoubleArray>, config: RouterConfig 
             else -> last
         }
     }
-    return TripRoute(pts, length, duration)
+    return TripRoute(pts, length, duration, turnsAtVia)
 }
 
 fun densify(latLon: List<DoubleArray>, maxStepM: Double = 25.0): List<DoubleArray> {
@@ -163,6 +167,7 @@ fun tripPlanMain(args: List<String>): Int {
     } catch (e: IOException) {
         return tripPlanError("cannot write $out: ${e.message}", usage = false)
     }
+    if (route.turnsAtVia) System.err.println("warning: the route turns around at a via point (no other way in this graph); use the city graph or move the via")
     println("route %.1f km, ~%d min est. (incl. turn penalties), %d points -> %s".format(
         java.util.Locale.ROOT, route.lengthM / 1000, Math.round(route.durationS / 60), pts.size, out))
     return 0

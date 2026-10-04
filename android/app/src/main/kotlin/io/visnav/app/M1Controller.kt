@@ -189,6 +189,14 @@ class M1Controller(private val context: Context) {
         // Карта на экране зависит только от tripDir: ставим его сразу, вместе с trip, до загрузки базы.
         _state.update { it.copy(trip = dirs.name, trips = trips, tripDir = dirs.dataDir.absolutePath) }
         val prefix = dirs.name?.let { "Поездка: $it · " }.orEmpty()
+        // Общая модель лежит в корне refpack/, а не в каталоге поездки: подсказка adb push должна вести туда.
+        if (dirs.name != null && !dirs.model.isFile) {
+            _state.update {
+                it.copy(loaded = false, status = prefix + "Нет модели: ${dirs.model.absolutePath}. Скопируйте: " +
+                    "adb push <пакет>/model.onnx /sdcard/Android/data/io.visnav.app/files/refpack/")
+            }
+            return
+        }
         val b = try {
             BundleLoader.load(dirs.dataDir, dirs.model)
         } catch (e: Exception) {
