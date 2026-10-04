@@ -41,6 +41,10 @@ class TripLayoutTest {
         assertEquals(TripDirs("b", File(trips, "b"), File(root, "model.onnx")), TripLayout.resolve(root, "b").getOrThrow())
         assertEquals("a", TripLayout.resolve(root, "gone").getOrThrow().name)
         assertEquals(File(trips, "a"), TripLayout.resolve(root, null).getOrThrow().dataDir)
+        touch(root, "trips/.hidden/refpack.bin")
+        File(root, "trips/empty").mkdirs()
+        assertEquals("a", TripLayout.resolve(root, ".hidden").getOrThrow().name)
+        assertEquals("a", TripLayout.resolve(root, "empty").getOrThrow().name)
     }
 
     @Test fun modelFromTripOrRoot() = withRoot { root ->
@@ -53,6 +57,7 @@ class TripLayoutTest {
 
     @Test fun emptyTripsDirFails() = withRoot { root ->
         File(root, "trips/c").mkdirs()
+        assertEquals(emptyList(), TripLayout.list(root))
         val r = TripLayout.resolve(root, null)
         assertTrue(r.isFailure)
         assertTrue(r.exceptionOrNull()!!.message!!.contains("Нет поездок"))

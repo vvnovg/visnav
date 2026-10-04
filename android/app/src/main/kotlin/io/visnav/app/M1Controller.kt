@@ -101,6 +101,10 @@ class M1Controller(private val context: Context) {
     private val analyzer = AtomicReference<FrameAnalyzer?>(null)
     private val runningFlag = AtomicBoolean(false)
     @Volatile private var bundle: LoadedBundle? = null
+    /** Защищает пару bundle/analyzer: замена в loadBundle() и чтение в start(). */
+    private val swapLock = Any()
+    /** Последняя выбранная поездка, ещё не загруженная executor'ом (схлопывает частые selectTrip). */
+    private val pendingTrip = AtomicReference<String?>(null)
     @Volatile private var logger: SessionLogger? = null
     @Volatile private var sensorLog: SensorLogger? = null
     @Volatile private var descLog: DescriptorLogWriter? = null
@@ -119,39 +123,55 @@ class M1Controller(private val context: Context) {
 
     /**
      * Выбор поездки (trips/<имя>): перезагружает базу и модель на executor. Во время записи не действует.
-     * Выбор запоминается и восстанавливается при следующем запуске.
+     * Выбор запоминается и восстанавливается при следующем запуске. Частые вызовы схлопываются:
+     * executor грузит только последний выбор.
      */
     fun selectTrip(name: String) {
-        if (_state.value.running) return
-        executor.execute { if (!runningFlag.get()) loadBundle(name) }
+        if (executor.isShutdown) return
+        val s = _state.value
+        if (s.running || (name == s.trip && s.loaded)) return
+        pendingTrip.set(name)
+        try {
+            executor.execute { pendingTrip.getAndSet(null)?.let { loadBundle(it) } }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            // close() уже закрыл executor.
+        }
     }
 
     /** Только на executor: закрывает прежнюю базу и грузит выбранную поездку (или старую раскладку). */
     private fun loadBundle(wanted: String?) {
-        bundle?.embedder?.close()
-        bundle = null
-        analyzer.set(null)
+        // Под swapLock — вместе с чтением bundle/analyzer в start(): либо start() берёт прежнюю базу и
+        // runningFlag уже поднят (тогда не трогаем её), либо видит null и откатывает запуск.
+        val old = synchronized(swapLock) {
+            if (runningFlag.get()) return
+            bundle.also { bundle = null; analyzer.set(null) }
+        }
+        runCatching { old?.embedder?.close() }
         _state.update { it.copy(loaded = false, roadsLoaded = false, status = "Загрузка базы…") }
         val trips = TripLayout.list(dataDir).orEmpty()
         val dirs = TripLayout.resolve(dataDir, wanted).getOrElse { e ->
             _state.update { it.copy(loaded = false, trip = null, trips = trips, status = e.message ?: "Нет поездок") }
             return
         }
+        tripDataDir = dirs.dataDir
         val prefix = dirs.name?.let { "Поездка: $it · " }.orEmpty()
         val b = try {
             BundleLoader.load(dirs.dataDir, dirs.model)
         } catch (e: Exception) {
+            val target = dirs.name?.let { "refpack/trips/$it/" } ?: "refpack/"
+            val source = if (dirs.name != null) "<пакет>" else "<bundle>"
             _state.update {
                 it.copy(loaded = false, trip = dirs.name, trips = trips,
-                    status = prefix + "Нет базы: ${e.message}. Скопируйте файлы: adb push <bundle>/. " +
-                        "/sdcard/Android/data/io.visnav.app/files/refpack/")
+                    status = prefix + "Нет базы: ${e.message}. Скопируйте файлы: adb push $source/. " +
+                        "/sdcard/Android/data/io.visnav.app/files/$target")
             }
             return
         }
-        bundle = b
-        tripDataDir = dirs.dataDir
+        synchronized(swapLock) {
+            bundle = b
+            analyzer.set(FrameAnalyzer(intervalMs = 500, inputW = b.meta.inputW, inputH = b.meta.inputH))
+        }
         if (dirs.name != null) prefs.edit().putString("trip", dirs.name).apply()
-        analyzer.set(FrameAnalyzer(intervalMs = 500, inputW = b.meta.inputW, inputH = b.meta.inputH))
         _state.update { it.copy(loaded = true, roadsLoaded = b.roads != null, trip = dirs.name, trips = trips,
             status = prefix + "База: ${b.pack.count} эталонов, модель ${b.meta.model}") }
         if (File(dirs.dataDir, "route.json").isFile && b.roads == null) {
@@ -159,7 +179,11 @@ class M1Controller(private val context: Context) {
         }
         b.routeWarning?.let { w -> _state.update { it.copy(status = it.status + " · " + w) } }
         // Parity — диагностика, а не условие готовности: провал не должен блокировать запись.
-        // Файлы parity лежат в корне refpack/, общие для всех поездок.
+        // Файлы parity лежат в корне refpack/ и относятся к общей модели refpack/model.onnx.
+        if (dirs.model != File(dataDir, "model.onnx")) {
+            _state.update { it.copy(status = it.status + " · parity: пропущено (модель поездки)") }
+            return
+        }
         try {
             val parity = ParityCheck.runIfPresent(dataDir, b.embedder, File(logDir, "parity.json"))
             if (parity != null) {
@@ -208,8 +232,7 @@ class M1Controller(private val context: Context) {
         // должны создать вторую сессию записи и второй SessionLogger поверх первого.
         if (!runningFlag.compareAndSet(false, true)) return
         try {
-            val b = bundle
-            val frameAnalyzer = analyzer.get()
+            val (b, frameAnalyzer) = synchronized(swapLock) { bundle to analyzer.get() }
             if (b == null || frameAnalyzer == null) {
                 runningFlag.set(false)
                 return
