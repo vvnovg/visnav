@@ -24,6 +24,21 @@ android {
 
 kotlin { jvmToolchain(17) }
 
+val verifyNoNetworkPermissions by tasks.registering {
+    description = "Fails if the merged debug manifest requests network permissions (offline app)."
+    dependsOn("processDebugMainManifest")
+    doLast {
+        val manifest = layout.buildDirectory.file("intermediates/merged_manifest/debug/processDebugMainManifest/AndroidManifest.xml").get().asFile
+        check(manifest.isFile) { "merged manifest not found: $manifest" }
+        val text = manifest.readText()
+        val banned = listOf("android.permission.INTERNET", "android.permission.ACCESS_NETWORK_STATE",
+            "android.permission.ACCESS_WIFI_STATE")
+        val found = banned.filter { text.contains("\"$it\"") }
+        check(found.isEmpty()) { "network permissions in merged manifest: $found" }
+    }
+}
+tasks.named("check") { dependsOn(verifyNoNetworkPermissions) }
+
 dependencies {
     implementation(project(":core"))
     implementation(libs.androidx.core.ktx)
@@ -38,4 +53,5 @@ dependencies {
     implementation(libs.camerax.lifecycle)
     implementation(libs.camerax.view)
     implementation(libs.onnxruntime.android)
+    implementation(libs.maplibre.android)
 }

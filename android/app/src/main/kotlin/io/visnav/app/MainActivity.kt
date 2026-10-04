@@ -11,6 +11,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import org.maplibre.android.MapLibre
 
 class MainActivity : ComponentActivity() {
     private val permissions = arrayOf(
@@ -31,6 +32,7 @@ class MainActivity : ComponentActivity() {
             ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
         }
         if (!granted.value) request.launch(permissions)
+        MapLibre.getInstance(applicationContext)
         setContent {
             val viewModel: M1ViewModel = viewModel()
             MaterialTheme { M1Screen(viewModel.controller, granted.value) }
