@@ -21,17 +21,18 @@ data class MapPalette(
     val label: String,
     val labelHalo: String,
     val route: String,
+    val tunnel: String,
 ) {
     companion object {
         val DAY = MapPalette(
             background = "#F2EFE9", water = "#AAD3DF", park = "#CDEBB0", building = "#D9D0C9",
             roadMinor = "#FFFFFF", roadMajor = "#FCD6A4", roadMotorway = "#E892A2", casing = "#BBBBBB",
-            label = "#333333", labelHalo = "#FFFFFF", route = "#1E88E5",
+            label = "#333333", labelHalo = "#FFFFFF", route = "#1E88E5", tunnel = "#9E9E9E",
         )
         val NIGHT = MapPalette(
             background = "#1E2126", water = "#2B3A4A", park = "#24332A", building = "#2E3135",
             roadMinor = "#3B4048", roadMajor = "#6B5B3E", roadMotorway = "#7A4A55", casing = "#15171A",
-            label = "#D0D0D0", labelHalo = "#1E2126", route = "#64B5F6",
+            label = "#D0D0D0", labelHalo = "#1E2126", route = "#64B5F6", tunnel = "#8A8F98",
         )
     }
 }
@@ -80,9 +81,15 @@ object MapStyle {
                 return if (extra == null) cls else expr("all", cls, extra)
             }
             val round = mapOf("line-cap" to str("round"), "line-join" to str("round"))
-            add(layer("road-casing", "line", OMT, "transportation",
-                filter = roadFilter(ALL_ROADS, notTunnel), layout = round,
-                paint = mapOf("line-color" to str(palette.casing), "line-width" to widthByZoom(13, 3.0, 18, 16.0))))
+            for ((suffix, classes, w0, w1) in listOf(
+                CasingGroup("minor", listOf("minor", "service"), 4.0, 10.0),
+                CasingGroup("major", listOf("primary", "secondary", "tertiary"), 5.0, 14.0),
+                CasingGroup("motorway", listOf("motorway", "trunk"), 6.0, 16.0),
+            )) {
+                add(layer("road-casing-$suffix", "line", OMT, "transportation",
+                    filter = roadFilter(classes, notTunnel), layout = round,
+                    paint = mapOf("line-color" to str(palette.casing), "line-width" to widthByZoom(13, w0, 18, w1))))
+            }
             add(layer("road-minor", "line", OMT, "transportation",
                 filter = roadFilter(listOf("minor", "service"), notTunnel), layout = round,
                 paint = mapOf("line-color" to str(palette.roadMinor), "line-width" to widthByZoom(13, 2.0, 18, 8.0))))
@@ -95,7 +102,7 @@ object MapStyle {
             add(layer("road-tunnel", "line", OMT, "transportation",
                 filter = roadFilter(ALL_ROADS, tunnel),
                 paint = mapOf(
-                    "line-color" to str(palette.casing),
+                    "line-color" to str(palette.tunnel),
                     "line-width" to widthByZoom(13, 2.0, 18, 8.0),
                     "line-dasharray" to buildJsonArray { add(JsonPrimitive(2)); add(JsonPrimitive(1)) },
                 )))
@@ -142,10 +149,14 @@ object MapStyle {
     private fun num(n: Number): JsonElement = JsonPrimitive(n)
     private fun strings(l: List<String>): JsonArray = JsonArray(l.map { JsonPrimitive(it) })
 
-    private fun expr(op: String, vararg args: Any): JsonArray = buildJsonArray {
+    private data class CasingGroup(val suffix: String, val classes: List<String>, val w0: Double, val w1: Double)
+
+    private fun expr(op: String, vararg args: JsonElement): JsonArray = buildJsonArray {
         add(JsonPrimitive(op))
-        for (a in args) add(if (a is JsonElement) a else JsonPrimitive(a as String))
+        for (a in args) add(a)
     }
+    private fun expr(op: String, key: String): JsonArray = expr(op, JsonPrimitive(key))
+    private fun expr(op: String, a: JsonElement, b: String): JsonArray = expr(op, a, JsonPrimitive(b))
 
     private fun interpolate(z0: Int, w0: Double, z1: Int, w1: Double, exponential: Boolean = true): JsonArray =
         buildJsonArray {
