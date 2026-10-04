@@ -93,15 +93,43 @@ def test_e2e_percentiles_from_100_frames(tmp_path):
     assert st.p50 == pytest.approx(50.5)
     assert st.p95 == pytest.approx(95.05)
     assert st.max == pytest.approx(100.0)
-    assert res.buffer_share == pytest.approx(1500 / 50.5)
+    assert res.buffer_ratio == pytest.approx(1500 / 50.5)
     assert res.nfr4_ok is True
     text = render(res)
     assert "NFR-4" in text and "| e2e | 100 | 50.5 |" in text
+    assert "×29.7" in text
 
 
 def test_e2e_over_300_fails_nfr4(tmp_path):
     frames = [_frame(T0 + i * 500, e2e=400) for i in range(20)]
     assert evaluate(read_perf(_write(tmp_path, frames))).nfr4_ok is False
+
+
+def test_no_frames_is_nfr4_no_data(tmp_path):
+    res = evaluate(read_perf(_write(tmp_path, _sys_run(5))))
+    assert res.nfr4_ok is None
+    assert res.buffer_ratio is None
+    assert "p95 e2e ≤ 300 мс — ⚠️ нет данных" in render(res)
+
+
+def test_empty_file_is_value_error_and_cli_2(tmp_path):
+    p = tmp_path / "e.perf.jsonl"
+    p.write_text("\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        read_perf(p)
+    assert main(["perf-eval", "--perf", str(p), "--out", str(tmp_path / "r.md")]) == 2
+
+
+def test_truncated_last_line_skipped_middle_line_fails(tmp_path):
+    good = [json.dumps(r, separators=(",", ":")) for r in (_header(), _sys(T0), _sys(T0 + 5000))]
+    p = tmp_path / "t.perf.jsonl"
+    p.write_text("\n".join(good) + '\n{"type":"sys","t_ms":17000', encoding="utf-8")
+    with pytest.warns(UserWarning, match="truncated final line"):
+        log = read_perf(p)
+    assert len(log.sys) == 2
+    p.write_text("\n".join([good[0], '{"type":"sys","t_ms":17000', good[1], good[2]]) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="malformed line 2"):
+        read_perf(p)
 
 
 def test_drain_full_vs_baseline(tmp_path):
@@ -114,9 +142,11 @@ def test_drain_full_vs_baseline(tmp_path):
     assert res.baseline_drain.pct_per_h == pytest.approx(20.0)
     assert res.excess_pct_per_h == pytest.approx(20.0)
     assert res.nfr6_ok is False
+    assert res.nfr6_rough is False
+    assert res.run_warnings == []
     assert res.drain.mean_current_ma == pytest.approx(450.0)
     text = render(res)
-    assert "40.0 %/ч" in text and "20.0 %/ч" in text
+    assert "40.0 %/ч" in text and "20.0 %/ч" in text and "450 мА (разряд)" in text
 
 
 def test_drain_within_15_passes(tmp_path):
@@ -145,73 +175,181 @@ def test_no_charge_falls_back_to_percent(tmp_path):
     assert "по процентам, грубо" in render(res)
 
 
+def test_partial_charge_uses_non_null_samples(tmp_path):
+    recs = _drain_run(30, 900_000)
+    for r in recs[10:21]:
+        r["charge_uah"] = None
+    res = evaluate(read_perf(_write(tmp_path, recs)))
+    assert res.drain.method == "charge"
+    assert res.drain.pct_per_h == pytest.approx(40.0)
+
+
 def test_no_capacity_falls_back_to_percent(tmp_path):
     res = evaluate(read_perf(_write(tmp_path, _drain_run(30, 900_000), header=_header(capacity=None))))
     assert res.drain.method == "pct"
 
 
-def test_first_thermal_2_at_20_minutes(tmp_path):
-    recs = [_sys(T0 + m * MIN, thermal=2 if m >= 20 else 1) for m in range(0, 41)]
+def test_jumping_charge_counter_falls_back_to_percent(tmp_path):
+    recs = _drain_run(30, 900_000)
+    recs[10]["charge_uah"] = recs[9]["charge_uah"] + 30_000  # > 0.5 % от 4.5e6
     res = evaluate(read_perf(_write(tmp_path, recs)))
+    assert res.drain.method == "pct"
+    assert "счётчик скачет" in res.drain.notes
+    assert "счётчик скачет" in render(res)
+
+
+def test_negative_drain_warns(tmp_path):
+    recs = [_sys(T0 + m * MIN, charge=3_000_000 + 10_000 * m, pct=50.0 + m * 0.2) for m in range(31)]
+    res = evaluate(read_perf(_write(tmp_path, recs)))
+    assert res.drain.pct_per_h < 0
+    assert any("отрицательный" in n for n in res.drain.notes)
+
+
+def test_mixed_methods_rough_and_run_mismatch_warnings(tmp_path):
+    full = read_perf(_write(tmp_path, _drain_run(30, 900_000), header=_header(capacity=None), name="f.perf.jsonl"))
+    base_header = dict(_header("baseline"), device="Other")
+    base = read_perf(_write(tmp_path, _drain_run(15, 225_000), header=base_header, name="b.perf.jsonl"))
+    res = evaluate(full, base)
+    assert res.nfr6_rough is True
+    assert any("разные устройства" in w for w in res.run_warnings)
+    assert any("длительности" in w for w in res.run_warnings)
+    assert "(грубо)" in render(res).split("Превышение")[1].splitlines()[0]
+
+
+def test_mean_current_time_weighted_without_charger(tmp_path):
+    recs = [_sys(T0, current=-400_000), _sys(T0 + 10_000, current=-800_000),
+            _sys(T0 + 15_000, current=-5_000_000, plugged=True), _sys(T0 + 20_000, current=0)]
+    res = evaluate(read_perf(_write(tmp_path, recs)))
+    assert res.drain.mean_current_ma == pytest.approx((400 * 10 + 800 * 5) / 15)
+
+
+def _sys_run(minutes, step_s=5, thermal=lambda m: 1, interval=lambda m: 500, skip=lambda m: False):
+    """Сэмплы sys каждые step_s с; thermal и interval — функции минуты от начала."""
+    out = []
+    for i in range(minutes * 60 // step_s + 1):
+        m = i * step_s / 60.0
+        if not skip(m):
+            out.append(_sys(T0 + i * step_s * 1000, thermal=thermal(m), interval=interval(m)))
+    return out
+
+
+def test_first_thermal_2_at_20_minutes(tmp_path):
+    res = evaluate(read_perf(_write(tmp_path, _sys_run(40, thermal=lambda m: 2 if m >= 20 else 1))))
     assert res.first_thermal2_min == pytest.approx(20.0)
     assert res.thermal_share[1] == pytest.approx(0.5)
     assert res.thermal_share[2] == pytest.approx(0.5)
-    assert "20 мин" in render(res)
+    assert "Время до первого thermal ≥ 2: 20.0 мин" in render(res)
 
 
 def test_interval_steps_share(tmp_path):
-    recs = [_sys(T0 + m * MIN, interval=500 if m < 30 else 1000) for m in range(0, 41)]
-    res = evaluate(read_perf(_write(tmp_path, recs)))
+    res = evaluate(read_perf(_write(tmp_path, _sys_run(40, interval=lambda m: 500 if m < 30 else 1000))))
     assert res.interval_share[500] == pytest.approx(0.75)
     assert res.interval_share[1000] == pytest.approx(0.25)
     assert (res.interval_min, res.interval_max) == (500, 1000)
 
 
 def test_nfr7_61_min_cool_is_yes(tmp_path):
-    recs = [_sys(T0 + m * MIN, thermal=2) for m in range(0, 62)]
-    res = evaluate(read_perf(_write(tmp_path, recs)))
+    res = evaluate(read_perf(_write(tmp_path, _sys_run(61, thermal=lambda m: 2))))
     assert res.duration_min == pytest.approx(61.0)
+    assert res.thermal_coverage == pytest.approx(1.0)
+    assert res.gaps_ms == []
     assert res.nfr7 == "да"
 
 
 def test_nfr7_30_min_is_too_short(tmp_path):
-    recs = [_sys(T0 + m * MIN, thermal=0) for m in range(0, 31)]
-    res = evaluate(read_perf(_write(tmp_path, recs)))
+    res = evaluate(read_perf(_write(tmp_path, _sys_run(30, thermal=lambda m: 0))))
     assert res.nfr7 == "нет (короче 60 мин)"
     assert "нет (короче 60 мин)" in render(res)
 
 
 def test_nfr7_thermal_3_is_no(tmp_path):
-    recs = [_sys(T0 + m * MIN, thermal=3 if m == 40 else 1) for m in range(0, 62)]
-    assert evaluate(read_perf(_write(tmp_path, recs))).nfr7.startswith("нет (thermal ≥ 3")
+    res = evaluate(read_perf(_write(tmp_path, _sys_run(61, thermal=lambda m: 3 if 40 <= m < 41 else 1))))
+    assert res.nfr7.startswith("нет (thermal ≥ 3 на 40.0 мин")
+
+
+def test_nfr7_single_thermal_rest_null_is_incomplete(tmp_path):
+    res = evaluate(read_perf(_write(tmp_path, _sys_run(61, thermal=lambda m: 0 if m == 0 else None))))
+    assert res.nfr7.startswith("неполные данные (thermal известен 0 %")
+
+
+def test_all_thermal_null(tmp_path):
+    res = evaluate(read_perf(_write(tmp_path, _sys_run(61, thermal=lambda m: None))))
+    assert res.first_thermal2_min is None
+    assert res.thermal_share == {None: pytest.approx(1.0)}
+    assert res.nfr7.startswith("неполные данные")
+    assert "| нет данных | 100.0 % |" in render(res)
+
+
+def test_ten_minute_gap_is_flagged_and_excluded(tmp_path):
+    recs = _sys_run(61, thermal=lambda m: 2 if m < 20 else 1, skip=lambda m: 20 < m < 30)
+    res = evaluate(read_perf(_write(tmp_path, recs)))
+    assert res.gaps_ms == [600_000]
+    assert res.nfr7.startswith("неполные данные")
+    assert "разрывов sys > 15 с: 1, самый долгий 600 с" in res.nfr7
+    assert res.thermal_share[2] == pytest.approx(20 / 51)  # разрыв в доли не входит
+    assert "1, самый долгий 600 с" in render(res)
+
+
+def _windows(k, src, n, p50, p99, mx, t0=0):
+    return [_late(T0 + (t0 + i) * 5000, {src: (n, p50, p99, mx)}) for i in range(k)]
 
 
 def test_lateness_p99_420_recommends_800(tmp_path):
-    recs = [
-        _late(T0 + 5000, {"frame": (10, 100, 420, 450), "imu": (100, 5, 9, 12)}, late=1, dropped=0),
-        _late(T0 + 10000, {"frame": (10, 110, 420, 430), "gnss_fix": (5, 50, 200, 210)}, late=2, dropped=3),
-    ]
+    recs = _windows(20, "frame", 100, 100, 420, 450)
+    recs[0]["sources"]["imu"] = {"n": 100, "p50": 5.0, "p99": 9.0, "max": 12.0}
     res = evaluate(read_perf(_write(tmp_path, recs)))
-    assert res.lateness["frame"].p99 == pytest.approx(420.0)
-    assert res.lateness["frame"].n == 20
-    assert res.lateness["frame"].max == pytest.approx(450.0)
+    fr = res.lateness["frame"]
+    assert (fr.n, fr.p50_mean, fr.p99_max, fr.max) == (2000, 100.0, 420.0, 450.0)
+    assert fr.share_ub(200) == pytest.approx(0.5)
+    assert fr.share_ub(700) == 0.0
     assert "gnss_status" not in res.lateness  # источника нет — не выдумываем
-    assert (res.late_total, res.dropped_total) == (3, 3)
     assert res.recommended_delay_ms == 800
-    assert "800 мс" in render(res)
+    text = render(res)
+    assert "→ 800 мс" in text and "| imu (мало данных) | 100 |" in text
 
 
-def test_lateness_weighted_by_n(tmp_path):
-    recs = [_late(T0 + 5000, {"frame": (30, 1, 100, 100)}), _late(T0 + 10000, {"frame": (10, 1, 500, 500)})]
+def test_late_and_dropped_are_cumulative_counters(tmp_path):
+    recs = [_late(T0 + 5000, {"frame": (4000, 10, 50, 60)}, late=1, dropped=0),
+            _late(T0 + 10000, {"frame": (4000, 10, 50, 60)}, late=2, dropped=3),
+            _late(T0 + 15000, {"frame": (2000, 10, 50, 60)}, late=10, dropped=3)]
     res = evaluate(read_perf(_write(tmp_path, recs)))
-    assert res.lateness["frame"].p99 == pytest.approx(200.0)
+    assert (res.late_count, res.dropped_count) == (10, 3)
+    assert res.late_share == pytest.approx(10 / 10_000)
+    assert "Доля опоздавших при текущем буфере: 0.10 % (цель ≤ 0.1 %)" in render(res)
+
+
+def test_rare_burst_is_not_300(tmp_path):
+    recs = _windows(718, "gnss_fix", 5, 50, 100, 150) + _windows(2, "gnss_fix", 5, 50, 1300, 1400, t0=718)
+    res = evaluate(read_perf(_write(tmp_path, recs)))
+    assert res.lateness["gnss_fix"].n == 3600
+    assert res.recommended_delay_ms != 300
+    assert res.recommended_delay_ms == 1500
+
+
+def test_quiet_log_recommends_300(tmp_path):
+    res = evaluate(read_perf(_write(tmp_path, _windows(20, "frame", 100, 50, 120, 150))))
+    assert res.recommended_delay_ms == 300
+    assert res.recommendation == "ok"
+
+
+def test_sparse_source_does_not_affect_choice(tmp_path):
+    recs = _windows(20, "frame", 100, 50, 120, 150)
+    recs[0]["sources"]["imu"] = {"n": 10, "p50": 1.0, "p99": 1600.0, "max": 1700.0}
+    res = evaluate(read_perf(_write(tmp_path, recs)))
     assert res.recommended_delay_ms == 300
 
 
 def test_lateness_over_1500(tmp_path):
-    res = evaluate(read_perf(_write(tmp_path, [_late(T0 + 5000, {"imu": (10, 1, 1600, 1700)})])))
+    res = evaluate(read_perf(_write(tmp_path, _windows(20, "imu", 100, 10, 1600, 1700))))
     assert res.recommended_delay_ms is None
+    assert res.recommendation == "over"
     assert "> 1500, оставить 1500 и разобраться" in render(res)
+
+
+def test_only_sparse_sources_is_no_data(tmp_path):
+    res = evaluate(read_perf(_write(tmp_path, _windows(3, "imu", 10, 10, 1600, 1700))))
+    assert res.recommendation == "few"
+    assert "нет данных (ни у одного источника нет 1000 событий)" in render(res)
 
 
 def test_cli_writes_report(tmp_path):
