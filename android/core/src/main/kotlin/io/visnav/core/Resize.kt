@@ -23,21 +23,61 @@ object Resize {
     /**
      * То же area-усреднение, что [areaDownscale], но вход — байты RGBA_8888 (порядок R,G,B,A) с
      * шагом строки [rowStride] и шагом пикселя [pixelStride], как `ImageProxy.planes[0]` у CameraX.
-     * Индексы абсолютные от нуля буфера; позиция буфера не меняется. Результат — ARGB, альфа 0xFF.
+     * Индексы считаются от индекса 0 буфера, поэтому позиция буфера должна быть 0; она не меняется.
+     * Последняя строка может быть короче [rowStride] (буфер кончается на последнем пикселе).
+     * Результат — ARGB, альфа 0xFF.
      */
     fun areaDownscaleRgba(
         buf: ByteBuffer, w: Int, h: Int, rowStride: Int, pixelStride: Int, outW: Int, outH: Int,
     ): IntArray {
-        require(outW in 1..w) { "outW=$outW must be in 1..$w (downscale only)" }
-        require(outH in 1..h) { "outH=$outH must be in 1..$h (downscale only)" }
-        require(pixelStride >= 4) { "pixelStride=$pixelStride must be >= 4" }
-        require(rowStride >= w * pixelStride) { "rowStride=$rowStride must be >= ${w * pixelStride}" }
+        checkRgba(buf, w, h, rowStride, pixelStride, outW, outH)
         return areaCore(w, h, outW, outH) { x, y ->
             val o = y * rowStride + x * pixelStride
             ((buf.get(o).toInt() and 0xFF) shl 16) or
                 ((buf.get(o + 1).toInt() and 0xFF) shl 8) or
                 (buf.get(o + 2).toInt() and 0xFF)
         }
+    }
+
+    /**
+     * Кадр камеры (RGBA_8888, до поворота, w×h) → вход модели [inputW]×[inputH] в вертикальной
+     * ориентации: уменьшение в размер «до поворота» (для 90/270 стороны меняются местами), затем
+     * [Rotate90.rotate] уже маленького изображения (при 0 поворот не делается).
+     *
+     * Плоскость копируется одним блоком (`limit` байт) в [scratch], если его размер ≥ `buf.limit()`,
+     * иначе в новый массив; дальше чтение идёт из массива. Позиция буфера должна быть 0 и не меняется.
+     */
+    fun uprightDownscaleRgba(
+        buf: ByteBuffer, w: Int, h: Int, rowStride: Int, pixelStride: Int,
+        rotationDegrees: Int, inputW: Int, inputH: Int, scratch: ByteArray? = null,
+    ): IntArray {
+        require(rotationDegrees == 0 || rotationDegrees == 90 || rotationDegrees == 180 || rotationDegrees == 270) {
+            "rotationDegrees=$rotationDegrees must be 0, 90, 180 or 270"
+        }
+        val swap = rotationDegrees == 90 || rotationDegrees == 270
+        val sw = if (swap) inputH else inputW
+        val sh = if (swap) inputW else inputH
+        checkRgba(buf, w, h, rowStride, pixelStride, sw, sh)
+        val n = buf.limit()
+        val bytes = if (scratch != null && scratch.size >= n) scratch else ByteArray(n)
+        buf.duplicate().apply { position(0) }.get(bytes, 0, n)
+        val small = areaCore(w, h, sw, sh) { x, y ->
+            val o = y * rowStride + x * pixelStride
+            ((bytes[o].toInt() and 0xFF) shl 16) or
+                ((bytes[o + 1].toInt() and 0xFF) shl 8) or
+                (bytes[o + 2].toInt() and 0xFF)
+        }
+        return if (rotationDegrees == 0) small else Rotate90.rotate(small, sw, sh, rotationDegrees)
+    }
+
+    private fun checkRgba(buf: ByteBuffer, w: Int, h: Int, rowStride: Int, pixelStride: Int, outW: Int, outH: Int) {
+        require(outW in 1..w) { "outW=$outW must be in 1..$w (downscale only)" }
+        require(outH in 1..h) { "outH=$outH must be in 1..$h (downscale only)" }
+        require(pixelStride >= 4) { "pixelStride=$pixelStride must be >= 4" }
+        require(rowStride >= w * pixelStride) { "rowStride=$rowStride must be >= ${w * pixelStride}" }
+        require(buf.position() == 0) { "buffer position=${buf.position()} must be 0" }
+        val need = (h - 1).toLong() * rowStride + (w - 1).toLong() * pixelStride + 4
+        require(buf.limit() >= need) { "buffer limit=${buf.limit()} < $need needed for ${w}x$h" }
     }
 
     /** Общее ядро: [pixel] возвращает пиксель источника (x, y) как 0x??RRGGBB. */

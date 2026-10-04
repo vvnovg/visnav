@@ -7,7 +7,6 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import io.visnav.core.Preprocess
 import io.visnav.core.Resize
-import io.visnav.core.Rotate90
 
 /**
  * Пропускает кадры чаще intervalMs; остальные уменьшает до входа модели прямо из RGBA-плоскости,
@@ -33,6 +32,9 @@ class FrameAnalyzer(
 
     private var lastMs = 0L
 
+    // Переиспользуемый буфер для копии RGBA-плоскости (только поток анализа).
+    private var scratch = ByteArray(0)
+
     override fun analyze(image: ImageProxy) {
         val handler = onFrame
         // Throttle by the monotonic clock (immune to wall-clock jumps from NTP/GPS time sync);
@@ -52,15 +54,15 @@ class FrameAnalyzer(
                 lastFrameW = uprightW
                 lastFrameH = uprightH
                 val downscaled = if (uprightW >= inputW && uprightH >= inputH) {
-                    // Уменьшаем в размер «до поворота» (для 90/270 стороны меняются местами) и
-                    // поворачиваем уже маленькое изображение — без полнокадрового Bitmap.
-                    val sw = if (swap) inputH else inputW
-                    val sh = if (swap) inputW else inputH
+                    // Уменьшение прямо из RGBA-плоскости и поворот уже маленького изображения —
+                    // без полнокадрового Bitmap; плоскость копируется одним блоком в scratch.
                     val plane = image.planes[0]
-                    val small = Resize.areaDownscaleRgba(
-                        plane.buffer, image.width, image.height, plane.rowStride, plane.pixelStride, sw, sh,
+                    val buf = plane.buffer
+                    if (scratch.size < buf.limit()) scratch = ByteArray(buf.limit())
+                    Resize.uprightDownscaleRgba(
+                        buf, image.width, image.height, plane.rowStride, plane.pixelStride,
+                        rot, inputW, inputH, scratch,
                     )
-                    Rotate90.rotate(small, sw, sh, rot)
                 } else {
                     upscaleViaBitmap(image, rot)
                 }
