@@ -5,21 +5,78 @@ import android.speech.tts.TextToSpeech
 import io.visnav.core.Enu
 import io.visnav.core.Instructions
 import io.visnav.core.LocalizerOutput
+import io.visnav.core.Maneuver
+import io.visnav.core.ManeuverType
 import io.visnav.core.NavEvent
 import io.visnav.core.NavFormat
 import io.visnav.core.RoadIndex
 import io.visnav.core.RoadPack
+import io.visnav.core.Route
 import io.visnav.core.RouteFollower
 import java.io.Closeable
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
 
 data class NavUi(
     val nextText: String?, val routeKm: Double?, val routeMin: Double?,
     val arrived: Boolean, val rerouted: Boolean,
     /** Маршрут не построен (RouteFailed) и у ведения нет маршрута. */
     val routeFailed: Boolean,
+    /** Следующий манёвр (без DEPART): тип, номер съезда на кольце (0 — не кольцо), улица после манёвра. */
+    val nextType: ManeuverType? = null, val nextExit: Int = 0, val nextStreet: String? = null,
+    /** Расстояние по маршруту до следующего манёвра, м. */
+    val nextDistM: Double? = null,
+    /** Осталось по маршруту, м: длина маршрута минус прогресс (не меньше 0). */
+    val remainingM: Double? = null,
+    /** Версия маршрута: растёт при каждом новом маршруте; 0 — маршрута ещё нет. */
+    val routeVersion: Int = 0,
+    /**
+     * Точки маршрута [lat, lon] — от NavSession только в обновлении, где сменилась версия, иначе пусто.
+     * В UiState.nav списки текущей версии сохраняются (см. [mergeNav]).
+     */
+    val routeLatLon: List<DoubleArray> = emptyList(),
+    /**
+     * Точки манёвров без DEPART [lat, lon] — от NavSession только в обновлении, где сменилась версия, иначе пусто.
+     * В UiState.nav списки текущей версии сохраняются (см. [mergeNav]).
+     */
+    val maneuverLatLon: List<DoubleArray> = emptyList(),
 )
+
+/**
+ * NavUi по состоянию ведения. Геометрия маршрута ([NavUi.routeLatLon], [NavUi.maneuverLatLon]) переводится
+ * в широту/долготу только при [sendRoute] — в обновлении, где сменилась версия маршрута.
+ */
+internal fun navUiOf(
+    route: Route?, maneuvers: List<Maneuver>, next: Int?, distanceToNextM: Double?, progressM: Double,
+    arrived: Boolean, rerouted: Boolean, routeFailed: Boolean, routeVersion: Int, sendRoute: Boolean, enu: Enu,
+): NavUi {
+    val m = next?.let { maneuvers[it] }
+    return NavUi(
+        nextText = m?.let { Instructions.prompt(it, distanceToNextM) },
+        routeKm = route?.lengthM?.div(1000), routeMin = route?.durationS?.div(60),
+        arrived = arrived, rerouted = rerouted, routeFailed = routeFailed,
+        nextType = m?.type, nextExit = m?.exit ?: 0, nextStreet = m?.street, nextDistM = distanceToNextM,
+        remainingM = route?.let { (it.lengthM - progressM).coerceAtLeast(0.0) },
+        routeVersion = routeVersion,
+        routeLatLon = if (sendRoute && route != null) route.points.map { enu.toLatLon(it[0], it[1]) } else emptyList(),
+        maneuverLatLon = if (sendRoute) {
+            maneuvers.filter { it.type != ManeuverType.DEPART }.map { enu.toLatLon(it.e, it.n) }
+        } else emptyList(),
+    )
+}
+
+/**
+ * Новое значение NavUi для UiState: null (нет вывода ведения на кадре) оставляет прежнее. При той же версии маршрута
+ * пустые списки геометрии заменяются прежними — StateFlow сливает быстрые обновления, и обновление со сменой версии
+ * могло бы не дойти до экрана.
+ */
+internal fun mergeNav(prev: NavUi?, next: NavUi?): NavUi? = when {
+    next == null -> prev
+    prev != null && next.routeVersion == prev.routeVersion && next.routeLatLon.isEmpty() && next.maneuverLatLon.isEmpty() ->
+        next.copy(routeLatLon = prev.routeLatLon, maneuverLatLon = prev.maneuverLatLon)
+    else -> next
+}
 
 /** Ведение по маршруту на телефоне: RouteFollower по выводу Localizer, журнал .nav.jsonl и голос (TextToSpeech). */
 class NavSession(
@@ -41,6 +98,9 @@ class NavSession(
     private var routeFailedSeen = false
     private var routeFailedSpoken = false
     private var rerouteAtMs: Long? = null
+    /** Маршрут, геометрия которого уже передана в NavUi, и его версия. */
+    private var sentRoute: Route? = null
+    private var routeVersion = 0
 
     init {
         tts = TextToSpeech(context.applicationContext) { status -> onTtsInit(status) }
@@ -111,12 +171,13 @@ class NavSession(
         if (r != null) routeFailedSpoken = false     // «не найден» прозвучит снова, только если маршрут был и пропал
         val routeFailed = routeFailedSeen && r == null
         if (routeFailed && !routeFailedSpoken) { routeFailedSpoken = true; speak("Маршрут не найден") }
-        val next = f.nextManeuver
-        return NavUi(
-            nextText = next?.let { Instructions.prompt(f.maneuvers[it], f.distanceToNextM) },
-            routeKm = r?.lengthM?.div(1000), routeMin = r?.durationS?.div(60),
-            arrived = f.arrived, rerouted = rerouteAtMs?.let { o.tMs - it < REROUTE_SHOW_MS } ?: false,
-            routeFailed = routeFailed,
+        val newRoute = r != null && r !== sentRoute
+        if (newRoute) { sentRoute = r; routeVersion = ROUTE_VERSIONS.incrementAndGet() }
+        return navUiOf(
+            route = r, maneuvers = f.maneuvers, next = f.nextManeuver, distanceToNextM = f.distanceToNextM,
+            progressM = f.progressM, arrived = f.arrived,
+            rerouted = rerouteAtMs?.let { o.tMs - it < REROUTE_SHOW_MS } ?: false,
+            routeFailed = routeFailed, routeVersion = routeVersion, sendRoute = newRoute, enu = e0,
         )
     }
 
@@ -152,5 +213,7 @@ class NavSession(
         const val PENDING_MAX = 3
         /** Сколько по времени вывода держится отметка «Маршрут перестроен» на экране. */
         const val REROUTE_SHOW_MS = 5000L
+        /** Общий счётчик версий маршрута: версии не повторяются и между сессиями записи. */
+        val ROUTE_VERSIONS = AtomicInteger(0)
     }
 }

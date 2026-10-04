@@ -4,7 +4,7 @@ Android-навигатор, который определяет положени
 
 *An Android navigator that localizes a car by matching camera frames against a pre-downloaded database of geotagged street-level imagery when GNSS is lost or spoofed. Research prototype; documentation is in Russian.*
 
-> **Статус: исследовательский прототип.** Этапы M0, M1, M2 (M2a, M2b, M2c) и M3a готовы в коде. Полевые испытания ещё не проводились, пользоваться приложением для навигации пока нельзя.
+> **Статус: исследовательский прототип.** Этапы M0, M1, M2 (M2a, M2b, M2c), M3a и M3b готовы в коде. Полевые испытания ещё не проводились, пользоваться приложением для навигации пока нельзя.
 
 ## Как это работает
 
@@ -26,7 +26,7 @@ Android-навигатор, который определяет положени
 | **M2b** | Привязка к дорожному графу OSM (HMM) и подсказка фильтру дорогой, на телефоне и в replay. Критерий: правильная дорога ≥ 98 % времени | Код готов, ждёт выгрузки OSM и записи поездок |
 | **M2c** | Монитор GNSS (глушение, подмена) и режимы навигации, фильтр на телефоне. Критерий: подмена и глушение замечаются ≤ 5 с, ложные тревоги ≤ 1 % | Код готов, ждёт поездок, в том числе через зону подмены |
 | **M3a** | Офлайн-маршрут по графу коридора, голосовые подсказки о манёврах, перестроение, оценка в replay. Критерий: ≥ 95 % манёвров с подсказкой за ≥ 3 с, без ложных перестроений | Код готов, ждёт выгрузки OSM и поездок |
-| M3b | Экран с картой (MapLibre) | План |
+| **M3b** | Навигационный экран с офлайн-картой MapLibre: маршрут, позиция с кругом неопределённости в цвете режима, следующий манёвр; вкладка отладки. Карта коридора собирается на ПК из выгрузки OSM | Код готов, ждёт проверки на телефоне и поездок |
 | M3c | Пакет коридора для поездки | План |
 | M4 | Оптимизация, бета-тест | План |
 
@@ -38,7 +38,7 @@ docs/research/                    протоколы поездок и поле�
 docs/superpowers/plans/           планы реализации этапов
 research/vpr_bench/               Python: бенчмарк (vpr-bench), данные для телефона (vpr-m1), граф дорог и оценка фильтра, монитора и привязки (vpr-m2), оценка ведения по маршруту (vpr-m3)
 android/core/                     Kotlin/JVM: логика локализации, тестируется без устройства
-android/app/                      Android-приложение: CameraX, ONNX Runtime, GPS и спутники, датчики, экран
+android/app/                      Android-приложение: CameraX, ONNX Runtime, GPS и спутники, датчики, карта MapLibre, экраны навигации и отладки
 android/replay/                   Kotlin/JVM: прогон записанной поездки через фильтр с имитацией пропадания, глушения и подмены
 ```
 
@@ -68,9 +68,10 @@ uv run pytest -q
   - `replay-eval` — точность и дрейф фильтра по прогону replay;
   - `monitor-eval` — задержка обнаружения подмены и глушения, ложные тревоги, доля распознанной реальной подмены.
 - `vpr-m3`:
-  - `nav-eval` — подсказки о манёврах вовремя, ложные перестроения и прибытие по журналу ведения (`.nav.jsonl`).
+  - `nav-eval` — подсказки о манёврах вовремя, ложные перестроения и прибытие по журналу ведения (`.nav.jsonl`);
+  - `pack-map` — офлайн-карта для телефона: тайлы OpenMapTiles (собираются planetiler) обрезаются до коридора поездки, к ним добавляются шрифты Noto Sans.
 
-Как запускать всё по шагам, описано в [drive-protocol.md](docs/research/drive-protocol.md), [m1-field-test.md](docs/research/m1-field-test.md), [m2a-replay.md](docs/research/m2a-replay.md), [m2b-roads.md](docs/research/m2b-roads.md), [m2c-monitor.md](docs/research/m2c-monitor.md) и [m3a-route.md](docs/research/m3a-route.md).
+Как запускать всё по шагам, описано в [drive-protocol.md](docs/research/drive-protocol.md), [m1-field-test.md](docs/research/m1-field-test.md), [m2a-replay.md](docs/research/m2a-replay.md), [m2b-roads.md](docs/research/m2b-roads.md), [m2c-monitor.md](docs/research/m2c-monitor.md), [m3a-route.md](docs/research/m3a-route.md) и [m3b-map.md](docs/research/m3b-map.md).
 
 ## Android
 
@@ -83,12 +84,12 @@ cd android
 
 Если JDK по умолчанию новее 17, укажите его явно: `JAVA_HOME=/путь/к/jdk-17 ./gradlew …`.
 
-Минимальная версия — Android 10 (API 29), только arm64-v8a. Приложению не нужны Google Play Services, а доступа в интернет у него нет вовсе: кадры не покидают устройство. Базу эталонов, модель и по желанию граф дорог и точку назначения (`route.json`) на телефон нужно положить через `adb push`, как описано в [m1-field-test.md](docs/research/m1-field-test.md).
+Минимальная версия — Android 10 (API 29), только arm64-v8a. Приложению не нужны Google Play Services, а доступа в интернет у него нет вовсе: кадры не покидают устройство. Сетевые разрешения, которые приносит MapLibre, удалены из манифеста; сборка проверяет это задачей `:app:verifyNoNetworkPermissions`. Базу эталонов, модель и по желанию граф дорог, точку назначения (`route.json`) и офлайн-карту (`map/`) на телефон нужно положить через `adb push`, как описано в [m1-field-test.md](docs/research/m1-field-test.md) и [m3b-map.md](docs/research/m3b-map.md).
 
 ## Лицензия и данные
 
 - Код распространяется под [Apache License 2.0](LICENSE) (см. также [NOTICE](NOTICE)).
 - Снимки и производные от них данные Mapillary — [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/), © участники Mapillary. Эти данные в репозитории не хранятся.
-- Картографические данные — © участники [OpenStreetMap](https://www.openstreetmap.org/copyright), ODbL. Граф дорог (`roadpack`) — производная база данных под ODbL; в репозитории он не хранится, а приложение и отчёты показывают атрибуцию.
+- Картографические данные — © участники [OpenStreetMap](https://www.openstreetmap.org/copyright), ODbL. Граф дорог (`roadpack`) и тайлы карты — производные базы данных под ODbL; в репозитории они не хранятся, а приложение и отчёты показывают атрибуцию. Схема тайлов OpenMapTiles — CC BY 4.0 (© OpenMapTiles), шрифты Noto Sans — SIL OFL 1.1, MapLibre Native — BSD-2-Clause.
 - В приложение можно включать только модели и библиотеки под MIT, BSD или Apache 2.0. Разбор совместимости лицензий — в [SPEC.md, раздел 10а](docs/SPEC.md).
 - Google Street View и Яндекс Панорамы не используются: их условия запрещают такой сценарий без отдельного договора (подробнее в разделе 2 [спецификации](docs/SPEC.md)).

@@ -59,7 +59,12 @@ data class UiState(
     val roadsLoaded: Boolean = false,
     val road: RoadInfo? = null,
     val nav: NavUi? = null,
+    /** Позиция фильтра на последнем кадре (для карты); сбрасывается вместе с nav. */
+    val pos: MapPos? = null,
 )
+
+/** Позиция для карты из LocalizerOutput: σ, курс (рад, от севера по часовой) и скорость (м/с) как в выводе. */
+data class MapPos(val lat: Double, val lon: Double, val sigmaM: Double, val psiRad: Double, val speedMps: Double, val mode: NavMode)
 
 /** Журнал траектории фильтра: заголовок и по строке на кадр. */
 private class FusionLog(file: File) : Closeable {
@@ -79,6 +84,8 @@ class M1Controller(private val context: Context) {
 
     private val filesDir = requireNotNull(context.getExternalFilesDir(null))
     private val dataDir = File(filesDir, "refpack")
+    /** Каталог данных на телефоне (`files/refpack/`): база, граф дорог, карта `map/`. */
+    val refpackDir: File get() = dataDir
     private val logDir = File(filesDir, "logs")
     private val executor = Executors.newSingleThreadExecutor()
     private val gps = GpsSource(context)
@@ -131,11 +138,17 @@ class M1Controller(private val context: Context) {
 
     fun setMode(mode: PriorMode) { if (!_state.value.running) _state.update { it.copy(mode = mode) } }
 
-    fun bindCamera(previewView: PreviewView, lifecycleOwner: LifecycleOwner) {
+    /**
+     * Привязывает камеру к [lifecycleOwner]: анализ кадров и, если задан [previewView], превью.
+     * Без превью (навигационный экран) привязывается только анализ; каждая привязка заменяет прежнюю
+     * (`unbindAll`). Перепривязка при смене вкладки во время записи даёт паузу в кадрах. Разрешение анализа
+     * без Preview (только ImageAnalysis) ещё нужно проверить на устройстве — CameraX может выбрать другое.
+     */
+    fun bindCamera(previewView: PreviewView?, lifecycleOwner: LifecycleOwner) {
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
             val provider = future.get()
-            val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+            val preview = previewView?.let { v -> Preview.Builder().build().also { it.setSurfaceProvider(v.surfaceProvider) } }
             val analysis = ImageAnalysis.Builder()
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -152,7 +165,7 @@ class M1Controller(private val context: Context) {
                 .build()
             analysis.setAnalyzer(executor) { image -> analyzer.get()?.analyze(image) ?: image.close() }
             provider.unbindAll()
-            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, *listOfNotNull(preview, analysis).toTypedArray())
         }, ContextCompat.getMainExecutor(context))
     }
 
@@ -173,7 +186,7 @@ class M1Controller(private val context: Context) {
             // дописываются к этому статусу через "it.status + ...", а не затираются им — раньше
             // финальный _state.update шёл последним и стирал их целиком.
             _state.update { it.copy(running = true, frames = 0, errors = 0, status = "Запись: ${mode.name}",
-                navMode = null, sigmaM = null, gnssReasons = emptySet(), road = null, nav = null) }
+                navMode = null, sigmaM = null, gnssReasons = emptySet(), road = null, nav = null, pos = null) }
             logDir.mkdirs()
             val startedMs = System.currentTimeMillis()
             val base = "session-$startedMs-${mode.name.lowercase()}"
@@ -236,8 +249,9 @@ class M1Controller(private val context: Context) {
                                 }
                                 null
                             }
+                            val pos = MapPos(out.lat, out.lon, out.sigmaM, out.psiRad, out.speedMps, out.mode)
                             _state.update { it.copy(navMode = out.mode, sigmaM = out.sigmaM, gnssReasons = out.reasons,
-                                road = out.road, nav = navUi ?: it.nav) }
+                                road = out.road, nav = mergeNav(it.nav, navUi), pos = pos) }
                         }
                     } catch (e: Exception) {
                         // Сбой фильтра на кадре не останавливает запись.
@@ -381,7 +395,7 @@ class M1Controller(private val context: Context) {
             }
             _state.update { it.copy(running = false, status = "Ошибка запуска: ${e.message}$suffix",
                 navMode = null, sigmaM = null,
-                gnssReasons = emptySet(), road = null, nav = null) }
+                gnssReasons = emptySet(), road = null, nav = null, pos = null) }
         }
     }
 
@@ -436,7 +450,7 @@ class M1Controller(private val context: Context) {
             }
             _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}$suffix",
                 navMode = null, sigmaM = null,
-                gnssReasons = emptySet(), road = null, nav = null) }
+                gnssReasons = emptySet(), road = null, nav = null, pos = null) }
         }
     }
 
@@ -485,7 +499,7 @@ class M1Controller(private val context: Context) {
         }
         _state.update { it.copy(running = false, status = "$message$suffix",
                 navMode = null, sigmaM = null,
-                gnssReasons = emptySet(), road = null, nav = null) }
+                gnssReasons = emptySet(), road = null, nav = null, pos = null) }
     }
 
     /** Освобождает камеру/GPS/логгер/модель. Вызывать один раз при уничтожении владельца. */
