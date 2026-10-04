@@ -130,13 +130,15 @@ def test_route_failed_then_retry_compared_with_kept_route():
 
 
 def test_prompts_of_previous_route_not_credited():
-    ev = [_route(0), _prompt(90, 1, "near"), _route(92)]
+    # Новый маршрут начинается там, где машина в момент его построения (920 м): старт поиска — первые 200 м ломаной.
+    ev = [_route(0), _prompt(90, 1, "near"), _route(92, poly=((920, 0), (1000, 0), (1000, -500)), at_m=80.0)]
     r = evaluate_nav(_header(), ev, _frames(EAST_THEN_SOUTH))
     assert len(r.checks) == 1 and r.checks[0].route_idx == 1 and r.checks[0].prompt_lead_s is None
 
 
 def test_maneuver_too_close_to_route_start_excluded_and_listed():
-    r = evaluate_nav(_header(), [_route(98)], _frames(EAST_THEN_SOUTH))
+    r = evaluate_nav(_header(), [_route(98, poly=((980, 0), (1000, 0), (1000, -500)), at_m=20.0)],
+                     _frames(EAST_THEN_SOUTH))
     assert r.checks == [] and len(r.excluded) == 1 and r.n_maneuvers == 1
     rep = render_nav_report(r)
     assert "исключено (слишком близко к началу маршрута): 1" in rep and "## Исключены" in rep
@@ -150,6 +152,24 @@ def test_unverifiable_reroutes_not_counted_false():
     r2 = evaluate_nav(_header(), [_route(0), _route(50, reroute=True)], frames)
     assert r2.unverifiable_reroutes == 1 and r2.false_reroutes == 0
     assert "Непроверяемых перестроений (нет эталонной позиции): 1" in render_nav_report(r2)
+
+
+def test_reroute_far_from_first_route_uses_python_frame_chainage():
+    n0 = 11119.0  # ~0.1° широты от первого маршрута; длина ломаной в системе Python чуть короче at_m (cos φ)
+    path = [(20.0 * s, n0) for s in range(251)] + [(5000.0, n0 - 20.0 * k) for k in range(1, 26)]
+    poly = ((0, n0), (5000, n0), (5000, n0 - 500))
+    rr = _route(5, reroute=True, turn_at=(5000.0, n0), poly=poly, at_m=5000.0)
+    rr["length_m"] = 5500.0
+    r = evaluate_nav(_header(), [_route(0), rr], _frames(path))
+    assert len(r.checks) == 1 and r.checks[0].route_idx == 1
+    assert abs(r.checks[0].reached_t - 250.0) <= 0.2  # без пересчёта at_m ошибка ≈ 0.75 с
+
+
+def test_reach_unknown_when_gps_gap_covers_the_turn():
+    frames = [f for f in _frames(EAST_THEN_SOUTH) if not 60 < (f.t_ms - T0) / 1000 < 140]
+    r = evaluate_nav(_header(), [_route(0), _prompt(90, 1, "near")], frames)
+    assert r.checks == [] and r.n_unknown == 1 and r.n_not_driven == 0
+    assert "неизвестно: 1" in render_nav_report(r)
 
 
 def test_cli_session_mismatch_and_ok(tmp_path):
