@@ -77,10 +77,13 @@ internal sealed interface TripLabel {
     data class Picker(val name: String, val trips: List<String>) : TripLabel
 }
 
-/** Выбор доступен, только если поездок больше одной, запись не идёт и база загружена. */
-internal fun tripLabel(trip: String?, trips: List<String>, running: Boolean, loaded: Boolean): TripLabel = when {
+/**
+ * Выбор доступен, только если поездок больше одной, запись не идёт и база не грузится (после неудачной загрузки
+ * выбор остаётся, чтобы можно было переключиться на другую поездку).
+ */
+internal fun tripLabel(trip: String?, trips: List<String>, running: Boolean, loading: Boolean): TripLabel = when {
     trip == null -> TripLabel.None
-    trips.size > 1 && !running && loaded -> TripLabel.Picker(trip, trips)
+    trips.size > 1 && !running && !loading -> TripLabel.Picker(trip, trips)
     else -> TripLabel.Text(trip)
 }
 
@@ -155,20 +158,22 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
     }
     var mapData by remember(controller) { mutableStateOf<Result<MapData>?>(null) }
     val policy = remember { CameraPolicy() }
-    // Новая поездка — пустой маршрут: версии маршрута новой сессии не сравниваются со старыми.
+    // Страховка: между сессиями nav и так null, но маршрут прежней поездки не переживает смену поездки.
     val routeStore = remember(s.trip) { RouteStore() }
     var map by remember { mutableStateOf<MapLibreMap?>(null) }
     var styleLoads by remember { mutableIntStateOf(0) }
     var free by remember { mutableStateOf(false) }
-    // Смена поездки: loaded уходит в false и возвращается, trip меняется — карта читается из каталога новой поездки.
-    // tripDataDir не наблюдаемый, поэтому ключи — trip и loaded, а каталог читается внутри эффекта.
-    LaunchedEffect(s.trip, s.loaded) {
-        val loaded = withContext(Dispatchers.IO) { MapDataLoader.load(controller.tripDataDir) }
+    // Карта зависит только от каталога поездки: tripDir меняется один раз на смену поездки (сразу после resolve).
+    val tripDir = s.tripDir
+    LaunchedEffect(tripDir) {
+        val result = tripDir?.let { dir -> withContext(Dispatchers.IO) { MapDataLoader.load(File(dir)) } }
         // key(data) пересоздаёт карту: старая MapLibreMap уничтожается, ждём onStyleLoaded новой.
         map = null
         free = false
-        mapData = loaded
+        mapData = result
     }
+    // Вход на вкладку: перечитать список поездок (поездка могла появиться через adb push).
+    LaunchedEffect(Unit) { controller.refreshTrips() }
 
     // Каждая загрузка стиля (в том числе смена день/ночь) перезапускает эффект: маршрут, манёвры и позиция
     // отправляются заново в источники нового стиля. Источники берутся из map.style на каждом обновлении.
@@ -217,7 +222,7 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
                     "Дорога: привязана, ${Math.round(r.confidence * 100)} %" + if (r.used) ", уточняет позицию" else ""
                 } ?: "Дорога: не найдена")
             }
-            TripRow(tripLabel(s.trip, s.trips, s.running, s.loaded), controller::selectTrip)
+            TripRow(tripLabel(s.trip, s.trips, s.running, s.loading), controller::refreshTrips, controller::selectTrip)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = { if (s.running) controller.stop() else controller.start() },
@@ -237,7 +242,14 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
         }
         Box(Modifier.weight(0.64f).fillMaxHeight()) {
             when (val r = mapData) {
-                null -> Text("Загрузка карты…", Modifier.padding(16.dp))
+                null -> if (tripDir == null && !s.loading) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Нет карты: поездка не выбрана")
+                        Text(s.status, style = MaterialTheme.typography.bodySmall)
+                    }
+                } else {
+                    Text("Загрузка карты…", Modifier.padding(16.dp))
+                }
                 else -> r.fold(
                     onSuccess = { data ->
                         val night = isSystemInDarkTheme()
@@ -270,7 +282,7 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
                         )
                     },
                     onFailure = { e ->
-                        val mapDir = File(controller.tripDataDir, "map").absolutePath
+                        val mapDir = File(tripDir ?: "<каталог поездки>", "map").path
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("Нет карты: ${e.message?.removePrefix("нет карты: ") ?: e}")
                             Text("Скопируйте карту: adb push <map>/. $mapDir/", style = MaterialTheme.typography.bodySmall)
@@ -283,18 +295,21 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
     }
 }
 
-/** «Поездка: <имя>»: текстом или кнопкой с меню поездок; в старой раскладке ничего. */
+/**
+ * «Поездка: <имя>»: текстом или кнопкой с меню поездок (текущая отмечена «✓»); в старой раскладке ничего.
+ * Открытие меню вызывает [onOpen] — перечитать список поездок.
+ */
 @Composable
-private fun TripRow(label: TripLabel, onSelect: (String) -> Unit) {
+private fun TripRow(label: TripLabel, onOpen: () -> Unit, onSelect: (String) -> Unit) {
     when (label) {
         TripLabel.None -> Unit
         is TripLabel.Text -> Text("Поездка: ${label.name}")
         is TripLabel.Picker -> Box {
             var expanded by remember { mutableStateOf(false) }
-            OutlinedButton(onClick = { expanded = true }) { Text("Поездка: ${label.name} ▾") }
+            OutlinedButton(onClick = { onOpen(); expanded = true }) { Text("Поездка: ${label.name} ▾") }
             DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                 for (t in label.trips) {
-                    DropdownMenuItem(text = { Text(t) }, onClick = { expanded = false; onSelect(t) })
+                    DropdownMenuItem(text = { Text(if (t == label.name) "✓ $t" else t) }, onClick = { expanded = false; onSelect(t) })
                 }
             }
         }

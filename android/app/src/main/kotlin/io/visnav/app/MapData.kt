@@ -18,7 +18,7 @@ class MapData(
 )
 
 object MapDataLoader {
-    /** [dataDir] — каталог данных поездки (`M1Controller.tripDataDir`). */
+    /** [dataDir] — каталог данных поездки (`UiState.tripDir`). */
     fun load(dataDir: File): Result<MapData> {
         val dir = File(dataDir, "map")
         val mbtiles = File(dir, "corridor.mbtiles")

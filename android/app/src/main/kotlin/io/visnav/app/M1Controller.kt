@@ -44,6 +44,8 @@ import kotlinx.coroutines.flow.update
 data class UiState(
     val status: String = "Загрузка базы…",
     val loaded: Boolean = false,
+    /** Идёт loadBundle (загрузка базы поездки). loaded == false && !loading — загрузка не удалась. */
+    val loading: Boolean = true,
     val running: Boolean = false,
     val mode: PriorMode = PriorMode.GPS,
     val frames: Int = 0,
@@ -65,6 +67,11 @@ data class UiState(
     val trip: String? = null,
     /** Поездки на телефоне по алфавиту; пусто — старая раскладка. */
     val trips: List<String> = emptyList(),
+    /**
+     * Абсолютный путь каталога данных выбранной поездки (`refpack/trips/<имя>/` или `refpack/` в старой
+     * раскладке); ставится вместе с trip сразу после resolve, null — поездку определить не удалось.
+     */
+    val tripDir: String? = null,
 )
 
 /** Позиция для карты из LocalizerOutput: σ, курс (рад, от севера по часовой) и скорость (м/с) как в выводе. */
@@ -88,9 +95,6 @@ class M1Controller(private val context: Context) {
 
     private val filesDir = requireNotNull(context.getExternalFilesDir(null))
     private val dataDir = File(filesDir, "refpack")
-    /** Каталог данных выбранной поездки (`refpack/trips/<имя>/`) или `refpack/` в старой раскладке. */
-    @Volatile var tripDataDir: File = dataDir
-        private set
     private val prefs = context.getSharedPreferences("visnav", Context.MODE_PRIVATE)
     private val logDir = File(filesDir, "logs")
     private val executor = Executors.newSingleThreadExecutor()
@@ -138,6 +142,22 @@ class M1Controller(private val context: Context) {
         }
     }
 
+    /**
+     * Перечитывает список поездок (`refpack/trips/`) на executor: экран навигации вызывает при входе на вкладку
+     * и при открытии меню поездок, чтобы появилась поездка, положенная через adb push после запуска.
+     */
+    fun refreshTrips() {
+        if (executor.isShutdown) return
+        try {
+            executor.execute {
+                val trips = TripLayout.list(dataDir).orEmpty()
+                _state.update { it.copy(trips = trips) }
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            // close() уже закрыл executor.
+        }
+    }
+
     /** Только на executor: закрывает прежнюю базу и грузит выбранную поездку (или старую раскладку). */
     private fun loadBundle(wanted: String?) {
         // Под swapLock — вместе с чтением bundle/analyzer в start(): либо start() берёт прежнюю базу и
@@ -147,13 +167,23 @@ class M1Controller(private val context: Context) {
             bundle.also { bundle = null; analyzer.set(null) }
         }
         runCatching { old?.embedder?.close() }
-        _state.update { it.copy(loaded = false, roadsLoaded = false, status = "Загрузка базы…") }
+        _state.update { it.copy(loaded = false, loading = true, roadsLoaded = false, status = "Загрузка базы…") }
+        try {
+            loadTrip(wanted)
+        } finally {
+            _state.update { it.copy(loading = false) }
+        }
+    }
+
+    /** Тело loadBundle() после закрытия прежней базы. */
+    private fun loadTrip(wanted: String?) {
         val trips = TripLayout.list(dataDir).orEmpty()
         val dirs = TripLayout.resolve(dataDir, wanted).getOrElse { e ->
-            _state.update { it.copy(loaded = false, trip = null, trips = trips, status = e.message ?: "Нет поездок") }
+            _state.update { it.copy(loaded = false, trip = null, trips = trips, tripDir = null, status = e.message ?: "Нет поездок") }
             return
         }
-        tripDataDir = dirs.dataDir
+        // Карта на экране зависит только от tripDir: ставим его сразу, вместе с trip, до загрузки базы.
+        _state.update { it.copy(trip = dirs.name, trips = trips, tripDir = dirs.dataDir.absolutePath) }
         val prefix = dirs.name?.let { "Поездка: $it · " }.orEmpty()
         val b = try {
             BundleLoader.load(dirs.dataDir, dirs.model)
