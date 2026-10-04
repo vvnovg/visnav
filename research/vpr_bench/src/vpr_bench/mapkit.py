@@ -13,8 +13,8 @@ from pathlib import Path
 from vpr_bench.db_builder import Corridor
 from vpr_bench.geo import BBox
 
-REQUIRED_LAYERS = ("transportation", "water", "building", "place", "transportation_name")
-GLYPH_RANGES = ("0-255", "256-511", "1024-1279", "8192-8447")
+REQUIRED_LAYERS = ("transportation", "water", "building", "park", "place", "transportation_name")
+GLYPH_RANGES = ("0-255", "256-511", "1024-1279", "8192-8447", "8448-8703")  # 8448-8703: «№»
 FONTSTACKS = ("Noto Sans Regular", "Noto Sans Bold")
 ATTRIBUTION = "© OpenMapTiles © участники OpenStreetMap"
 

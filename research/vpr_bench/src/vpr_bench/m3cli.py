@@ -33,8 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _pack_map(args: argparse.Namespace) -> int:
-    tracks = [parse_gpx(p) for p in args.gpx]
-    tracks += [clean_track(gps_track(read_log(p)[1]), max_hdop=None)[0] for p in args.log]
+    try:
+        tracks = [parse_gpx(p) for p in args.gpx]
+        tracks += [clean_track(gps_track(read_log(p)[1]), max_hdop=None)[0] for p in args.log]
+    except (OSError, ValueError) as e:
+        print(f"error: track: {e}", file=sys.stderr)
+        return 2
     tracks = [t for t in tracks if t]
     if not tracks:
         print("error: need at least one --gpx or --log track", file=sys.stderr)
@@ -52,7 +56,8 @@ def _pack_map(args: argparse.Namespace) -> int:
     write_map_meta(out, info, args.buffer_m)
     km = sum(haversine_m(a.lat, a.lon, b.lat, b.lon) for t in tracks for a, b in zip(t, t[1:])) / 1000.0
     print(f"tiles kept={kept} removed={removed}, {info.bytes / 1e6:.1f} MB, "
-          f"{info.bytes / 1e6 / max(km, 1e-9) * 100:.1f} MB per 100 km -> {out}")
+          f"{info.bytes / 1e6 / max(km, 1e-9) * 100:.1f} MB per 100 km of tracks "
+          f"(NFR-8: <= 50 MB per 100 km incl. reference pack; repeated drives of one corridor understate it) -> {out}")
     return 0
 
 

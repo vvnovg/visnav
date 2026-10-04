@@ -317,7 +317,7 @@ data class PoseEstimate(
 | LightGlue (с весами для ALIKED) | Apache 2.0 | ✅ можно |
 | OpenCV, LiteRT/TFLite, ONNX Runtime | Apache 2.0 / MIT | ✅ можно |
 | GraphHopper | Apache 2.0 | ✅ можно |
-| MapLibre Native (`android-sdk-opengl`; с ней приходят OkHttp и библиотеки GeoJSON/turf — Apache 2.0) | BSD-2-Clause | ✅ можно |
+| MapLibre Native (`android-sdk-opengl`; с ней приходят OkHttp, timber, GeoJSON/turf — Apache 2.0, maplibre-gestures — BSD-2; поднимает kotlin-stdlib до 2.2.x) | BSD-2-Clause | ✅ можно |
 | Шрифты Noto Sans (глифы подписей карты) | SIL OFL 1.1 | ✅ можно |
 | planetiler (сборка тайлов) | Apache 2.0 | — только на ПК, в приложение не входит |
 

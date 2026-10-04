@@ -10,7 +10,7 @@ from vpr_bench.m3cli import main
 from vpr_bench.mapkit import (ATTRIBUTION, FONTSTACKS, GLYPH_RANGES, check_mbtiles, clip_mbtiles, extract_glyphs,
                               tile_bbox)
 
-LAYERS = ["transportation", "water", "building", "place", "transportation_name", "landuse"]
+LAYERS = ["transportation", "water", "building", "park", "place", "transportation_name", "landuse"]
 
 
 def _lonlat_to_tile(lon, lat, z):
@@ -128,6 +128,8 @@ def test_pack_map_cli(tmp_path):
     assert meta["fontstacks"] == list(FONTSTACKS) and (out / "corridor.mbtiles").is_file()
     assert main(["pack-map", "--mbtiles", str(tmp_path / "in.mbtiles"), "--fonts-zip", str(tmp_path / "f.zip"),
                  "--out", str(tmp_path / "m2")]) == 2
+    assert main(["pack-map", "--mbtiles", str(tmp_path / "in.mbtiles"), "--fonts-zip", str(tmp_path / "f.zip"),
+                 "--log", str(tmp_path / "missing.jsonl"), "--out", str(tmp_path / "m3")]) == 2
 
 
 def test_pack_map_bounds_are_corridor(tmp_path):
