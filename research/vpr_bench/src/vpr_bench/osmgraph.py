@@ -116,6 +116,7 @@ def build_graph(ways: Iterable[RawWay], keep: Callable[[float, float], bool] | N
     e_name: list[int] = []
     names: list[str] = []
     name_index: dict[str, int] = {}
+    dropped_ends: set[int] = set()  # OSM id концов отрезков, отброшенных обрезкой коридора
 
     def inside(node: tuple[int, float, float]) -> bool:
         if keep is None:
@@ -148,7 +149,10 @@ def build_graph(ways: Iterable[RawWay], keep: Callable[[float, float], bool] | N
             name_idx = name_index[name]
         nodes = w.nodes if d >= 0 else list(reversed(w.nodes))
         for a, b in zip(nodes, nodes[1:]):
-            if a[0] == b[0] or not (inside(a) or inside(b)):
+            if a[0] == b[0]:
+                continue
+            if not (inside(a) or inside(b)):
+                dropped_ends.update((a[0], b[0]))
                 continue
             e_from.append(idx(a))
             e_to.append(idx(b))
@@ -162,6 +166,7 @@ def build_graph(ways: Iterable[RawWay], keep: Callable[[float, float], bool] | N
         edges_of_way.setdefault(wid, []).append(k)
     rows: list[tuple[int, int, int, int]] = []
     dropped = 0
+    boundary = sorted({index[i] for i in dropped_ends if i in index})
 
     def candidates(way_id: int, via: int, arriving: bool) -> list[int]:
         # Односторонняя линия: въезжает в via только по ребру, которое в него приходит, выезжает — по уходящему.
@@ -194,6 +199,7 @@ def build_graph(ways: Iterable[RawWay], keep: Callable[[float, float], bool] | N
         np.array(e_flags, dtype=np.uint8), np.array(e_cls, dtype=np.uint8),
         edge_speed=np.array(e_speed, dtype=np.uint8), edge_name=np.array(e_name, dtype=np.int32),
         names=tuple(names), restrictions=np.array(rows, dtype=np.int32).reshape(len(rows), 4), restrictions_dropped=dropped,
+        boundary_nodes=np.array(boundary, dtype=np.int32),
     )
 
 

@@ -1,4 +1,5 @@
-"""roadpack — дорожный граф OSM для телефона. v1 — план M2b; v2 (скорость, названия, запреты) — план M3a."""
+"""roadpack — дорожный граф OSM для телефона. v1 — план M2b; v2 (скорость, названия, запреты) — план M3a;
+v3 = v2 + края коридора: boundaryCount u32, boundary i32[boundaryCount] (индексы узлов по возрастанию) — план M3c."""
 from __future__ import annotations
 
 import json
@@ -41,6 +42,8 @@ class RoadGraph:
     # означают объединение разрешённых выездов.
     restrictions: np.ndarray | None = None
     restrictions_dropped: int = 0  # отброшено неоднозначных запретов при сборке; не сериализуется
+    # int32[k]: узлы на краю коридора (у них есть отрезок OSM-линии, отброшенный обрезкой), строго по возрастанию.
+    boundary_nodes: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         n, m = len(self.node_lats), len(self.edge_from)
@@ -67,13 +70,24 @@ class RoadGraph:
         if len(r) and (r[:, [0, 2]].min() < 0 or r[:, [0, 2]].max() >= m or r[:, 1].min() < 0
                        or r[:, 1].max() >= n or not set(r[:, 3].tolist()) <= {KIND_NO, KIND_ONLY}):
             raise ValueError("bad restriction (edge/node index or kind)")
+        if self.boundary_nodes is None:
+            object.__setattr__(self, "boundary_nodes", np.zeros(0, dtype=np.int32))
+        b = self.boundary_nodes
+        if b.ndim != 1:
+            raise ValueError("boundary_nodes must be one-dimensional")
+        if len(b) and (b.min() < 0 or b.max() >= n):
+            raise ValueError("boundary node index out of range")
+        if len(b) > 1 and not bool(np.all(np.diff(b) > 0)):
+            raise ValueError("boundary nodes must be strictly increasing")
 
 
-def write_roadpack(out_dir: Path, g: RoadGraph, meta: dict, version: int = 2) -> Path:
-    if version not in (1, 2):
+def write_roadpack(out_dir: Path, g: RoadGraph, meta: dict, version: int = 3) -> Path:
+    if version not in (1, 2, 3):
         raise ValueError(f"unsupported roadpack version={version}")
     if version == 1 and (g.names or len(g.restrictions)):
         raise ValueError("roadpack v1 cannot store names or restrictions")
+    if version < 3 and len(g.boundary_nodes):
+        raise ValueError(f"roadpack v{version} cannot store boundary nodes")
     out_dir.mkdir(parents=True, exist_ok=True)
     n, m = len(g.node_lats), len(g.edge_from)
     with (out_dir / "roadpack.bin").open("wb") as f:
@@ -85,7 +99,7 @@ def write_roadpack(out_dir: Path, g: RoadGraph, meta: dict, version: int = 2) ->
         f.write(np.asarray(g.edge_to, dtype="<i4").tobytes())
         f.write(np.asarray(g.edge_flags, dtype="u1").tobytes())
         f.write(np.asarray(g.edge_class, dtype="u1").tobytes())
-        if version == 2:
+        if version >= 2:
             f.write(np.asarray(g.edge_speed, dtype="u1").tobytes())
             f.write(np.asarray(g.edge_name, dtype="<i4").tobytes())
             f.write(struct.pack("<I", len(g.names)))
@@ -95,6 +109,9 @@ def write_roadpack(out_dir: Path, g: RoadGraph, meta: dict, version: int = 2) ->
             f.write(struct.pack("<I", len(g.restrictions)))
             for fr, via, to, kind in g.restrictions.tolist():
                 f.write(struct.pack("<iiiB", fr, via, to, kind))
+        if version == 3:
+            f.write(struct.pack("<I", len(g.boundary_nodes)))
+            f.write(np.asarray(g.boundary_nodes, dtype="<i4").tobytes())
     full = {**meta, "format": f"VNRD/{version}", "node_count": n, "edge_count": m}
     (out_dir / "roadpack.json").write_text(json.dumps(full, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return out_dir / "roadpack.bin"
@@ -107,15 +124,17 @@ def read_roadpack(dir_: Path) -> tuple[RoadGraph, dict]:
     magic, version, _, n, m = HEADER.unpack_from(raw, 0)
     if magic != MAGIC:
         raise ValueError("not a roadpack (bad magic)")
-    if version not in (1, 2):
+    if version not in (1, 2, 3):
         raise ValueError(f"unsupported roadpack version={version}")
     base = HEADER.size + 16 * n + 18 * m
-    if (version == 1 and len(raw) != base) or (version == 2 and len(raw) < base + 5 * m + 8):
+    if (version == 1 and len(raw) != base) or (version >= 2 and len(raw) < base + 5 * m + 8):
         raise ValueError(f"roadpack size {len(raw)} does not match header (base {base})")
     off = HEADER.size
 
     def take(dtype: str, count: int, size: int) -> np.ndarray:
         nonlocal off
+        if off + count * size > len(raw):
+            raise ValueError("roadpack truncated")
         arr = np.frombuffer(raw, dtype=dtype, count=count, offset=off).copy()
         off += count * size
         return arr
@@ -124,26 +143,36 @@ def read_roadpack(dir_: Path) -> tuple[RoadGraph, dict]:
     way = take("<i8", m, 8)
     fr, to = take("<i4", m, 4), take("<i4", m, 4)
     flags, cls = take("u1", m, 1), take("u1", m, 1)
-    speed = name = restr = None
+    speed = name = restr = boundary = None
     names: tuple[str, ...] = ()
-    if version == 2:
-        speed, name = take("u1", m, 1), take("<i4", m, 4)
-        (count,) = struct.unpack_from("<I", raw, off)
-        off += 4
-        out = []
-        for _ in range(count):
-            (ln,) = struct.unpack_from("<H", raw, off)
-            out.append(raw[off + 2: off + 2 + ln].decode("utf-8"))
-            off += 2 + ln
-        names = tuple(out)
-        (k,) = struct.unpack_from("<I", raw, off)
-        off += 4
-        rows = [struct.unpack_from("<iiiB", raw, off + 13 * i) for i in range(k)]
-        off += 13 * k
-        restr = np.array(rows, dtype=np.int32).reshape(k, 4)
+    if version >= 2:
+        try:
+            speed, name = take("u1", m, 1), take("<i4", m, 4)
+            (count,) = struct.unpack_from("<I", raw, off)
+            off += 4
+            out = []
+            for _ in range(count):
+                (ln,) = struct.unpack_from("<H", raw, off)
+                if off + 2 + ln > len(raw):
+                    raise ValueError("roadpack truncated in names")
+                out.append(raw[off + 2: off + 2 + ln].decode("utf-8"))
+                off += 2 + ln
+            names = tuple(out)
+            (k,) = struct.unpack_from("<I", raw, off)
+            off += 4
+            rows = [struct.unpack_from("<iiiB", raw, off + 13 * i) for i in range(k)]
+            off += 13 * k
+            restr = np.array(rows, dtype=np.int32).reshape(k, 4)
+            if version == 3:
+                (bk,) = struct.unpack_from("<I", raw, off)
+                off += 4
+                boundary = take("<i4", bk, 4)
+        except struct.error as e:
+            raise ValueError(f"roadpack truncated: {e}") from e
         if off != len(raw):
             raise ValueError(f"roadpack has {len(raw) - off} trailing bytes")
     meta = json.loads((dir_ / "roadpack.json").read_text(encoding="utf-8"))
     g = RoadGraph(lats, lons, way, fr.astype(np.int32), to.astype(np.int32), flags, cls,
-                  edge_speed=speed, edge_name=name, names=names, restrictions=restr)
+                  edge_speed=speed, edge_name=name, names=names, restrictions=restr,
+                  boundary_nodes=None if boundary is None else boundary.astype(np.int32))
     return g, meta
