@@ -87,4 +87,29 @@ class RoadPackTest {
             assertFailsWith<IllegalArgumentException>("kind=$bad") { RoadPack.parse(ByteBuffer.wrap(c)) }
         }
     }
+
+    private val fixtureV3 = File("../../research/vpr_bench/tests/data/roadpack_v3_fixture")
+
+    @Test fun parsesV3Boundary() {
+        val pack = RoadPack.parse(ByteBuffer.wrap(File(fixtureV3, "roadpack.bin").readBytes()))
+        assertTrue(pack.isBoundary(0)); assertFalse(pack.isBoundary(1)); assertTrue(pack.isBoundary(2))
+        val v2 = RoadPack.parse(ByteBuffer.wrap(File(fixtureV2, "roadpack.bin").readBytes()))
+        assertEquals(v2.edgeCount, pack.edgeCount)
+        assertEquals(v2.restrictions, pack.restrictions)
+        assertFalse((0 until v2.nodeCount).any { v2.isBoundary(it) })
+    }
+
+    @Test fun v3TruncatedBoundaryFails() {
+        val raw = File(fixtureV3, "roadpack.bin").readBytes()
+        assertFailsWith<IllegalArgumentException> { RoadPack.parse(ByteBuffer.wrap(raw.copyOf(raw.size - 2))) }
+    }
+
+    @Test fun boundaryMustBeIncreasingAndInRange() {
+        val p = RoadPack.parse(ByteBuffer.wrap(File(fixtureV2, "roadpack.bin").readBytes()))
+        for (bad in listOf(intArrayOf(1, 0), intArrayOf(0, 0), intArrayOf(-1), intArrayOf(p.nodeCount))) {
+            assertFailsWith<IllegalArgumentException> {
+                RoadPack(p.lats, p.lons, p.way, p.from, p.to, p.flags, p.cls, p.speedKmh, p.nameIdx, p.names, p.restrictions, bad)
+            }
+        }
+    }
 }

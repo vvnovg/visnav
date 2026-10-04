@@ -12,13 +12,13 @@ class RouterTest {
     /** Узлы в метрах; рёбра (from, to, way, flags, cls, speedKmh); запреты по индексам рёбер. */
     private fun pack(
         nodes: List<Pair<Double, Double>>, edges: List<EdgeSpec>, speeds: List<Int>? = null,
-        restrictions: List<TurnRestriction> = emptyList(),
+        restrictions: List<TurnRestriction> = emptyList(), boundary: IntArray = IntArray(0),
     ): RoadPack {
         val base = roadPackOf(enu, nodes, edges)
         val sp = speeds?.let { s -> ByteArray(s.size) { s[it].toByte() } }
             ?: ByteArray(edges.size) { RoadClass.defaultSpeedKmh(edges[it].cls).toByte() }
         return RoadPack(base.lats, base.lons, base.way, base.from, base.to, base.flags, base.cls, sp,
-            IntArray(edges.size) { -1 }, emptyList(), restrictions)
+            IntArray(edges.size) { -1 }, emptyList(), restrictions, boundary)
     }
 
     private fun ways(r: Route, p: RoadPack) = r.steps.map { p.way[it.edge] }.distinct()
@@ -229,5 +229,28 @@ class RouterTest {
         val plain = assertNotNull(router.route(500.0, 0.0, null, 800.0, 0.0))
         val west = assertNotNull(router.route(500.0, 0.0, -Math.PI / 2, 800.0, 0.0))
         assertEquals(plain.durationS + RouterConfig().wrongHeadingPenaltyS, west.durationS, 1e-6)
+    }
+
+    @Test fun noUturnAtCorridorBoundary() {
+        // Та же геометрия, что в deadEndUturnLosesToBlockLoop, но без петли: отросток B(200,0)–S(200,−50).
+        // Если S — край коридора (дорога за ним обрезана), разворота в S нет, и маршрута назад нет вовсе.
+        val nodes = listOf(0.0 to 0.0, 100.0 to 0.0, 200.0 to 0.0, 200.0 to -50.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2), EdgeSpec(2, 3, 3))
+        val p = pack(nodes, edges, speeds = List(3) { 36 }, boundary = intArrayOf(3))
+        assertNull(Router(RoadIndex(p, enu)).route(150.0, 0.0, Math.PI / 2, 50.0, 0.0))
+    }
+
+    @Test fun loopUsedWhenStubEndsAtBoundary() {
+        // deadEndUturnLosesToBlockLoop с краем в S и штрафом за разворот 0: без отметки края дешевле был бы разворот
+        // в отростке (300 м, 30 с + 2·5 с = 40 с < 60 с), с отметкой остаётся только петля (400 м).
+        val nodes = listOf(0.0 to 0.0, 100.0 to 0.0, 200.0 to 0.0, 200.0 to -50.0, 200.0 to 100.0, 100.0 to 100.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2), EdgeSpec(2, 3, 3), EdgeSpec(2, 4, 4), EdgeSpec(4, 5, 5),
+            EdgeSpec(5, 1, 6))
+        val cheapUturn = RouterConfig(deadEndUturnPenaltyS = 0.0)
+        val free = pack(nodes, edges, speeds = List(edges.size) { 36 })
+        assertEquals(300.0, assertNotNull(Router(RoadIndex(free, enu), cheapUturn).route(150.0, 0.0, Math.PI / 2, 50.0, 0.0)).lengthM, 1e-6)
+        val marked = pack(nodes, edges, speeds = List(edges.size) { 36 }, boundary = intArrayOf(3))
+        val r = assertNotNull(Router(RoadIndex(marked, enu), cheapUturn).route(150.0, 0.0, Math.PI / 2, 50.0, 0.0))
+        assertEquals(400.0, r.lengthM, 1e-6)
     }
 }

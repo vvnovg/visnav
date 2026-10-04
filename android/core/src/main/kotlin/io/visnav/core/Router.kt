@@ -30,8 +30,8 @@ data class RouterConfig(
     val maxCandidateWays: Int = 4,
     val turnPenaltyS: Double = 5.0,
     /**
-     * Разворот на том же ребре в тупике (в том числе у края коридора, где обрезанная дорога выглядит тупиком): дороже
-     * обычного поворота, чтобы объезд квартала выигрывал у разворота в коротком отростке.
+     * Разворот на том же ребре в тупике: дороже обычного поворота, чтобы объезд квартала выигрывал у разворота
+     * в коротком отростке. У края коридора (roadpack v3) разворот запрещён.
      */
     val deadEndUturnPenaltyS: Double = 120.0,
     val wrongHeadingPenaltyS: Double = 60.0,
@@ -142,7 +142,8 @@ class Router(private val index: RoadIndex, private val config: RouterConfig = Ro
             for (k2 in index.incident[v]) {
                 val fwd2 = pack.from[k2] == v
                 if (!fwd2 && (pack.to[k2] != v || pack.oneway(k2))) continue
-                if (k2 == edge && index.degree[v] > 1) continue
+                // Разворот на том же ребре — только в настоящем тупике: у края коридора дорога продолжается за обрезкой.
+                if (k2 == edge && (index.degree[v] > 1 || pack.isBoundary(v))) continue
                 if (!allowed(edge, v, k2)) continue
                 val turn = abs(wrapAngle(travelBearing(k2, fwd2) - travelBearing(edge, s % 2 == 0)))
                 // У ребра нулевой длины нет направления — поворот не определён, штраф не начисляется.
