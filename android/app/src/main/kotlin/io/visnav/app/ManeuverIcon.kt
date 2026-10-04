@@ -7,6 +7,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -44,7 +45,11 @@ fun ManeuverIcon(type: ManeuverType, exit: Int, modifier: Modifier, color: Color
             }
         }
         if (type == ManeuverType.ROUNDABOUT && exit > 0) {
-            Text("$exit", color = color, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            // Центр кольца — на 0,45 высоты (см. roundabout), а не 0,5.
+            Text(
+                "$exit", color = color, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold,
+                modifier = Modifier.align(BiasAlignment(0f, -0.1f)),
+            )
         }
     }
 }

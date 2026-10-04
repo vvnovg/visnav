@@ -31,9 +31,15 @@ data class NavUi(
     val remainingM: Double? = null,
     /** Версия маршрута: растёт при каждом новом маршруте; 0 — маршрута ещё нет. */
     val routeVersion: Int = 0,
-    /** Точки маршрута [lat, lon] — только в обновлении, где сменилась версия, иначе пусто. */
+    /**
+     * Точки маршрута [lat, lon] — от NavSession только в обновлении, где сменилась версия, иначе пусто.
+     * В UiState.nav списки текущей версии сохраняются (см. [mergeNav]).
+     */
     val routeLatLon: List<DoubleArray> = emptyList(),
-    /** Точки манёвров без DEPART [lat, lon] — только в обновлении, где сменилась версия, иначе пусто. */
+    /**
+     * Точки манёвров без DEPART [lat, lon] — от NavSession только в обновлении, где сменилась версия, иначе пусто.
+     * В UiState.nav списки текущей версии сохраняются (см. [mergeNav]).
+     */
     val maneuverLatLon: List<DoubleArray> = emptyList(),
 )
 

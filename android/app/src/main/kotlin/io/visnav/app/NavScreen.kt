@@ -67,8 +67,11 @@ internal fun modeHex(m: NavMode): String = when (m) {
     NavMode.DEAD_RECKONING -> "#EF6C00"
 }
 
-/** Последний маршрут, полученный экраном (NavUi передаёт геометрию только при смене версии). */
-private class RouteStore {
+/**
+ * Последний маршрут, полученный экраном (NavUi передаёт геометрию только при смене версии): новая версия заменяет
+ * маршрут, та же версия с пустыми списками его сохраняет, nav == null или версия 0 — очищает.
+ */
+internal class RouteStore {
     var version = 0; private set
     var routeJson: String = MapGeometry.empty(); private set
     var maneuversJson: String = MapGeometry.empty(); private set
@@ -105,13 +108,18 @@ private fun Style.showPosition(p: MapPos?) {
     )
 }
 
-/** Следящая камера: цель по CameraPolicy и плавный переход за 400 мс; null — режим «свободно». */
-private fun follow(map: MapLibreMap, policy: CameraPolicy, p: MapPos): Boolean {
-    if (!p.lat.isFinite() || !p.lon.isFinite()) return true
+/**
+ * Следящая камера: цель по CameraPolicy и плавный переход за 400 мс, а при [jump] — мгновенный (первое ведение
+ * после загрузки стиля, чтобы камера не прилетала из (0,0)). Возвращает true — камера ведёт, false — режим
+ * «свободно», null — позиция нечисловая, состояние не меняется.
+ */
+private fun follow(map: MapLibreMap, policy: CameraPolicy, p: MapPos, jump: Boolean): Boolean? {
+    if (!p.lat.isFinite() || !p.lon.isFinite()) return null
     val speed = if (p.speedMps.isFinite()) p.speedMps else 0.0
     val t = policy.update(SystemClock.elapsedRealtime(), p.lat, p.lon, speed, p.psiRad) ?: return false
     val camera = CameraPosition.Builder().target(LatLng(t.lat, t.lon)).zoom(t.zoom).bearing(t.bearingDeg).tilt(0.0).build()
-    map.easeCamera(CameraUpdateFactory.newCameraPosition(camera), 400)
+    val update = CameraUpdateFactory.newCameraPosition(camera)
+    if (jump) map.moveCamera(update) else map.easeCamera(update, 400)
     return true
 }
 
@@ -123,7 +131,8 @@ private fun follow(map: MapLibreMap, policy: CameraPolicy, p: MapPos): Boolean {
 fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
     val s by controller.state.collectAsState()
     val lifecycleOwner = LocalLifecycleOwner.current
-    // Кадры анализируются и без вкладки «Отладка»: привязываем камеру без превью.
+    // Кадры анализируются и без вкладки «Отладка»: привязываем камеру без превью. Каждая смена вкладки
+    // перепривязывает камеру — во время записи это пауза в кадрах (см. M1Controller.bindCamera).
     LaunchedEffect(permissionsGranted, lifecycleOwner) {
         if (permissionsGranted) controller.bindCamera(null, lifecycleOwner)
     }
@@ -144,6 +153,8 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
         var sentVersion = -1
         var sentPos: MapPos? = null
         var first = true
+        // Первое ведение после onMapReady/onStyleLoaded (эффект перезапускается на каждой загрузке стиля) — moveCamera.
+        var jumped = false
         controller.state.collect { st ->
             val style = m.style?.takeIf { it.isFullyLoaded } ?: return@collect
             routeStore.update(st.nav)
@@ -156,7 +167,9 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
                 first = false
                 sentPos = st.pos
                 style.showPosition(st.pos)
-                st.pos?.let { free = !follow(m, policy, it) }
+                st.pos?.let { p ->
+                    follow(m, policy, p, jump = !jumped)?.let { following -> free = !following; if (following) jumped = true }
+                }
             }
         }
     }
@@ -190,7 +203,7 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
                     OutlinedButton(onClick = {
                         policy.recenter()
                         free = false
-                        controller.state.value.pos?.let { free = !follow(m, policy, it) }
+                        controller.state.value.pos?.let { p -> follow(m, policy, p, jump = false)?.let { free = !it } }
                     }) { Text("В центр") }
                 }
             }
@@ -233,6 +246,7 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("Нет карты: ${e.message?.removePrefix("нет карты: ") ?: e}")
                             Text("Скопируйте карту: adb push <map>/. $mapDir/", style = MaterialTheme.typography.bodySmall)
+                            Text("После adb push переключите вкладку", style = MaterialTheme.typography.bodySmall)
                         }
                     },
                 )

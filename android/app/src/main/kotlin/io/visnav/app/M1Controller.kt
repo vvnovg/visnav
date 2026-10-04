@@ -140,7 +140,9 @@ class M1Controller(private val context: Context) {
 
     /**
      * Привязывает камеру к [lifecycleOwner]: анализ кадров и, если задан [previewView], превью.
-     * Без превью (навигационный экран) привязывается только анализ; каждая привязка заменяет прежнюю.
+     * Без превью (навигационный экран) привязывается только анализ; каждая привязка заменяет прежнюю
+     * (`unbindAll`). Перепривязка при смене вкладки во время записи даёт паузу в кадрах. Разрешение анализа
+     * без Preview (только ImageAnalysis) ещё нужно проверить на устройстве — CameraX может выбрать другое.
      */
     fun bindCamera(previewView: PreviewView?, lifecycleOwner: LifecycleOwner) {
         val future = ProcessCameraProvider.getInstance(context)
