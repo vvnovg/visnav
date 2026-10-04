@@ -88,8 +88,6 @@ class M1Controller(private val context: Context) {
 
     private val filesDir = requireNotNull(context.getExternalFilesDir(null))
     private val dataDir = File(filesDir, "refpack")
-    /** Каталог данных на телефоне (`files/refpack/`): база, граф дорог, карта `map/`. */
-    val refpackDir: File get() = dataDir
     /** Каталог данных выбранной поездки (`refpack/trips/<имя>/`) или `refpack/` в старой раскладке. */
     @Volatile var tripDataDir: File = dataDir
         private set

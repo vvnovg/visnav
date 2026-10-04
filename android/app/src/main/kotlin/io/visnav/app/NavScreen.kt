@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -21,6 +23,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -65,6 +68,20 @@ internal fun modeHex(m: NavMode): String = when (m) {
     NavMode.GNSS, NavMode.FUSED -> "#2E7D32"
     NavMode.VISUAL -> "#1565C0"
     NavMode.DEAD_RECKONING -> "#EF6C00"
+}
+
+/** Строка поездки на панели: ничего (старая раскладка), текст или выбор из нескольких поездок. */
+internal sealed interface TripLabel {
+    data object None : TripLabel
+    data class Text(val name: String) : TripLabel
+    data class Picker(val name: String, val trips: List<String>) : TripLabel
+}
+
+/** Выбор доступен, только если поездок больше одной, запись не идёт и база загружена. */
+internal fun tripLabel(trip: String?, trips: List<String>, running: Boolean, loaded: Boolean): TripLabel = when {
+    trip == null -> TripLabel.None
+    trips.size > 1 && !running && loaded -> TripLabel.Picker(trip, trips)
+    else -> TripLabel.Text(trip)
 }
 
 /**
@@ -137,18 +154,25 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
         if (permissionsGranted) controller.bindCamera(null, lifecycleOwner)
     }
     var mapData by remember(controller) { mutableStateOf<Result<MapData>?>(null) }
-    LaunchedEffect(controller) {
-        mapData = withContext(Dispatchers.IO) { MapDataLoader.load(controller.refpackDir) }
-    }
     val policy = remember { CameraPolicy() }
-    val routeStore = remember { RouteStore() }
+    // Новая поездка — пустой маршрут: версии маршрута новой сессии не сравниваются со старыми.
+    val routeStore = remember(s.trip) { RouteStore() }
     var map by remember { mutableStateOf<MapLibreMap?>(null) }
     var styleLoads by remember { mutableIntStateOf(0) }
     var free by remember { mutableStateOf(false) }
+    // Смена поездки: loaded уходит в false и возвращается, trip меняется — карта читается из каталога новой поездки.
+    // tripDataDir не наблюдаемый, поэтому ключи — trip и loaded, а каталог читается внутри эффекта.
+    LaunchedEffect(s.trip, s.loaded) {
+        val loaded = withContext(Dispatchers.IO) { MapDataLoader.load(controller.tripDataDir) }
+        // key(data) пересоздаёт карту: старая MapLibreMap уничтожается, ждём onStyleLoaded новой.
+        map = null
+        free = false
+        mapData = loaded
+    }
 
     // Каждая загрузка стиля (в том числе смена день/ночь) перезапускает эффект: маршрут, манёвры и позиция
     // отправляются заново в источники нового стиля. Источники берутся из map.style на каждом обновлении.
-    LaunchedEffect(map, styleLoads) {
+    LaunchedEffect(map, styleLoads, routeStore) {
         val m = map ?: return@LaunchedEffect
         var sentVersion = -1
         var sentPos: MapPos? = null
@@ -193,6 +217,7 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
                     "Дорога: привязана, ${Math.round(r.confidence * 100)} %" + if (r.used) ", уточняет позицию" else ""
                 } ?: "Дорога: не найдена")
             }
+            TripRow(tripLabel(s.trip, s.trips, s.running, s.loaded), controller::selectTrip)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = { if (s.running) controller.stop() else controller.start() },
@@ -217,21 +242,24 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
                     onSuccess = { data ->
                         val night = isSystemInDarkTheme()
                         val styleJson = remember(data, night) { data.styleJson(night) }
-                        MapLibreMap(
-                            modifier = Modifier.fillMaxSize(),
-                            styleJson = styleJson,
-                            onMapReady = { m ->
-                                // Старт без позиции: центр bounds карты, масштаб 13.
-                                if (controller.state.value.pos == null) {
-                                    val b = data.bounds
-                                    val camera = CameraPosition.Builder()
-                                        .target(LatLng((b[1] + b[3]) / 2, (b[0] + b[2]) / 2)).zoom(13.0).tilt(0.0).build()
-                                    m.moveCamera(CameraUpdateFactory.newCameraPosition(camera))
-                                }
-                            },
-                            onStyleLoaded = { m, _ -> map = m; styleLoads++ },
-                            onUserGesture = { policy.onUserGesture(SystemClock.elapsedRealtime()); free = true },
-                        )
+                        // Новая MapData (другая поездка) — новая карта: onMapReady ставит камеру в центр её bounds.
+                        key(data) {
+                            MapLibreMap(
+                                modifier = Modifier.fillMaxSize(),
+                                styleJson = styleJson,
+                                onMapReady = { m ->
+                                    // Старт без позиции: центр bounds карты, масштаб 13.
+                                    if (controller.state.value.pos == null) {
+                                        val b = data.bounds
+                                        val camera = CameraPosition.Builder()
+                                            .target(LatLng((b[1] + b[3]) / 2, (b[0] + b[2]) / 2)).zoom(13.0).tilt(0.0).build()
+                                        m.moveCamera(CameraUpdateFactory.newCameraPosition(camera))
+                                    }
+                                },
+                                onStyleLoaded = { m, _ -> map = m; styleLoads++ },
+                                onUserGesture = { policy.onUserGesture(SystemClock.elapsedRealtime()); free = true },
+                            )
+                        }
                         Text(
                             data.attribution,
                             Modifier.align(Alignment.BottomEnd)
@@ -242,7 +270,7 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
                         )
                     },
                     onFailure = { e ->
-                        val mapDir = File(controller.refpackDir, "map").absolutePath
+                        val mapDir = File(controller.tripDataDir, "map").absolutePath
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("Нет карты: ${e.message?.removePrefix("нет карты: ") ?: e}")
                             Text("Скопируйте карту: adb push <map>/. $mapDir/", style = MaterialTheme.typography.bodySmall)
@@ -250,6 +278,24 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
                         }
                     },
                 )
+            }
+        }
+    }
+}
+
+/** «Поездка: <имя>»: текстом или кнопкой с меню поездок; в старой раскладке ничего. */
+@Composable
+private fun TripRow(label: TripLabel, onSelect: (String) -> Unit) {
+    when (label) {
+        TripLabel.None -> Unit
+        is TripLabel.Text -> Text("Поездка: ${label.name}")
+        is TripLabel.Picker -> Box {
+            var expanded by remember { mutableStateOf(false) }
+            OutlinedButton(onClick = { expanded = true }) { Text("Поездка: ${label.name} ▾") }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                for (t in label.trips) {
+                    DropdownMenuItem(text = { Text(t) }, onClick = { expanded = false; onSelect(t) })
+                }
             }
         }
     }
