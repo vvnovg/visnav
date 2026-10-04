@@ -114,6 +114,29 @@ def _size_mb(paths) -> float:
     return total / 1e6
 
 
+def _shared_model_shas(root: Path, skip: str | None) -> set[str]:
+    """SHA-256 общей модели: <root>/model.onnx, а без него — onnx_sha256 из trips/*/refpack.json.
+
+    Каталоги, имя которых начинается с ".", — не поездки (временные сборки); `skip` — заменяемая поездка.
+    """
+    root_model = root / "model.onnx"
+    if root_model.exists():
+        return {_file_sha256(root_model)}
+    shas: set[str] = set()
+    trips = root / "trips"
+    if trips.is_dir():
+        for d in sorted(trips.iterdir()):
+            if d.name.startswith(".") or d.name == skip or not (d / "refpack.json").is_file():
+                continue
+            try:
+                sha = json.loads((d / "refpack.json").read_text(encoding="utf-8")).get("onnx_sha256")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if sha:
+                shas.add(sha)
+    return shas
+
+
 def _pack_trip(args: argparse.Namespace) -> int:
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", args.name):
         print("error: bad trip name", file=sys.stderr)
@@ -126,67 +149,93 @@ def _pack_trip(args: argparse.Namespace) -> int:
     if len(track) < 2:
         print("error: route has fewer than 2 timed points", file=sys.stderr)
         return 2
-    trip = args.out / "trips" / args.name
-    if trip.exists():
-        if not args.force:
-            print("error: trip exists, pass --force", file=sys.stderr)
-            return 2
-        shutil.rmtree(trip)
-    trip.mkdir(parents=True)
+    trips = args.out / "trips"
+    trip = trips / args.name
+    if trip.exists() and not args.force:
+        print("error: trip exists, pass --force", file=sys.stderr)
+        return 2
+    try:
+        sha = _file_sha256(args.onnx)
+    except OSError as e:
+        print(f"error: onnx: {e}", file=sys.stderr)
+        return 2
+    root_model = args.out / "model.onnx"
+    if any(s != sha for s in _shared_model_shas(args.out, args.name if args.force else None)):
+        print(f"error: trip model differs from the shared model of {args.out} — all trips share one model",
+              file=sys.stderr)
+        return 2
+    tmp = trips / f".{args.name}.tmp"
+    old = trips / f".{args.name}.old"
+    for leftover in (tmp, old):
+        if leftover.exists():
+            shutil.rmtree(leftover)
+    tmp.mkdir(parents=True)
+    ok = False
     try:
         steps = (
-            (_step_refs, argparse.Namespace(refs=args.refs, onnx=args.onnx, out=trip, gpx=[args.route],
+            (_step_refs, argparse.Namespace(refs=args.refs, onnx=args.onnx, out=tmp, gpx=[args.route],
                                             buffer_m=args.refs_buffer_m)),
             (_step_roads, argparse.Namespace(pbf=args.pbf, gpx=[args.route], log=[], bbox=None,
-                                             buffer_m=args.roads_buffer_m, out=trip)),
+                                             buffer_m=args.roads_buffer_m, out=tmp)),
             (_step_map, argparse.Namespace(mbtiles=args.mbtiles, fonts_zip=args.fonts_zip, gpx=[args.route], log=[],
-                                           buffer_m=args.map_buffer_m, out=trip / "map")),
+                                           buffer_m=args.map_buffer_m, out=tmp / "map")),
         )
         for step, ns in steps:
             rc = step(ns)
             if rc != 0:
-                shutil.rmtree(trip)
                 return rc
-    except BaseException:
-        shutil.rmtree(trip, ignore_errors=True)
-        raise
-    sha = _file_sha256(trip / "model.onnx")
-    root_model = args.out / "model.onnx"
-    if root_model.exists() and _file_sha256(root_model) != sha:
-        shutil.rmtree(trip)
-        print(f"error: trip model differs from {root_model} — all trips share one model", file=sys.stderr)
-        return 2
-    os.replace(trip / "model.onnx", root_model)
-    dest = track[-1]
-    (trip / "route.json").write_text(json.dumps(
-        {"dest_lat": dest.lat, "dest_lon": dest.lon, "dest_name": args.dest_name or args.name},
-        ensure_ascii=False, indent=2), encoding="utf-8")
-    route_km = sum(haversine_m(a.lat, a.lon, b.lat, b.lon) for a, b in zip(track, track[1:])) / 1000.0
-    sizes = {
-        "refs": _size_mb(trip.glob("refpack.*")),
-        "roads": _size_mb(trip.glob("roadpack.*")),
-        "map": _size_mb([trip / "map"]),
-    }
-    total_mb = sum(sizes.values())
-    per_100 = total_mb / max(route_km, 1e-9) * 100
-    meta = {
-        "name": args.name,
-        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "route_km": round(route_km, 3),
-        "model": args.onnx.stem,
-        "onnx_sha256": sha,
-        "buffers_m": {"refs": args.refs_buffer_m, "roads": args.roads_buffer_m, "map": args.map_buffer_m},
-        "sizes_mb": {k: round(v, 2) for k, v in sizes.items()},
-        "total_mb": round(total_mb, 2),
-        "mb_per_100km": round(per_100, 2),
-        "nfr8_target_mb_per_100km": 50,
-    }
-    (trip / "trip.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        if _file_sha256(tmp / "model.onnx") != sha:
+            print("error: packed model differs from --onnx", file=sys.stderr)
+            return 2
+        dest = track[-1]
+        (tmp / "route.json").write_text(json.dumps(
+            {"dest_lat": dest.lat, "dest_lon": dest.lon, "dest_name": args.dest_name or args.name},
+            ensure_ascii=False, indent=2), encoding="utf-8")
+        route_km = sum(haversine_m(a.lat, a.lon, b.lat, b.lon) for a, b in zip(track, track[1:])) / 1000.0
+        sizes = {
+            "refs": _size_mb(tmp.glob("refpack.*")),
+            "roads": _size_mb(tmp.glob("roadpack.*")),
+            "map": _size_mb([tmp / "map"]),
+        }
+        total_mb = sum(sizes.values())
+        per_100 = total_mb / max(route_km, 1e-9) * 100
+        meta = {
+            "name": args.name,
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "route_km": round(route_km, 3),
+            "model": args.onnx.stem,
+            "onnx_sha256": sha,
+            "buffers_m": {"refs": args.refs_buffer_m, "roads": args.roads_buffer_m, "map": args.map_buffer_m},
+            "sizes_mb": {k: round(v, 2) for k, v in sizes.items()},
+            "total_mb": round(total_mb, 2),
+            "mb_per_100km": round(per_100, 2),
+            "nfr8_target_mb_per_100km": 50,
+        }
+        (tmp / "trip.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        # модель — в корень до подмены: сбой после этого не оставит поездку без модели
+        if root_model.exists():
+            (tmp / "model.onnx").unlink()
+        else:
+            os.replace(tmp / "model.onnx", root_model)
+        if trip.exists():
+            os.replace(trip, old)
+            try:
+                os.replace(tmp, trip)
+            except BaseException:
+                os.replace(old, trip)
+                raise
+            shutil.rmtree(old, ignore_errors=True)
+        else:
+            os.replace(tmp, trip)
+        ok = True
+    finally:
+        if not ok:
+            shutil.rmtree(tmp, ignore_errors=True)
     print(f"trip {args.name}: {route_km:.1f} km, refs {sizes['refs']:.2f} MB, roads {sizes['roads']:.2f} MB, "
           f"map {sizes['map']:.2f} MB, total {total_mb:.2f} MB = {per_100:.2f} MB per 100 km "
           f"(NFR-8 target 50, incl. refs) -> {trip}")
     if per_100 > 50:
-        print("warning: over NFR-8 target")
+        print("warning: over NFR-8 target", file=sys.stderr)
     return 0
 
 
