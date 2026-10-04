@@ -75,6 +75,16 @@ def test_chained_then_prompt_counts_for_next_maneuver():
     assert "✅" in [l for l in render_nav_report(r).splitlines() if "вовремя" in l][0]
 
 
+def test_late_first_gps_sample_still_reaches_maneuver():
+    # Маршрут построен на 50-й секунде от (500,0); первая точка GPS — только на 72-й, в (720,0): цепочка 220 м уже
+    # за начальным окном 200 м. Окно растёт со временем от построения: 200 + 70·22 = 1740 м.
+    frames = [f for f in _frames(EAST_THEN_SOUTH) if f.t_ms >= T0 + 72_000]
+    ev = [_route(50, poly=((500, 0), (1000, 0), (1000, -500)), at_m=500.0), _prompt(90, 1, "near")]
+    r = evaluate_nav(_header(), ev, frames)
+    assert len(r.checks) == 1 and 99.5 <= r.checks[0].reached_t <= 100.5
+    assert 9.5 <= r.checks[0].prompt_lead_s <= 10.5
+
+
 def test_window_split():
     ev = [_route(0), _prompt(90, 1, "near")]
     r = evaluate_nav(_header(outages=[[T0 + 95_000, T0 + 120_000]]), ev, _frames(EAST_THEN_SOUTH))
@@ -189,3 +199,29 @@ def test_cli_session_mismatch_and_ok(tmp_path):
     assert main(["nav-eval", "--nav", str(bad), "--log", str(log), "--out", str(out)]) == 2
     _, ev = read_nav(nav)
     assert ev[0]["ev"] == "route"
+
+
+def test_kotlin_golden_nav_log_reads():
+    # Файл пишет NavFormatTest.goldenNavLogMatchesCommittedFile (Kotlin); здесь — чтение тем же read_nav.
+    from pathlib import Path
+    header, ev = read_nav(Path(__file__).parent / "data" / "nav_golden.jsonl")
+    assert header["session_started_ms"] == 1_700_000_000_000 and header["roads"] == "2026-10-01T00:00:00Z"
+    assert header["dest"] == [55.748, 37.604] and header["outages"] == [[1_700_000_030_000, 1_700_000_045_000]]
+    assert header["jams"] == [] and header["spoofs"] == []
+    assert [e["ev"] for e in ev] == ["route", "prompt", "prompt", "prompt", "prompt", "arrive"]
+    rt = ev[0]
+    assert rt["t_ms"] == 1_700_000_001_000 and rt["reroute"] is False
+    assert rt["length_m"] == 650.0 and rt["duration_s"] == 75.5 and len(rt["polyline"]) == 4
+    assert rt["polyline"][0] == [55.75, 37.6]
+    assert [m["type"] for m in rt["maneuvers"]] == ["depart", "right", "left", "arrive"]
+    right = rt["maneuvers"][1]
+    assert right["at_m"] == 300.0 and right["street"] == "Тверская улица" and right["exit"] == 0
+    assert abs(right["lat"] - 55.75) < 1e-9 and abs(right["lon"] - 37.6048) < 1e-4
+    assert rt["maneuvers"][2]["street"] is None
+    far, near, now, arrive_prompt = ev[1:5]
+    assert far["then"] is None and far["stage"] == "far" and far["maneuver"] == 1 and far["dist_m"] == 300.0
+    assert near["then"] == 2 and near["stage"] == "near"
+    assert near["text"] == "Через 100 м поверните направо — Тверская улица, затем налево"
+    assert now["then"] == 2 and now["stage"] == "now" and now["t_ms"] == 1_700_000_027_000
+    assert arrive_prompt["maneuver"] == 3 and arrive_prompt["text"] == "Вы прибыли"
+    assert ev[5] == {"t_ms": 1_700_000_050_000, "ev": "arrive"}

@@ -111,17 +111,18 @@ def _maneuver_chainage(m: dict, enu, segs, total: float, length_m: float | None,
     return target if best_c is None else best_c
 
 
-def _chainage_track(enu, segs, total: float, samples: list[TrackPoint], on_route_m: float,
-                    seed_m: float = 200.0) -> list[tuple[float, float]]:
+def _chainage_track(enu, segs, total: float, samples: list[TrackPoint], on_route_m: float, t_start: float,
+                    seed_m: float = 200.0, seed_speed_mps: float = 70.0) -> list[tuple[float, float]]:
     """(t, chainage) для выборок, лежащих на маршруте; ход по ломаной монотонный (окно вокруг прошлой цепочки);
-    первая выборка ищется только в [0, seed_m]."""
+    первая выборка ищется только в [0, seed_m + seed_speed_mps·(t − t_start)] — окно растёт, если GPS появился
+    позже построения маршрута."""
     out: list[tuple[float, float]] = []
     c_prev: float | None = None
     xy_prev: tuple[float, float] | None = None
     for p in samples:
         x, y = enu(p.lat, p.lon)
         if c_prev is None or xy_prev is None:
-            lo, hi = 0.0, seed_m
+            lo, hi = 0.0, seed_m + seed_speed_mps * max(0.0, p.t - t_start)
         else:
             ds = math.hypot(x - xy_prev[0], y - xy_prev[1])
             lo, hi = c_prev - 15.0, c_prev + max(200.0, 5.0 * ds)
@@ -166,7 +167,8 @@ def evaluate_nav(header: dict, events: list[dict], log_frames: list[FieldFrame],
         poly = rt["polyline"]
         if len(poly) >= 2:
             enu, segs, total = _segments(poly)
-            chain = _chainage_track(enu, segs, total, [p for p in track if t_start <= p.t < t_end], on_route_m)
+            chain = _chainage_track(enu, segs, total, [p for p in track if t_start <= p.t < t_end], on_route_m,
+                                    t_start)
         else:
             enu, segs, total, chain = None, [], 0.0, []
         for mi, m in enumerate(rt["maneuvers"]):
