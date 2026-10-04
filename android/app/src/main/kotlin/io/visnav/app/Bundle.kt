@@ -19,7 +19,7 @@ data class Destination(val lat: Double, val lon: Double, val name: String?)
 
 object BundleLoader {
     /** Бросает IllegalStateException с понятным текстом, если файлы не положены через adb push. */
-    fun load(dir: File, model: File = File(dir, "model.onnx")): LoadedBundle {
+    fun load(dir: File, model: File = File(dir, "model.onnx"), xnnpack: Boolean = false): LoadedBundle {
         val bin = File(dir, "refpack.bin")
         val json = File(dir, "refpack.json")
         for (f in listOf(bin, json, model)) check(f.isFile) { "нет файла ${f.absolutePath}" }
@@ -57,7 +57,7 @@ object BundleLoader {
                 null
             }
         } else null
-        val embedder = OrtEmbedder(model, meta.model)
+        val embedder = OrtEmbedder(model, meta.model, xnnpack)
         try {
             check(embedder.inputH == meta.inputH && embedder.inputW == meta.inputW) {
                 "модель ${embedder.inputW}x${embedder.inputH} не совпадает с refpack ${meta.inputW}x${meta.inputH}"

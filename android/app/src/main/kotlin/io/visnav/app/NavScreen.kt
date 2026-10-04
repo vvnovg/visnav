@@ -34,10 +34,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.visnav.core.CameraPolicy
+import io.visnav.core.GnssHealth
 import io.visnav.core.Instructions
 import io.visnav.core.MapGeometry
+import io.visnav.core.LocalizerOutput
 import io.visnav.core.MapStyle
 import io.visnav.core.NavMode
+import io.visnav.core.Nowcast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.maplibre.android.camera.CameraPosition
@@ -68,6 +71,20 @@ internal fun modeHex(m: NavMode): String = when (m) {
     NavMode.GNSS, NavMode.FUSED -> "#2E7D32"
     NavMode.VISUAL -> "#1565C0"
     NavMode.DEAD_RECKONING -> "#EF6C00"
+}
+
+/**
+ * Позиция «сейчас» для маркера, круга σ и камеры: Nowcast по последнему выходу фильтра ([MapPos.tMs]) на момент
+ * [nowMs] (настенные часы, как t_ms). σ, курс, скорость и режим не меняются.
+ */
+internal fun nowcastPos(p: MapPos, nowMs: Long): MapPos {
+    val out = LocalizerOutput(
+        tMs = p.tMs, lat = p.lat, lon = p.lon, sigmaM = p.sigmaM, visSim = null, visAccepted = null, visState = "",
+        stationary = false, mode = p.mode, health = GnssHealth.GOOD, reasons = emptySet(),
+        psiRad = p.psiRad, speedMps = p.speedMps,
+    )
+    val ll = Nowcast.at(out, nowMs)
+    return if (ll[0] == p.lat && ll[1] == p.lon) p else p.copy(lat = ll[0], lon = ll[1])
 }
 
 /** Строка поездки на панели: ничего (старая раскладка), текст или выбор из нескольких поездок. */
@@ -153,7 +170,9 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
     val lifecycleOwner = LocalLifecycleOwner.current
     // Кадры анализируются и без вкладки «Отладка»: привязываем камеру без превью. Каждая смена вкладки
     // перепривязывает камеру — во время записи это пауза в кадрах (см. M1Controller.bindCamera).
-    LaunchedEffect(permissionsGranted, lifecycleOwner) {
+    // Смена профиля (full/baseline) перепривязывает камеру: в baseline bindCamera только снимает use case.
+    val profile = s.settings.profile
+    LaunchedEffect(permissionsGranted, lifecycleOwner, profile) {
         if (permissionsGranted) controller.bindCamera(null, lifecycleOwner)
     }
     var mapData by remember(controller) { mutableStateOf<Result<MapData>?>(null) }
@@ -195,8 +214,10 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
             if (first || st.pos !== sentPos) {
                 first = false
                 sentPos = st.pos
-                style.showPosition(st.pos)
-                st.pos?.let { p ->
+                // Прогноз на момент публикации; между выходами фильтра не пересчитывается.
+                val now = st.pos?.let { nowcastPos(it, System.currentTimeMillis()) }
+                style.showPosition(now)
+                now?.let { p ->
                     follow(m, policy, p, jump = !jumped)?.let { following -> free = !following; if (following) jumped = true }
                 }
             }
@@ -233,7 +254,9 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
                     OutlinedButton(onClick = {
                         policy.recenter()
                         free = false
-                        controller.state.value.pos?.let { p -> follow(m, policy, p, jump = false)?.let { free = !it } }
+                        controller.state.value.pos?.let { p ->
+                            follow(m, policy, nowcastPos(p, System.currentTimeMillis()), jump = false)?.let { free = !it }
+                        }
                     }) { Text("В центр") }
                 }
             }

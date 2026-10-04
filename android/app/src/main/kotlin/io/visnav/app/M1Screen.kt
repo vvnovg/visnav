@@ -8,13 +8,19 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
@@ -29,16 +35,25 @@ import kotlin.math.roundToInt
 fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
     val s by controller.state.collectAsState()
     val lifecycleOwner = LocalLifecycleOwner.current
+    var previewView by remember { mutableStateOf<PreviewView?>(null) }
+    // Привязка при появлении превью и при смене профиля (в baseline bindCamera только снимает use case).
+    val profile = s.settings.profile
+    LaunchedEffect(previewView, lifecycleOwner, profile) {
+        previewView?.let { controller.bindCamera(it, lifecycleOwner) }
+    }
     Row(Modifier.fillMaxSize()) {
         if (permissionsGranted) {
             AndroidView(
-                factory = { ctx -> PreviewView(ctx).also { controller.bindCamera(it, lifecycleOwner) } },
+                factory = { ctx -> PreviewView(ctx).also { previewView = it } },
                 modifier = Modifier.weight(1f).fillMaxHeight(),
             )
         } else {
             Text("Нужны разрешения на камеру и геопозицию", Modifier.weight(1f).padding(16.dp))
         }
-        Column(Modifier.width(280.dp).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(
+            Modifier.width(280.dp).verticalScroll(rememberScrollState()).padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             Text(s.status)
             Text("Кадр: ${s.frameSize ?: "—"}")
             Text("Кадров: ${s.frames}")
@@ -80,8 +95,36 @@ fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
                 onClick = { if (s.running) controller.stop() else controller.start() },
                 enabled = s.loaded && permissionsGranted,
             ) { Text(if (s.running) "Стоп" else "Старт") }
+            s.perf?.let { p ->
+                Text("Интервал кадров: ${p.intervalMs} мс")
+                Text("Нагрев (thermal): ${p.thermal ?: "—"}")
+                Text("e2e p50: ${p.e2eP50?.let { "%.0f мс".format(it) } ?: "—"}")
+                Text("Ток батареи: ${p.currentMa?.let { "%.0f мА".format(it) } ?: "—"}")
+            }
+            PerfSettingsControls(controller, s.settings, enabled = !s.running, loading = s.loading)
         }
     }
+}
+
+/** Настройки замеров: по нажатию — следующий вариант; только вне записи (ORT — ещё и не во время загрузки базы). */
+@Composable
+private fun PerfSettingsControls(controller: M1Controller, st: PerfSettings, enabled: Boolean, loading: Boolean) {
+    OutlinedButton(
+        onClick = { controller.setReorderDelay(PerfSettings.next(PerfSettings.REORDER_DELAYS_MS, st.reorderDelayMs)) },
+        enabled = enabled,
+    ) { Text("Буфер: ${st.reorderDelayMs} мс") }
+    OutlinedButton(
+        onClick = { controller.setOrt(PerfSettings.next(PerfSettings.ORTS, st.ort)) },
+        enabled = enabled && !loading,
+    ) { Text("ORT: ${st.ort}") }
+    OutlinedButton(
+        onClick = { controller.setProfile(PerfSettings.next(PerfSettings.PROFILES, st.profile)) },
+        enabled = enabled,
+    ) { Text("Профиль: ${if (st.baseline) "baseline (без камеры)" else "full"}") }
+    OutlinedButton(
+        onClick = { controller.setDuration(PerfSettings.next(PerfSettings.DURATIONS_MIN, st.durationMin)) },
+        enabled = enabled,
+    ) { Text("Длительность: ${if (st.durationMin == 0) "без ограничения" else "${st.durationMin} мин"}") }
 }
 
 internal fun modeLabel(m: NavMode) = when (m) {
