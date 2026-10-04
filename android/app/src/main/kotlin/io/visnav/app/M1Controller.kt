@@ -129,7 +129,9 @@ class M1Controller(private val context: Context) {
     fun selectTrip(name: String) {
         if (executor.isShutdown) return
         val s = _state.value
-        if (s.running || (name == s.trip && s.loaded)) return
+        if (s.running) return
+        // Повторный выбор уже загруженной поездки отменяет ещё не загруженный выбор (A → B → A: остаётся A).
+        if (name == s.trip && s.loaded) { pendingTrip.set(null); return }
         pendingTrip.set(name)
         try {
             executor.execute { pendingTrip.getAndSet(null)?.let { loadBundle(it) } }
