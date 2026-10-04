@@ -144,6 +144,26 @@ class RouterTest {
         assertEquals(350.0, r.lengthM, 1e-6)
     }
 
+    @Test fun deadEndUturnLosesToBlockLoop() {
+        // Улица W(0,0)–A(100,0)–B(200,0), в B — тупиковый отросток на юг 50 м, S(200,−50); квартал A–B–D(200,100)–E(100,100)
+        // периметром 400 м. Машина в (150,0) смотрит на восток, цель (50,0) позади; все рёбра 36 км/ч (10 м/с).
+        // Через тупик: 300 м = 30 с + 2 поворота по 5 с + разворот. Петля: 400 м = 40 с + 4 поворота по 5 с = 60 с.
+        // Со штрафом за разворот 5 с (как за поворот) тупик выигрывал бы (45 с); со штрафом 120 с — петля (60 < 160).
+        val nodes = listOf(0.0 to 0.0, 100.0 to 0.0, 200.0 to 0.0, 200.0 to -50.0, 200.0 to 100.0, 100.0 to 100.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2), EdgeSpec(2, 3, 3), EdgeSpec(2, 4, 4), EdgeSpec(4, 5, 5),
+            EdgeSpec(5, 1, 6))
+        val p = pack(nodes, edges, speeds = List(edges.size) { 36 })
+        val r = assertNotNull(Router(RoadIndex(p, enu)).route(150.0, 0.0, Math.PI / 2, 50.0, 0.0))
+        assertEquals(listOf(2L, 4L, 5L, 6L, 1L), ways(r, p))
+        assertEquals(400.0, r.lengthM, 1e-6)
+        assertEquals(40.0 + 4 * RouterConfig().turnPenaltyS, r.durationS, 1e-6)
+        // Без петли остаётся только разворот в тупике, и его стоимость — штраф deadEndUturnPenaltyS.
+        val stubOnly = pack(nodes.take(4), edges.take(3), speeds = List(3) { 36 })
+        val u = assertNotNull(Router(RoadIndex(stubOnly, enu)).route(150.0, 0.0, Math.PI / 2, 50.0, 0.0))
+        assertEquals(listOf(RouteStep(1, true), RouteStep(2, true), RouteStep(2, false), RouteStep(1, false), RouteStep(0, false)), u.steps)
+        assertEquals(30.0 + 2 * RouterConfig().turnPenaltyS + RouterConfig().deadEndUturnPenaltyS, u.durationS, 1e-6)
+    }
+
     @Test fun startExactlyAtNode() {
         // Старт ровно в узле (100,0), где сходятся три дороги; цель — конец ветки на север.
         val nodes = listOf(0.0 to 0.0, 100.0 to 0.0, 200.0 to 0.0, 100.0 to 100.0)

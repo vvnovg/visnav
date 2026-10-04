@@ -157,6 +157,20 @@ class ManeuversTest {
         assertEquals("Б", ms[1].street)
     }
 
+    @Test fun uTurnAtDeadEndIsAnnounced() {
+        // Геометрия RouterTest.uTurnAtDeadEndWhenHeadingAway: тупик в (350,0), машина в (250,0) смотрит на восток,
+        // цель (100,0) позади — разворот на том же ребре в узле степени 1.
+        val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 350.0 to 0.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2))
+        val idx = RoadIndex(named(nodes, edges, listOf("Улица А", "Тупик")), enu)
+        val r = assertNotNull(Router(idx).route(250.0, 0.0, Math.PI / 2, 100.0, 0.0))
+        val ms = buildManeuvers(r, idx)
+        assertEquals(listOf(ManeuverType.DEPART, ManeuverType.UTURN, ManeuverType.ARRIVE), types(ms))
+        assertEquals(100.0, ms[1].atM, 1e-6)
+        assertEquals(350.0, ms[1].e, 1e-6); assertEquals(0.0, ms[1].n, 1e-6)
+        assertEquals("Тупик", ms[1].street)
+    }
+
     @Test fun roundaboutSplitArmDoesNotCountEntryOnlyNode() {
         // Восточный подъезд расщеплён: въезд-only в Ein, съезд-only из Eout, 12 м по кольцу. Выход на север — 2-й.
         val nodes = listOf(0.0 to -50.0, 49.6 to -6.1, 49.6 to 6.1, 0.0 to 50.0, -50.0 to 0.0,

@@ -70,6 +70,27 @@ class RouteFollowerTest {
         assertTrue(rr[1].route.lengthM > 0)
     }
 
+    @Test fun firstPromptOfRerouteComesWithRoute() {
+        // W(0,0)–J(1000,0): в J направо на юг к цели (1000,−500); прямо — K(1150,0) с отростком на восток и улицей
+        // на юг к (1150,−300), оттуда на запад к M(1000,−300) на южной улице. Поворот в J пропущен: перестроение
+        // в (1105, 0) (съезд с 1045 м + 4 с), до поворота в K 45 м — в пределах «близко» (120 м при 15 м/с), но дальше
+        // «сейчас» (37,5 м).
+        val nodes = listOf(0.0 to 0.0, 1000.0 to 0.0, 1000.0 to -300.0, 1000.0 to -600.0, 1150.0 to 0.0,
+            1150.0 to -300.0, 1300.0 to 0.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2), EdgeSpec(2, 3, 2), EdgeSpec(1, 4, 3), EdgeSpec(4, 5, 4),
+            EdgeSpec(5, 2, 5), EdgeSpec(4, 6, 3))
+        val f = RouteFollower(RoadIndex(roadPackOf(enu, nodes, edges), enu), 1000.0, -500.0)
+        val ev = drive(f, listOf(0.0 to 0.0, 1000.0 to 0.0, 1300.0 to 0.0))
+        val rr = ev.filterIsInstance<NavEvent.RouteReady>().first { it.reroute }
+        val k = rr.maneuvers.indexOfFirst { it.type == ManeuverType.RIGHT }
+        assertEquals(1150.0, rr.maneuvers[k].e, 1e-6)
+        val at = ev.indexOf(rr)
+        val near = ev[at + 1] as NavEvent.Prompt
+        assertEquals(rr.tMs, near.tMs)
+        assertEquals(k, near.maneuver); assertEquals(PromptStage.NEAR, near.stage)
+        assertEquals(45.0, near.distM, 1e-6)
+    }
+
     @Test fun largeSigmaPreventsFalseReroute() {
         val f = RouteFollower(graph(), 1000.0, -500.0)
         // Едем параллельно маршруту в 35 м к северу с σ 20 м: порог max(40, 50) = 50 м — съезда нет.

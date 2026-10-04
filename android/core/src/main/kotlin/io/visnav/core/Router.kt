@@ -13,7 +13,8 @@ data class RouteStep(val edge: Int, val forward: Boolean)
  * проекция финиша; cumM — накопленная длина до каждой точки.
  *
  * durationS — стоимость маршрута для поиска, а не чистое время в пути: кроме времени езды по рёбрам включает
- * штрафы за повороты (turnPenaltyS) и за старт против курса (wrongHeadingPenaltyS). Это оценка.
+ * штрафы за повороты (turnPenaltyS), за разворот в тупике (deadEndUturnPenaltyS) и за старт против курса
+ * (wrongHeadingPenaltyS). Это оценка.
  */
 class Route(val steps: List<RouteStep>, val points: List<DoubleArray>, val cumM: DoubleArray, val durationS: Double) {
     val lengthM: Double get() = cumM.last()
@@ -28,13 +29,18 @@ data class RouterConfig(
     val startSlackM: Double = 8.0,
     val maxCandidateWays: Int = 4,
     val turnPenaltyS: Double = 5.0,
+    /**
+     * Разворот на том же ребре в тупике (в том числе у края коридора, где обрезанная дорога выглядит тупиком): дороже
+     * обычного поворота, чтобы объезд квартала выигрывал у разворота в коротком отростке.
+     */
+    val deadEndUturnPenaltyS: Double = 120.0,
     val wrongHeadingPenaltyS: Double = 60.0,
     val maxSpeedMps: Double = 130 / 3.6,
 )
 
 /**
  * A* по направленным рёбрам графа коридора: односторонние улицы, запреты поворотов (no_* / only_*), стоимость —
- * время в пути. Разворот на том же ребре — только в тупике.
+ * время в пути. Разворот на том же ребре — только в тупике, со штрафом deadEndUturnPenaltyS.
  */
 class Router(private val index: RoadIndex, private val config: RouterConfig = RouterConfig()) {
     private val pack = index.pack
@@ -141,7 +147,11 @@ class Router(private val index: RoadIndex, private val config: RouterConfig = Ro
                 val turn = abs(wrapAngle(travelBearing(k2, fwd2) - travelBearing(edge, s % 2 == 0)))
                 // У ребра нулевой длины нет направления — поворот не определён, штраф не начисляется.
                 val degenerate = index.length[edge] == 0.0 || index.length[k2] == 0.0
-                val entry = g0 + if (!degenerate && turn > PI / 4) config.turnPenaltyS else 0.0
+                val entry = g0 + when {
+                    k2 == edge -> config.deadEndUturnPenaltyS                 // разворот в тупике (степень 1)
+                    !degenerate && turn > PI / 4 -> config.turnPenaltyS
+                    else -> 0.0
+                }
                 val s2 = state(k2, fwd2)
                 val speed2 = pack.speedMps(k2)
                 goalOf[s2]?.forEach { g ->

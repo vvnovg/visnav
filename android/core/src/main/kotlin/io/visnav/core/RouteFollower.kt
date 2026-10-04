@@ -96,14 +96,21 @@ class RouteFollower(
 
     private fun key(i: Int, s: PromptStage) = i.toLong() * 4 + s.ordinal
 
-    /** Новый маршрут; при неудаче прежний маршрут и его состояние сохраняются. */
-    private fun plan(tMs: Long, e: Double, n: Double, psi: Double?, reroute: Boolean): NavEvent {
+    /**
+     * Новый маршрут; при неудаче прежний маршрут и его состояние сохраняются. После удачного плана в том же вызове
+     * выдаётся подсказка о первом манёвре (прогресс 0), кроме «сейчас» — она прозвучит на следующем обновлении.
+     */
+    private fun plan(tMs: Long, e: Double, n: Double, psi: Double?, reroute: Boolean, v: Double, threshold: Double): List<NavEvent> {
         lastRouteAttempt = tMs
-        val r = router.route(e, n, psi, destE, destN) ?: return NavEvent.RouteFailed(tMs)
+        val r = router.route(e, n, psi, destE, destN) ?: return listOf(NavEvent.RouteFailed(tMs))
         route = r; maneuvers = buildManeuvers(r, index); progressM = 0.0; spoken.clear(); offSince = null
         acquired = false; planE = e; planN = n; planT = tMs
         plannedWithHeading = psi != null; headingChecked = false
-        return NavEvent.RouteReady(tMs, r, maneuvers, reroute)
+        val out = ArrayList<NavEvent>()
+        out += NavEvent.RouteReady(tMs, r, maneuvers, reroute)
+        // Машина дальше порога съезда от начала маршрута — подсказок нет, как и при обычном ведении.
+        if (hypot(e - r.points[0][0], n - r.points[0][1]) <= threshold) out += prompts(tMs, v, allowNow = false)
+        return out
     }
 
     /** Начальный азимут маршрута: от points[0] к первой точке не ближе 1 м; null, если такой нет. */
@@ -118,15 +125,15 @@ class RouteFollower(
         val dtS = lastT?.let { (tMs - it) / 1000.0 }
         lastT = tMs
         val psi = if (psiRad.isFinite() && speedMps.isFinite() && speedMps >= 3.0) psiRad else null
-        val r = route
-        if (r == null) {
-            if (tMs - lastRouteAttempt < config.rerouteCooldownMs) return emptyList()
-            return listOf(plan(tMs, e, n, psi, reroute = false))
-        }
         val speed = if (speedMps.isFinite()) speedMps else 0.0
         val v = max(speed, config.minSpeedMps)
         val sigma = if (sigmaM.isFinite()) sigmaM else 0.0
         val threshold = max(config.offRouteM, min(config.offRouteSigmaK * sigma, config.offRouteSigmaCapM))
+        val r = route
+        if (r == null) {
+            if (tMs - lastRouteAttempt < config.rerouteCooldownMs) return emptyList()
+            return plan(tMs, e, n, psi, reroute = false, v, threshold)
+        }
         // Прогресс: проекции на отрезки в окне вокруг текущего прогресса.
         val lo = progressM - config.backtrackM
         val hi = progressM + min(config.maxWindowM, maxOf(200.0, 5 * v, v * (dtS ?: 0.0) + config.staleJumpM))
@@ -161,7 +168,7 @@ class RouteFollower(
             headingChecked = true
             val b = initialBearing(r)
             if (progressM < config.headingCheckM && b != null && abs(wrapAngle(psi - b)) > PI / 2) {
-                return listOf(plan(tMs, e, n, psi, reroute = false))
+                return plan(tMs, e, n, psi, reroute = false, v, threshold)
             }
         }
         // Съезд с маршрута.
@@ -171,7 +178,7 @@ class RouteFollower(
             val due = if (acquired) tMs - since >= config.offRouteHoldMs
             else hypot(e - planE, n - planN) > config.unacquiredMoveM && tMs - planT >= config.unacquiredWaitMs
             if (due && tMs - lastRouteAttempt >= config.rerouteCooldownMs) {
-                return listOf(plan(tMs, e, n, psi, reroute = true))
+                return plan(tMs, e, n, psi, reroute = true, v, threshold)
             }
         } else {
             offSince = null
@@ -190,6 +197,12 @@ class RouteFollower(
         if (off) return out
         // Скачок прогресса (например, после пропадания позиции): подсказки о пройденном не выдаём.
         if (dtS != null && progressM - before > v * dtS + config.staleJumpM) return out
+        return prompts(tMs, v, allowNow = true)
+    }
+
+    /** Подсказка о следующем манёвре по текущему прогрессу: «далеко», «близко», «сейчас» — каждая не больше раза. */
+    private fun prompts(tMs: Long, v: Double, allowNow: Boolean): List<NavEvent> {
+        val out = ArrayList<NavEvent>()
         val i = nextManeuver ?: return out
         val m = maneuvers[i]
         val dist = m.atM - progressM
@@ -206,7 +219,7 @@ class RouteFollower(
             return text + ", затем " + Instructions.shortAction(maneuvers[j])
         }
         when {
-            dist <= now && m.type != ManeuverType.ARRIVE && spoken.add(key(i, PromptStage.NOW)) -> {
+            allowNow && dist <= now && m.type != ManeuverType.ARRIVE && spoken.add(key(i, PromptStage.NOW)) -> {
                 spoken.add(key(i, PromptStage.NEAR)); spoken.add(key(i, PromptStage.FAR))
                 out += NavEvent.Prompt(tMs, i, PromptStage.NOW, chained(Instructions.prompt(m, null)), dist, j)
             }

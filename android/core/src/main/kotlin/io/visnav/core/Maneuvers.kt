@@ -85,7 +85,8 @@ private fun outBearing(index: RoadIndex, edge: Int, v: Int): Double? {
 }
 
 /**
- * Манёвры маршрута: DEPART, повороты на перекрёстках (узлы степени ≥ 3), развилки, круговое движение, ARRIVE.
+ * Манёвры маршрута: DEPART, повороты на перекрёстках (узлы степени ≥ 3), развилки, круговое движение, разворот в
+ * тупике, ARRIVE.
  * Азимуты входа и выхода берутся по маршруту на ~25 м от узла. Мини-кольца (теги узлов) не моделируются.
  */
 fun buildManeuvers(route: Route, index: RoadIndex): List<Maneuver> {
@@ -111,6 +112,14 @@ fun buildManeuvers(route: Route, index: RoadIndex): List<Maneuver> {
             if (j >= steps.size) break                      // маршрут кончается внутри кольца
             out.add(Maneuver(ManeuverType.ROUNDABOUT, at, pe, pn, pack.name(steps[j].edge), maxOf(1, exits)))
             i = j + 1
+            continue
+        }
+        if (cur.edge == prev.edge && cur.forward != prev.forward) {
+            // Разворот на том же ребре — только в тупике (узел степени 1, в том числе обрезанная дорога у края коридора).
+            val bIn = if (prev.forward) index.bearing[prev.edge] else wrapAngle(index.bearing[prev.edge] + PI)
+            out.add(Maneuver(ManeuverType.UTURN, at, pe, pn, pack.name(cur.edge), angleDeg = 180.0))
+            lastBIn = bIn
+            i++
             continue
         }
         if (index.degree[v] >= 3) {
