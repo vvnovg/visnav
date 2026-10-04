@@ -1,5 +1,6 @@
 package io.visnav.core
 
+import java.nio.ByteBuffer
 import kotlin.math.ceil
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -16,6 +17,31 @@ object Resize {
         require(dstH in 1..srcH) { "dstH=$dstH must be in 1..$srcH (downscale only)" }
         if (dstW == srcW && dstH == srcH) return src.copyOf()
 
+        return areaCore(srcW, srcH, dstW, dstH) { x, y -> src[y * srcW + x] }
+    }
+
+    /**
+     * То же area-усреднение, что [areaDownscale], но вход — байты RGBA_8888 (порядок R,G,B,A) с
+     * шагом строки [rowStride] и шагом пикселя [pixelStride], как `ImageProxy.planes[0]` у CameraX.
+     * Индексы абсолютные от нуля буфера; позиция буфера не меняется. Результат — ARGB, альфа 0xFF.
+     */
+    fun areaDownscaleRgba(
+        buf: ByteBuffer, w: Int, h: Int, rowStride: Int, pixelStride: Int, outW: Int, outH: Int,
+    ): IntArray {
+        require(outW in 1..w) { "outW=$outW must be in 1..$w (downscale only)" }
+        require(outH in 1..h) { "outH=$outH must be in 1..$h (downscale only)" }
+        require(pixelStride >= 4) { "pixelStride=$pixelStride must be >= 4" }
+        require(rowStride >= w * pixelStride) { "rowStride=$rowStride must be >= ${w * pixelStride}" }
+        return areaCore(w, h, outW, outH) { x, y ->
+            val o = y * rowStride + x * pixelStride
+            ((buf.get(o).toInt() and 0xFF) shl 16) or
+                ((buf.get(o + 1).toInt() and 0xFF) shl 8) or
+                (buf.get(o + 2).toInt() and 0xFF)
+        }
+    }
+
+    /** Общее ядро: [pixel] возвращает пиксель источника (x, y) как 0x??RRGGBB. */
+    private inline fun areaCore(srcW: Int, srcH: Int, dstW: Int, dstH: Int, pixel: (Int, Int) -> Int): IntArray {
         val sx = srcW.toDouble() / dstW
         val sy = srcH.toDouble() / dstH
         val out = IntArray(dstW * dstH)
@@ -42,7 +68,7 @@ object Resize {
                         val xWeight = overlap(xx.toDouble(), xx + 1.0, x0, x1)
                         if (xWeight <= 0.0) continue
                         val w = xWeight * yWeight
-                        val p = src[yy * srcW + xx]
+                        val p = pixel(xx, yy)
                         rSum += w * ((p shr 16) and 0xFF)
                         gSum += w * ((p shr 8) and 0xFF)
                         bSum += w * (p and 0xFF)

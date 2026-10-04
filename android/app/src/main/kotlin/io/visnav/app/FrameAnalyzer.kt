@@ -7,13 +7,20 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import io.visnav.core.Preprocess
 import io.visnav.core.Resize
+import io.visnav.core.Rotate90
 
-/** Пропускает кадры чаще intervalMs; остальные поворачивает, уменьшает до входа модели и отдаёт в onFrame. */
+/**
+ * Пропускает кадры чаще intervalMs; остальные уменьшает до входа модели прямо из RGBA-плоскости,
+ * поворачивает уже маленькое изображение и отдаёт в onFrame. Ожидает OUTPUT_IMAGE_FORMAT_RGBA_8888.
+ */
 class FrameAnalyzer(
-    private val intervalMs: Long,
+    intervalMs: Long,
     private val inputW: Int,
     private val inputH: Int,
 ) : ImageAnalysis.Analyzer {
+    /** Минимальный интервал между обрабатываемыми кадрами; меняется на ходу (регулятор частоты кадров). */
+    @Volatile var intervalMs: Long = intervalMs
+
     /** captureTsNs — ImageProxy.imageInfo.timestamp (нс, монотонные часы камеры) в момент кадра. */
     @Volatile var onFrame: ((tMs: Long, rgb: ByteArray, preMs: Double, captureTsNs: Long) -> Unit)? = null
 
@@ -37,46 +44,63 @@ class FrameAnalyzer(
         try {
             val now = System.currentTimeMillis()
             val t0 = System.nanoTime()
-            var bmp: Bitmap? = null
-            var upright: Bitmap? = null
-            var scaled: Bitmap? = null
             val rgb = try {
-                val b = image.toBitmap()
-                bmp = b
                 val rot = image.imageInfo.rotationDegrees
-                val u = if (rot == 0) b else
-                    Bitmap.createBitmap(b, 0, 0, b.width, b.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
-                upright = u
-                lastFrameW = u.width
-                lastFrameH = u.height
-                val downscaled: IntArray
-                if (u.width >= inputW && u.height >= inputH) {
-                    val px = IntArray(u.width * u.height)
-                    u.getPixels(px, 0, u.width, 0, 0, u.width, u.height)
-                    downscaled = Resize.areaDownscale(px, u.width, u.height, inputW, inputH)
+                val swap = rot == 90 || rot == 270
+                val uprightW = if (swap) image.height else image.width
+                val uprightH = if (swap) image.width else image.height
+                lastFrameW = uprightW
+                lastFrameH = uprightH
+                val downscaled = if (uprightW >= inputW && uprightH >= inputH) {
+                    // Уменьшаем в размер «до поворота» (для 90/270 стороны меняются местами) и
+                    // поворачиваем уже маленькое изображение — без полнокадрового Bitmap.
+                    val sw = if (swap) inputH else inputW
+                    val sh = if (swap) inputW else inputH
+                    val plane = image.planes[0]
+                    val small = Resize.areaDownscaleRgba(
+                        plane.buffer, image.width, image.height, plane.rowStride, plane.pixelStride, sw, sh,
+                    )
+                    Rotate90.rotate(small, sw, sh, rot)
                 } else {
-                    // Кадр меньше входа модели (не должно происходить в норме) — только для этого случая
-                    // используем интерполирующее увеличение Bitmap вместо area-average уменьшения.
-                    val s = Bitmap.createScaledBitmap(u, inputW, inputH, true)
-                    scaled = s
-                    val px = IntArray(inputW * inputH)
-                    s.getPixels(px, 0, inputW, 0, 0, inputW, inputH)
-                    downscaled = px
+                    upscaleViaBitmap(image, rot)
                 }
                 Preprocess.argbToRgb(downscaled)
             } finally {
                 image.close()
-                // Не освобождать один и тот же Bitmap дважды: createBitmap/createScaledBitmap могут
-                // вернуть тот же экземпляр, если преобразование не требовалось.
-                scaled?.takeIf { it !== upright && it !== bmp }?.recycle()
-                upright?.takeIf { it !== bmp }?.recycle()
-                bmp?.recycle()
             }
             handler(now, rgb, (System.nanoTime() - t0) / 1e6, captureTsNs)
         } catch (t: Throwable) {
             // Кадр уже закрыт (finally выше отработал до того, как исключение долетело сюда) —
             // один плохой кадр на исполнителе анализа не должен ронять его целиком.
             onError?.invoke(t)
+        }
+    }
+
+    /**
+     * Кадр меньше входа модели (не должно происходить в норме) — только для этого случая
+     * используем интерполирующее увеличение Bitmap вместо area-average уменьшения.
+     */
+    private fun upscaleViaBitmap(image: ImageProxy, rot: Int): IntArray {
+        var bmp: Bitmap? = null
+        var upright: Bitmap? = null
+        var scaled: Bitmap? = null
+        try {
+            val b = image.toBitmap()
+            bmp = b
+            val u = if (rot == 0) b else
+                Bitmap.createBitmap(b, 0, 0, b.width, b.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
+            upright = u
+            val s = Bitmap.createScaledBitmap(u, inputW, inputH, true)
+            scaled = s
+            val px = IntArray(inputW * inputH)
+            s.getPixels(px, 0, inputW, 0, 0, inputW, inputH)
+            return px
+        } finally {
+            // Не освобождать один и тот же Bitmap дважды: createBitmap/createScaledBitmap могут
+            // вернуть тот же экземпляр, если преобразование не требовалось.
+            scaled?.takeIf { it !== upright && it !== bmp }?.recycle()
+            upright?.takeIf { it !== bmp }?.recycle()
+            bmp?.recycle()
         }
     }
 }
