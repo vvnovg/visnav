@@ -145,13 +145,17 @@ class M1Controller(private val context: Context) {
     /**
      * Перечитывает список поездок (`refpack/trips/`) на executor: экран навигации вызывает при входе на вкладку
      * и при открытии меню поездок, чтобы появилась поездка, положенная через adb push после запуска.
+     * Во время записи не действует. Если поездка не выбрана (trips/ был пуст или старая раскладка), а поездки
+     * появились, первая из них загружается сразу.
      */
     fun refreshTrips() {
-        if (executor.isShutdown) return
+        if (executor.isShutdown || _state.value.running) return
         try {
             executor.execute {
                 val trips = TripLayout.list(dataDir).orEmpty()
                 _state.update { it.copy(trips = trips) }
+                val s = _state.value
+                if (s.trip == null && trips.isNotEmpty() && !s.running && !s.loading) loadBundle(null)
             }
         } catch (_: java.util.concurrent.RejectedExecutionException) {
             // close() уже закрыл executor.
