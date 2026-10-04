@@ -10,7 +10,9 @@ import kotlin.math.ceil
  *   после замедления из-за p90 окно кадров очищается;
  * - [recoverAfterMs] без этих условий → на ступень быстрее;
  * - режим GNSS со здоровьем GOOD → не быстрее [gnssFloorMs]. Под полом своя ступень живёт
- *   по обычным правилам; когда условие снято, интервал сразу возвращается к ней.
+ *   по обычным правилам; когда условие снято, интервал сразу возвращается к ней
+ *   (но если нагрев ещё есть — не быстрее, чем был с полом). Нагрев под полом считается
+ *   от своей ступени, поэтому видимая реакция может отставать до 20 с — так задумано.
  *
  * Первые [warmupFrames] замеров кадра (прогрев ORT) не учитываются.
  * `nowMs` — монотонные часы (`SystemClock.elapsedRealtime`); если время пошло назад,
@@ -42,7 +44,9 @@ class FrameRateGovernor(
     private val costs = ArrayDeque<Double>()
 
     val intervalMs: Long
-        @Synchronized get() = stepsMs[if (gnssFloor) maxOf(step, floorIdx) else step]
+        @Synchronized get() = stepsMs[effectiveIdx()]
+
+    private fun effectiveIdx() = if (gnssFloor) maxOf(step, floorIdx) else step
 
     /** pre + inf + search + fuse одного кадра. */
     @Synchronized
@@ -59,6 +63,7 @@ class FrameRateGovernor(
         lastSlowMs?.let { if (nowMs < it) lastSlowMs = nowMs }
         calmSinceMs?.let { if (nowMs < it) calmSinceMs = nowMs }
 
+        val prevEffective = effectiveIdx()
         val severe = thermal != null && thermal >= 3
         val slowFrames = p90() > p90LimitMs
         val hot = thermal == 2 || (headroom != null && headroom >= headroomLimit) || slowFrames
@@ -81,7 +86,9 @@ class FrameRateGovernor(
                 }
             }
         }
-        gnssFloor = mode == NavMode.GNSS && health == GnssHealth.GOOD
+        val floorNow = mode == NavMode.GNSS && health == GnssHealth.GOOD
+        if (gnssFloor && !floorNow && hot) step = maxOf(step, prevEffective)
+        gnssFloor = floorNow
         return intervalMs
     }
 
