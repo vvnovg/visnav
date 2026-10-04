@@ -1,12 +1,16 @@
-"""CLI этапа M3: vpr-m3 nav-eval."""
+"""CLI этапа M3: vpr-m3 nav-eval, vpr-m3 pack-map."""
 from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
 
-from vpr_bench.fieldlog import read_log
+from vpr_bench.db_builder import Corridor
+from vpr_bench.fieldlog import gps_track, read_log
+from vpr_bench.geo import haversine_m
+from vpr_bench.mapkit import check_mbtiles, clip_mbtiles, extract_glyphs, write_map_meta
 from vpr_bench.naveval import evaluate_nav, read_nav, render_nav_report
+from vpr_bench.query import clean_track, parse_gpx
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -16,11 +20,48 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--nav", required=True, type=Path)
     n.add_argument("--log", required=True, type=Path, help="журнал кадров сессии (.jsonl) — источник GPS")
     n.add_argument("--out", required=True, type=Path)
+    m = sub.add_parser("pack-map", help="обрезать офлайн-карту (.mbtiles) до коридора поездки и достать глифы")
+    m.add_argument("--mbtiles", required=True, type=Path)
+    m.add_argument("--fonts-zip", required=True, type=Path)
+    m.add_argument("--gpx", action="append", default=[], type=Path)
+    m.add_argument("--log", action="append", default=[], type=Path)
+    m.add_argument("--buffer-m", type=float, default=500.0)
+    m.add_argument("--out", required=True, type=Path)
     return parser
+
+
+def _pack_map(args: argparse.Namespace) -> int:
+    tracks = [parse_gpx(p) for p in args.gpx]
+    tracks += [clean_track(gps_track(read_log(p)[1]), max_hdop=None)[0] for p in args.log]
+    tracks = [t for t in tracks if t]
+    if not tracks:
+        print("error: need at least one --gpx or --log track", file=sys.stderr)
+        return 2
+    try:
+        check_mbtiles(args.mbtiles)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    out = args.out
+    out.mkdir(parents=True, exist_ok=True)
+    kept, removed = clip_mbtiles(args.mbtiles, out / "corridor.mbtiles", Corridor(tracks, args.buffer_m))
+    try:
+        extract_glyphs(args.fonts_zip, out / "fonts")
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    info = check_mbtiles(out / "corridor.mbtiles")
+    write_map_meta(out, info, args.buffer_m)
+    km = sum(haversine_m(a.lat, a.lon, b.lat, b.lon) for t in tracks for a, b in zip(t, t[1:])) / 1000.0
+    print(f"tiles kept={kept} removed={removed}, {info.bytes / 1e6:.1f} MB, "
+          f"{info.bytes / 1e6 / max(km, 1e-9) * 100:.1f} MB per 100 km -> {out}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "pack-map":
+        return _pack_map(args)
     header, events = read_nav(args.nav)
     log_header, frames = read_log(args.log)
     if log_header.get("started_ms") != header.get("session_started_ms"):
