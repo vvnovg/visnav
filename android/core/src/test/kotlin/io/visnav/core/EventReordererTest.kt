@@ -3,6 +3,7 @@ package io.visnav.core
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 class EventReordererTest {
     private fun ev(t: Double) = ReorderItem.Sensor(GyroEvent(t, 0f, 0f, 0f))
@@ -107,5 +108,33 @@ class EventReordererTest {
 
     @Test fun delayIsPublic() {
         assertEquals(800L, EventReorderer(800).delayMs)
+    }
+
+    @Test fun latenessWindowKeepsNewest5000() {
+        val r = EventReorderer(0)
+        r.push(ev(0.0), 10_000)
+        for (i in 1..5000) r.push(ev(i.toDouble()), i + 1L)
+        assertEquals(LatenessStats(5000, 1.0, 1.0, 1.0), r.latenessSnapshotAndReset().getValue("imu"))
+    }
+
+    @Test fun oldPushIsZeroEvenForFractionalTime() {
+        val r = EventReorderer(0)
+        r.push(ev(1000.6))
+        assertEquals(0.0, r.latenessSnapshotAndReset().getValue("imu").max)
+    }
+
+    @Test fun snapshotSourceOrderIsFixed() {
+        val r = EventReorderer(0)
+        r.push(ReorderItem.Sensor(FrameCaptureEvent(1.0, 1L, 5L)), 2)
+        r.push(ReorderItem.Sensor(AgcEvent(1.0, 1f, 1)), 2)
+        r.push(ev(1.0), 2)
+        r.push(ReorderItem.Sensor(LocEvent(1.0, 55.0, 37.0, 3f, null, null, null, null)), 2)
+        r.push(ReorderItem.Frame(1, null), 2)
+        val s = r.latenessSnapshotAndReset()
+        assertEquals(listOf("frame", "gnss_fix", "imu", "agc", "other"), s.keys.toList())
+        val line = PerfLog.late(1L, s, 0, 0)
+        assertTrue(line.indexOf("\"frame\"") < line.indexOf("\"gnss_fix\"") &&
+            line.indexOf("\"gnss_fix\"") < line.indexOf("\"imu\"") &&
+            line.indexOf("\"imu\"") < line.indexOf("\"agc\"") && line.indexOf("\"agc\"") < line.indexOf("\"other\""))
     }
 }

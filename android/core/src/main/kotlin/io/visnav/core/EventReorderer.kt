@@ -39,11 +39,14 @@ class EventReorderer(val delayMs: Long = 1500, private val maxQueued: Int = 20_0
     val late: Int get() = synchronized(lock) { lateCount }
     val dropped: Int get() = synchronized(lock) { droppedCount }
 
-    fun push(item: ReorderItem) = push(item, item.tMs.toLong())
+    /** Время прибытия неизвестно — опоздание считается равным 0. */
+    fun push(item: ReorderItem) = push(item, 0.0)
 
-    fun push(item: ReorderItem, arrivalMs: Long) = synchronized(lock) {
+    fun push(item: ReorderItem, arrivalMs: Long) = push(item, arrivalMs - item.tMs)
+
+    private fun push(item: ReorderItem, latenessMs: Double) = synchronized(lock) {
         val window = lateness.getOrPut(sourceOf(item)) { ArrayDeque() }
-        window.addLast(arrivalMs - item.tMs)
+        window.addLast(latenessMs)
         if (window.size > LATENESS_WINDOW) window.removeFirst()
         if (item.tMs < lastReleased) { lateQueue.add(item); lateCount++ } else queue.add(Entry(seq++, item))
         while (queue.size + lateQueue.size > maxQueued) {
@@ -52,17 +55,23 @@ class EventReorderer(val delayMs: Long = 1500, private val maxQueued: Int = 20_0
         }
     }
 
-    /** Статистика опоздания по источникам с непустым окном; окна очищаются. */
-    fun latenessSnapshotAndReset(): Map<String, LatenessStats> = synchronized(lock) {
+    /**
+     * Статистика опоздания по источникам с непустым окном, в порядке [SOURCES]; окна очищаются.
+     * Под замком только копирование, сортировка и перцентили — вне замка.
+     */
+    fun latenessSnapshotAndReset(): Map<String, LatenessStats> {
+        val windows = synchronized(lock) {
+            val copy = lateness.mapValues { it.value.toDoubleArray() }
+            lateness.clear()
+            copy
+        }
         val out = LinkedHashMap<String, LatenessStats>()
-        for ((src, window) in lateness) {
-            if (window.isEmpty()) continue
-            val sorted = window.sorted()
+        for (src in SOURCES) {
+            val sorted = windows[src]?.takeIf { it.isNotEmpty() }?.also { it.sort() } ?: continue
             fun pct(q: Double) = sorted[ceil(q * sorted.size).toInt() - 1]
             out[src] = LatenessStats(sorted.size, pct(0.5), pct(0.99), sorted.last())
         }
-        lateness.clear()
-        out
+        return out
     }
 
     fun drain(nowMs: Long, sink: (ReorderItem) -> Unit) {
@@ -88,6 +97,7 @@ class EventReorderer(val delayMs: Long = 1500, private val maxQueued: Int = 20_0
 
     private companion object {
         const val LATENESS_WINDOW = 5000
+        val SOURCES = listOf("frame", "gnss_fix", "gnss_status", "imu", "agc", "other")
 
         fun sourceOf(item: ReorderItem): String = when (item) {
             is ReorderItem.Frame -> "frame"
