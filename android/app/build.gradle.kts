@@ -54,7 +54,8 @@ androidComponents {
             mergedManifest.set(variant.artifacts.get(com.android.build.api.artifact.SingleArtifact.MERGED_MANIFEST))
         }
         verifyNoNetworkPermissions.configure { dependsOn(perVariant) }
-        tasks.matching { it.name == "assemble$cap" }.configureEach { dependsOn(perVariant) }
+        // package<Variant> also covers install<Variant>, which does not go through assemble<Variant>.
+        tasks.named { it == "assemble$cap" || it == "package$cap" }.configureEach { dependsOn(perVariant) }
     }
 }
 

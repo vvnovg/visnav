@@ -5,6 +5,7 @@ import android.content.res.Configuration
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
@@ -106,5 +107,8 @@ fun MapLibreMap(
         }
     }
 
-    AndroidView(factory = { mapView }, modifier = modifier)
+    // Keyed by the MapView: a new MapView (new lifecycle owner) gets a new AndroidView instead of the old one.
+    key(mapView) {
+        AndroidView(factory = { mapView }, modifier = modifier)
+    }
 }

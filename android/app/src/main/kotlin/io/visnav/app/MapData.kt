@@ -33,6 +33,8 @@ object MapDataLoader {
             return Result.failure(IllegalStateException("map.json: ${e.message}", e))
         } catch (e: java.io.IOException) {
             return Result.failure(IllegalStateException("map.json: ${e.message}", e))
+        } catch (e: RuntimeException) {
+            return Result.failure(IllegalStateException("map.json: ${e.message}", e))
         }
         return Result.success(
             MapData(
