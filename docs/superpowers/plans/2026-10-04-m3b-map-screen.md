@@ -909,3 +909,29 @@ git commit -m "docs: M3b offline map protocol; SPEC licenses for MapLibre, Noto 
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+
+## Изменения после ревью
+- **Task 1:**
+  - границы в `map.json` берутся по коридору, а не по исходной карте;
+  - глифы извлекаются до обрезки тайлов;
+  - ошибки возвращают код 2;
+  - поддержана компактная схема mbtiles (`tiles_shallow`/`tiles_data`);
+  - дальний тайл в тесте — (38.50, 56.50).
+- **Task 2:**
+  - обводка дорог разделена по классам (`road-casing-minor/major/motorway`);
+  - отдельный цвет тоннелей;
+  - добавлен тест самосогласованности стиля.
+- **Task 3:**
+  - нечисловые координаты дают пустую геометрию;
+  - режим «свободно» заканчивается строго после `freeHoldMs`, а сброс часов считается истечением;
+  - круг строится минимум по 3 точкам.
+- **Task 4:**
+  - `MapLibre.setConnected(false)`: без ACCESS_NETWORK_STATE MapLibre падала с SecurityException в `MapView.initializeMap`;
+  - колбэк `onStyleLoaded` на каждую загрузку стиля;
+  - `remember(lifecycleOwner)` и `key(mapView)`;
+  - проверка `map.json` и границ;
+  - проверка сетевых разрешений по вариантам через `MERGED_MANIFEST`, она запускается перед `assemble*` и `package*`.
+- **Task 5:**
+  - на вкладке навигации камера подключается без превью;
+  - маршрут хранится в `UiState` (`mergeNav`), чтобы пережить пересоздание Activity и смену вкладки;
+  - при первом следовании камера переносится без анимации.
