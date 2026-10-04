@@ -103,6 +103,12 @@ def _flags(tags: dict[str, str], d: int) -> int:
 
 def build_graph(ways: Iterable[RawWay], keep: Callable[[float, float], bool] | None = None,
                 restrictions: Iterable[RawRestriction] = ()) -> RoadGraph:
+    """Граф из отрезков линий; при keep отрезок сохраняется, если хотя бы один конец внутри коридора.
+
+    Край коридора (boundary_nodes) — любой узел графа, для которого keep ложно: это внешний конец сохранённого
+    отрезка, и данные вокруг него неполны (продолжение дороги могло не попасть в выборку или быть обрезано).
+    Настоящий тупик сразу за коридором тоже считается краем. Без keep краёв нет.
+    """
     index: dict[int, int] = {}
     lats: list[float] = []
     lons: list[float] = []
@@ -116,7 +122,6 @@ def build_graph(ways: Iterable[RawWay], keep: Callable[[float, float], bool] | N
     e_name: list[int] = []
     names: list[str] = []
     name_index: dict[str, int] = {}
-    dropped_ends: set[int] = set()  # OSM id концов отрезков, отброшенных обрезкой коридора
 
     def inside(node: tuple[int, float, float]) -> bool:
         if keep is None:
@@ -149,10 +154,7 @@ def build_graph(ways: Iterable[RawWay], keep: Callable[[float, float], bool] | N
             name_idx = name_index[name]
         nodes = w.nodes if d >= 0 else list(reversed(w.nodes))
         for a, b in zip(nodes, nodes[1:]):
-            if a[0] == b[0]:
-                continue
-            if not (inside(a) or inside(b)):
-                dropped_ends.update((a[0], b[0]))
+            if a[0] == b[0] or not (inside(a) or inside(b)):
                 continue
             e_from.append(idx(a))
             e_to.append(idx(b))
@@ -166,7 +168,8 @@ def build_graph(ways: Iterable[RawWay], keep: Callable[[float, float], bool] | N
         edges_of_way.setdefault(wid, []).append(k)
     rows: list[tuple[int, int, int, int]] = []
     dropped = 0
-    boundary = sorted({index[i] for i in dropped_ends if i in index})
+    boundary = [] if keep is None else sorted(
+        i for osm_id, i in index.items() if not inside((osm_id, lats[i], lons[i])))
 
     def candidates(way_id: int, via: int, arriving: bool) -> list[int]:
         # Односторонняя линия: въезжает в via только по ребру, которое в него приходит, выезжает — по уходящему.

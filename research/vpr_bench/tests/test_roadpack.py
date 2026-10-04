@@ -159,6 +159,16 @@ def test_v3_truncated_boundary_raises(tmp_path):
         read_roadpack(tmp_path)
 
 
+def test_any_truncation_raises(tmp_path):
+    # Обрыв в любой секции (названия, запреты, края) — ValueError, а не struct.error/IndexError.
+    write_roadpack(tmp_path, fixture_graph_v3(), FIXTURE_META)
+    raw = (tmp_path / "roadpack.bin").read_bytes()
+    for cut in range(len(raw)):
+        (tmp_path / "roadpack.bin").write_bytes(raw[:cut])
+        with pytest.raises(ValueError):
+            read_roadpack(tmp_path)
+
+
 def test_v1_v2_cannot_store_boundary(tmp_path):
     with pytest.raises(ValueError, match="boundary"):
         write_roadpack(tmp_path, fixture_graph_v3(), FIXTURE_META, version=2)

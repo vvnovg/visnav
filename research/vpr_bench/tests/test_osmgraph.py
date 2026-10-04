@@ -67,6 +67,15 @@ def test_boundary_nodes_mark_clipped_ways_not_dead_ends():
     assert g.boundary_nodes.tolist() == [node_c]
 
 
+def test_boundary_oneway_reversed_way_crossing_edge():
+    # oneway=-1: линия разворачивается (out → in), отрезок сохранён, внешний узел — край.
+    w = RawWay(10, {"highway": "residential", "oneway": "-1"}, [(1, 55.0, 37.0), (2, 55.001, 37.0)])
+    g = build_graph([w], keep=lambda la, lo: la < 55.0005)
+    out = [i for i in range(len(g.node_lats)) if g.node_lats[i] == 55.001][0]
+    assert g.boundary_nodes.tolist() == [out]
+    assert g.edge_from.tolist() == [out] and g.edge_to.tolist() == [1 - out]  # едем снаружи внутрь
+
+
 def test_no_boundary_without_keep():
     w = RawWay(10, {"highway": "residential"}, [(1, 55.0, 37.0), (2, 55.001, 37.0)])
     assert build_graph([w]).boundary_nodes.tolist() == []
@@ -188,7 +197,7 @@ def test_read_osm_restrictions(tmp_path):
     assert rs == [RawRestriction(10, 2, 11, KIND_NO)]
 
 
-def test_pack_roads_writes_v2(tmp_path):
+def test_pack_roads_writes_v3(tmp_path):
     pytest.importorskip("osmium")
     # way 10 проходит через узел 2, поэтому для упаковки берём запрет в узле 4: from way 11 (→4), to way 13 (3–4)
     xml = OSM_XML.replace("</osm>", """  <relation id="51" version="1">
@@ -237,3 +246,44 @@ def test_pack_roads_corridor_reports_boundary_count(tmp_path):
                  "--out", str(out)]) == 0
     g, meta = read_roadpack(out)
     assert meta["boundary_nodes"] == len(g.boundary_nodes) == 0 and "bbox" not in meta
+
+
+T_JUNCTION_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="test">
+  <node id="1" version="1" lat="55.7500" lon="37.6000"/>
+  <node id="2" version="1" lat="55.7500" lon="37.6050"/>
+  <node id="3" version="1" lat="55.7500" lon="37.6100"/>
+  <node id="4" version="1" lat="55.7700" lon="37.6050"/>
+  <node id="5" version="1" lat="55.7700" lon="37.6000"/>
+  <node id="6" version="1" lat="55.7700" lon="37.6100"/>
+  <way id="20" version="1"><nd ref="1"/><nd ref="2"/><nd ref="3"/><tag k="highway" v="residential"/></way>
+  <way id="21" version="1"><nd ref="2"/><nd ref="4"/><tag k="highway" v="residential"/></way>
+  <way id="22" version="1"><nd ref="5"/><nd ref="4"/><nd ref="6"/><tag k="highway" v="residential"/></way>
+</osm>
+"""
+
+T_GPX = """<?xml version="1.0"?><gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>
+<trkpt lat="55.7500" lon="37.6000"><time>2026-10-02T10:00:00Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6050"><time>2026-10-02T10:00:30Z</time></trkpt>
+<trkpt lat="55.7500" lon="37.6100"><time>2026-10-02T10:01:00Z</time></trkpt>
+</trkseg></trk></gpx>"""
+
+
+def test_boundary_marks_far_end_when_continuation_is_outside_bbox(tmp_path):
+    # Отрезок 2–4 уходит из коридора к T-образному перекрёстку 4; линия 22 целиком вне bbox коридора и не читается,
+    # поэтому 4 в графе выглядит тупиком — но это край, разворот там запрещён.
+    pytest.importorskip("osmium")
+    from vpr_bench.db_builder import Corridor
+    from vpr_bench.osmgraph import read_osm
+    from vpr_bench.query import parse_gpx
+    (tmp_path / "t.osm").write_text(T_JUNCTION_XML)
+    (tmp_path / "t.gpx").write_text(T_GPX)
+    corridor = Corridor([parse_gpx(tmp_path / "t.gpx")], 300.0)
+    ways, rs = read_osm(tmp_path / "t.osm", corridor.bbox())
+    assert sorted(w.id for w in ways) == [20, 21]
+    g = build_graph(ways, keep=corridor.contains, restrictions=rs)
+    x = [i for i in range(len(g.node_lats)) if abs(g.node_lats[i] - 55.77) < 1e-6][0]
+    assert g.boundary_nodes.tolist() == [x]
+    # узел внутри коридора никогда не край
+    for i in range(len(g.node_lats)):
+        assert (i in g.boundary_nodes.tolist()) == (not corridor.contains(g.node_lats[i], g.node_lons[i]))

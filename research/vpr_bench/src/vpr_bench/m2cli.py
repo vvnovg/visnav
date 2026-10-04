@@ -29,7 +29,8 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--pbf", required=True, type=Path, help="выгрузка OSM (.osm.pbf или .osm)")
     pr.add_argument("--gpx", action="append", default=[], type=Path, help="трек поездки GPX")
     pr.add_argument("--log", action="append", default=[], type=Path, help="журнал кадров сессии (.jsonl): его GPS-трек")
-    pr.add_argument("--bbox", default=None, help="min_lon,min_lat,max_lon,max_lat — граф всего района без обрезки по треку")
+    pr.add_argument("--bbox", default=None, help="min_lon,min_lat,max_lon,max_lat — граф всего района без обрезки по треку; краёв нет: "
+                    "линии, пересекающие границу, читаются целиком, их внешние концы выглядят как тупики")
     pr.add_argument("--buffer-m", type=float, default=300.0)
     pr.add_argument("--out", required=True, type=Path)
     rd = sub.add_parser("road-eval", help="оценить привязку к дорогам (NFR-3)")
