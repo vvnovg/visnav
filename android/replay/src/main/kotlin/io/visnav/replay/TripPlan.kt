@@ -31,6 +31,9 @@ class TripRoute(val latLon: List<DoubleArray>, val lengthM: Double, val duration
  * на d = min(1 м, половина пройденной части ребра прибытия) назад по ребру прибытия, со своим
  * RouterConfig(startSlackM = 0) — в кандидатах остаётся только ребро прибытия. Первая точка такой ноги (проекция
  * старта на d позади) отбрасывается; из длины вычитается d, из durationS — d / скорость ребра прибытия.
+ *
+ * Ограничения: если следующая точка проецируется на то же ребро позади via, возможен короткий шаг назад (≤ 1 м);
+ * на стыке ног бывает повтор точки — его убирает [densify].
  */
 fun planTrip(pack: RoadPack, waypoints: List<DoubleArray>, config: RouterConfig = RouterConfig()): TripRoute? {
     require(waypoints.size >= 2) { "need at least from and to" }
@@ -67,7 +70,17 @@ fun planTrip(pack: RoadPack, waypoints: List<DoubleArray>, config: RouterConfig 
         pts.addAll(if (pts.isEmpty()) legPts else legPts.drop(1))
         length += r.lengthM; duration += r.durationS
         cur = r.points.last()
-        arrival = r.steps.lastOrNull()
+        // Нога может закончиться в начале своего последнего шага (pos 0): Router выбирает одного кандидата на way, и
+        // им бывает продолжение той же улицы за узлом, а у ребра нулевой длины направления нет. Тогда ребро
+        // прибытия — предыдущий шаг (у одношаговой ноги — ребро прибытия предыдущей ноги).
+        val last = r.steps.last()
+        val lastEntry = if (last.forward) pack.from[last.edge] else pack.to[last.edge]
+        val atEntry = hypot(index.nodeE[lastEntry] - cur[0], index.nodeN[lastEntry] - cur[1]) < 1e-6
+        arrival = when {
+            atEntry && r.steps.size >= 2 -> r.steps[r.steps.size - 2]
+            atEntry && st != null -> st
+            else -> last
+        }
     }
     return TripRoute(pts, length, duration)
 }

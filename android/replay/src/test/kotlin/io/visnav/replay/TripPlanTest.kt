@@ -22,25 +22,32 @@ class TripPlanTest {
 
     /**
      * Сетка 3×3 улиц с шагом 200 м (узлы (i·200, j·200)); по желанию — изолированная дорога в 1 км к востоку
-     * и тупик (400,200) → (600,200).
+     * и тупик (400,200) → (600,200). perStreet — один way на ряд и на столбец (как в OSM), иначе way на ребро;
+     * diagonal — улица-тупик (250,350) → (400,200).
      */
-    private fun grid(isolated: Boolean = false, deadEnd: Boolean = false): RoadPack {
+    private fun grid(
+        isolated: Boolean = false, deadEnd: Boolean = false, perStreet: Boolean = false, diagonal: Boolean = false,
+    ): RoadPack {
         val en = ArrayList<DoubleArray>()
         for (j in 0..2) for (i in 0..2) en += doubleArrayOf(i * 200.0, j * 200.0)
-        val from = ArrayList<Int>(); val to = ArrayList<Int>()
-        for (j in 0..2) for (i in 0..1) { from += j * 3 + i; to += j * 3 + i + 1 }
-        for (i in 0..2) for (j in 0..1) { from += j * 3 + i; to += (j + 1) * 3 + i }
+        val from = ArrayList<Int>(); val to = ArrayList<Int>(); val way = ArrayList<Long>()
+        for (j in 0..2) for (i in 0..1) { from += j * 3 + i; to += j * 3 + i + 1; way += 100L + j }
+        for (i in 0..2) for (j in 0..1) { from += j * 3 + i; to += (j + 1) * 3 + i; way += 200L + i }
         if (isolated) {
             en += doubleArrayOf(1400.0, 0.0); en += doubleArrayOf(1400.0, 200.0)
-            from += 9; to += 10
+            from += 9; to += 10; way += 300L
         }
         if (deadEnd) {
             en += doubleArrayOf(600.0, 200.0)
-            from += 5; to += en.size - 1
+            from += 5; to += en.size - 1; way += 400L
+        }
+        if (diagonal) {
+            en += doubleArrayOf(250.0, 350.0)
+            from += en.size - 1; to += 5; way += 500L
         }
         val ll = en.map { enu.toLatLon(it[0], it[1]) }
         val m = from.size
-        return RoadPack(DoubleArray(ll.size) { ll[it][0] }, DoubleArray(ll.size) { ll[it][1] }, LongArray(m) { it + 1L },
+        return RoadPack(DoubleArray(ll.size) { ll[it][0] }, DoubleArray(ll.size) { ll[it][1] }, LongArray(m) { if (perStreet) way[it] else it + 1L },
             from.toIntArray(), to.toIntArray(), ByteArray(m), ByteArray(m) { 7 })
     }
 
@@ -84,6 +91,27 @@ class TripPlanTest {
         assertEquals(1600.0, r.lengthM, 1.0)
         assertTrue(haversineM(r.latLon.first()[0], r.latLon.first()[1], from[0], from[1]) <= 1.0)
         assertTrue(haversineM(r.latLon.last()[0], r.latLon.last()[1], to[0], to[1]) <= 1.0)
+        assertNoBacktrack(densify(r.latLon))
+    }
+
+    @Test fun planOverViaPerStreetWays() {
+        val r = assertNotNull(planTrip(grid(perStreet = true), listOf(ll(0.0, 0.0), ll(400.0, 400.0), ll(400.0, 0.0))))
+        assertEquals(1600.0, r.lengthM, 1.0)
+        assertNoBacktrack(densify(r.latLon))
+    }
+
+    @Test fun viaOnTNodeWithDiagonalDoesNotUturn() {
+        // Приезд в T-узел (400,200) на юг по столбцу; конец ноги — pos 0 продолжения того же way. Законно обратно —
+        // через (200,200) и (200,400): 300 + 500 м.
+        val r = assertNotNull(planTrip(grid(perStreet = true, diagonal = true),
+            listOf(ll(300.0, 400.0), ll(400.0, 200.0), ll(300.0, 400.0))))
+        assertEquals(800.0, r.lengthM, 1.0)
+        assertNoBacktrack(densify(r.latLon))
+    }
+
+    @Test fun viaOnMirroredTNodeDoesNotUturn() {
+        val r = assertNotNull(planTrip(grid(perStreet = true), listOf(ll(100.0, 400.0), ll(0.0, 200.0), ll(100.0, 400.0))))
+        assertEquals(800.0, r.lengthM, 1.0)
         assertNoBacktrack(densify(r.latLon))
     }
 
