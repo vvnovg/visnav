@@ -44,6 +44,8 @@ import kotlinx.coroutines.flow.update
 data class UiState(
     val status: String = "Загрузка базы…",
     val loaded: Boolean = false,
+    /** Идёт loadBundle (загрузка базы поездки). loaded == false && !loading — загрузка не удалась. */
+    val loading: Boolean = true,
     val running: Boolean = false,
     val mode: PriorMode = PriorMode.GPS,
     val frames: Int = 0,
@@ -61,6 +63,15 @@ data class UiState(
     val nav: NavUi? = null,
     /** Позиция фильтра на последнем кадре (для карты); сбрасывается вместе с nav. */
     val pos: MapPos? = null,
+    /** Выбранная поездка (trips/<имя>); null — старая раскладка без trips/. */
+    val trip: String? = null,
+    /** Поездки на телефоне по алфавиту; пусто — старая раскладка. */
+    val trips: List<String> = emptyList(),
+    /**
+     * Абсолютный путь каталога данных выбранной поездки (`refpack/trips/<имя>/` или `refpack/` в старой
+     * раскладке); ставится вместе с trip сразу после resolve, null — поездку определить не удалось.
+     */
+    val tripDir: String? = null,
 )
 
 /** Позиция для карты из LocalizerOutput: σ, курс (рад, от севера по часовой) и скорость (м/с) как в выводе. */
@@ -84,8 +95,7 @@ class M1Controller(private val context: Context) {
 
     private val filesDir = requireNotNull(context.getExternalFilesDir(null))
     private val dataDir = File(filesDir, "refpack")
-    /** Каталог данных на телефоне (`files/refpack/`): база, граф дорог, карта `map/`. */
-    val refpackDir: File get() = dataDir
+    private val prefs = context.getSharedPreferences("visnav", Context.MODE_PRIVATE)
     private val logDir = File(filesDir, "logs")
     private val executor = Executors.newSingleThreadExecutor()
     private val gps = GpsSource(context)
@@ -93,6 +103,10 @@ class M1Controller(private val context: Context) {
     private val analyzer = AtomicReference<FrameAnalyzer?>(null)
     private val runningFlag = AtomicBoolean(false)
     @Volatile private var bundle: LoadedBundle? = null
+    /** Защищает пару bundle/analyzer: замена в loadBundle() и чтение в start(). */
+    private val swapLock = Any()
+    /** Последняя выбранная поездка, ещё не загруженная executor'ом (схлопывает частые selectTrip). */
+    private val pendingTrip = AtomicReference<String?>(null)
     @Volatile private var logger: SessionLogger? = null
     @Volatile private var sensorLog: SensorLogger? = null
     @Volatile private var descLog: DescriptorLogWriter? = null
@@ -106,33 +120,119 @@ class M1Controller(private val context: Context) {
     @Volatile private var drainTask: java.util.concurrent.ScheduledFuture<*>? = null
 
     init {
-        executor.execute {
-            val b = try {
-                BundleLoader.load(dataDir)
-            } catch (e: Exception) {
-                _state.update {
-                    it.copy(status = "Нет базы: ${e.message}. Скопируйте файлы: adb push <bundle>/. " +
-                        "/sdcard/Android/data/io.visnav.app/files/refpack/")
-                }
-                return@execute
+        executor.execute { loadBundle(prefs.getString("trip", null)) }
+    }
+
+    /**
+     * Выбор поездки (trips/<имя>): перезагружает базу и модель на executor. Во время записи не действует.
+     * Выбор запоминается и восстанавливается при следующем запуске. Частые вызовы схлопываются:
+     * executor грузит только последний выбор.
+     */
+    fun selectTrip(name: String) {
+        if (executor.isShutdown) return
+        val s = _state.value
+        if (s.running) return
+        // Повторный выбор уже загруженной поездки отменяет ещё не загруженный выбор (A → B → A: остаётся A).
+        if (name == s.trip && s.loaded) { pendingTrip.set(null); return }
+        pendingTrip.set(name)
+        try {
+            executor.execute { pendingTrip.getAndSet(null)?.let { loadBundle(it) } }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            // close() уже закрыл executor.
+        }
+    }
+
+    /**
+     * Перечитывает список поездок (`refpack/trips/`) на executor: экран навигации вызывает при входе на вкладку
+     * и при открытии меню поездок, чтобы появилась поездка, положенная через adb push после запуска.
+     * Во время записи не действует. Если поездка не выбрана (trips/ был пуст или старая раскладка), а поездки
+     * появились, первая из них загружается сразу.
+     */
+    fun refreshTrips() {
+        if (executor.isShutdown || _state.value.running) return
+        try {
+            executor.execute {
+                val trips = TripLayout.list(dataDir).orEmpty()
+                _state.update { it.copy(trips = trips) }
+                val s = _state.value
+                if (s.trip == null && trips.isNotEmpty() && !s.running && !s.loading) loadBundle(null)
             }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            // close() уже закрыл executor.
+        }
+    }
+
+    /** Только на executor: закрывает прежнюю базу и грузит выбранную поездку (или старую раскладку). */
+    private fun loadBundle(wanted: String?) {
+        // Под swapLock — вместе с чтением bundle/analyzer в start(): либо start() берёт прежнюю базу и
+        // runningFlag уже поднят (тогда не трогаем её), либо видит null и откатывает запуск.
+        val old = synchronized(swapLock) {
+            if (runningFlag.get()) return
+            bundle.also { bundle = null; analyzer.set(null) }
+        }
+        runCatching { old?.embedder?.close() }
+        _state.update { it.copy(loaded = false, loading = true, roadsLoaded = false, status = "Загрузка базы…") }
+        try {
+            loadTrip(wanted)
+        } finally {
+            _state.update { it.copy(loading = false) }
+        }
+    }
+
+    /** Тело loadBundle() после закрытия прежней базы. */
+    private fun loadTrip(wanted: String?) {
+        val trips = TripLayout.list(dataDir).orEmpty()
+        val dirs = TripLayout.resolve(dataDir, wanted).getOrElse { e ->
+            _state.update { it.copy(loaded = false, trip = null, trips = trips, tripDir = null, status = e.message ?: "Нет поездок") }
+            return
+        }
+        // Карта на экране зависит только от tripDir: ставим его сразу, вместе с trip, до загрузки базы.
+        _state.update { it.copy(trip = dirs.name, trips = trips, tripDir = dirs.dataDir.absolutePath) }
+        val prefix = dirs.name?.let { "Поездка: $it · " }.orEmpty()
+        // Общая модель лежит в корне refpack/, а не в каталоге поездки: подсказка adb push должна вести туда.
+        if (dirs.name != null && !dirs.model.isFile) {
+            _state.update {
+                it.copy(loaded = false, status = prefix + "Нет модели: ${dirs.model.absolutePath}. Скопируйте: " +
+                    "adb push <пакет>/model.onnx /sdcard/Android/data/io.visnav.app/files/refpack/")
+            }
+            return
+        }
+        val b = try {
+            BundleLoader.load(dirs.dataDir, dirs.model)
+        } catch (e: Exception) {
+            val target = dirs.name?.let { "refpack/trips/$it/" } ?: "refpack/"
+            val source = if (dirs.name != null) "<пакет>" else "<bundle>"
+            _state.update {
+                it.copy(loaded = false, trip = dirs.name, trips = trips,
+                    status = prefix + "Нет базы: ${e.message}. Скопируйте файлы: adb push $source/. " +
+                        "/sdcard/Android/data/io.visnav.app/files/$target")
+            }
+            return
+        }
+        synchronized(swapLock) {
             bundle = b
             analyzer.set(FrameAnalyzer(intervalMs = 500, inputW = b.meta.inputW, inputH = b.meta.inputH))
-            _state.update { it.copy(loaded = true, roadsLoaded = b.roads != null,
-                status = "База: ${b.pack.count} эталонов, модель ${b.meta.model}") }
-            if (File(dataDir, "route.json").isFile && b.roads == null) {
-                _state.update { it.copy(status = it.status + " · route.json без графа дорог — маршрут не строится") }
+        }
+        if (dirs.name != null) prefs.edit().putString("trip", dirs.name).apply()
+        _state.update { it.copy(loaded = true, roadsLoaded = b.roads != null, trip = dirs.name, trips = trips,
+            status = prefix + "База: ${b.pack.count} эталонов, модель ${b.meta.model}") }
+        if (File(dirs.dataDir, "route.json").isFile && b.roads == null) {
+            _state.update { it.copy(status = it.status + " · route.json без графа дорог — маршрут не строится") }
+        }
+        b.routeWarning?.let { w -> _state.update { it.copy(status = it.status + " · " + w) } }
+        // Parity — диагностика, а не условие готовности: провал не должен блокировать запись.
+        // Файлы parity лежат в корне refpack/ и относятся к общей модели refpack/model.onnx.
+        if (dirs.model != File(dataDir, "model.onnx")) {
+            _state.update { it.copy(status = it.status + " · parity: пропущено (модель поездки)") }
+            return
+        }
+        try {
+            val parity = ParityCheck.runIfPresent(dataDir, b.embedder, File(logDir, "parity.json"))
+            if (parity != null) {
+                _state.update { it.copy(status = it.status + " · parity cos=%.4f".format(parity)) }
             }
-            b.routeWarning?.let { w -> _state.update { it.copy(status = it.status + " · " + w) } }
-            // Parity — диагностика, а не условие готовности: провал не должен блокировать запись.
-            try {
-                val parity = ParityCheck.runIfPresent(dataDir, b.embedder, File(logDir, "parity.json"))
-                if (parity != null) {
-                    _state.update { it.copy(status = it.status + " · parity cos=%.4f".format(parity)) }
-                }
-            } catch (e: Exception) {
-                _state.update { it.copy(status = it.status + " · parity error: ${e.message}") }
-            }
+        } catch (e: Exception) {
+            _state.update { it.copy(status = it.status + " · parity error: ${e.message}") }
         }
     }
 
@@ -174,8 +274,7 @@ class M1Controller(private val context: Context) {
         // должны создать вторую сессию записи и второй SessionLogger поверх первого.
         if (!runningFlag.compareAndSet(false, true)) return
         try {
-            val b = bundle
-            val frameAnalyzer = analyzer.get()
+            val (b, frameAnalyzer) = synchronized(swapLock) { bundle to analyzer.get() }
             if (b == null || frameAnalyzer == null) {
                 runningFlag.set(false)
                 return
@@ -321,7 +420,7 @@ class M1Controller(private val context: Context) {
                             model = b.meta.model, refpackCreatedAt = b.meta.createdAt,
                             device = "${Build.MANUFACTURER} ${Build.MODEL}; " +
                                 "analysis ${frameAnalyzer.lastFrameW}x${frameAnalyzer.lastFrameH}",
-                            startedMs = startedMs, mode = mode.name.lowercase(),
+                            startedMs = startedMs, mode = mode.name.lowercase(), trip = _state.value.trip,
                         ))
                         headerWritten = true
                     } catch (e: Exception) {

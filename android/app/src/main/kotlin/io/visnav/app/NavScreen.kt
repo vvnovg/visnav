@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -21,6 +23,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -65,6 +68,23 @@ internal fun modeHex(m: NavMode): String = when (m) {
     NavMode.GNSS, NavMode.FUSED -> "#2E7D32"
     NavMode.VISUAL -> "#1565C0"
     NavMode.DEAD_RECKONING -> "#EF6C00"
+}
+
+/** Строка поездки на панели: ничего (старая раскладка), текст или выбор из нескольких поездок. */
+internal sealed interface TripLabel {
+    data object None : TripLabel
+    data class Text(val name: String) : TripLabel
+    data class Picker(val name: String, val trips: List<String>) : TripLabel
+}
+
+/**
+ * Выбор доступен, только если поездок больше одной, запись не идёт и база не грузится (после неудачной загрузки
+ * выбор остаётся, чтобы можно было переключиться на другую поездку).
+ */
+internal fun tripLabel(trip: String?, trips: List<String>, running: Boolean, loading: Boolean): TripLabel = when {
+    trip == null -> TripLabel.None
+    trips.size > 1 && !running && !loading -> TripLabel.Picker(trip, trips)
+    else -> TripLabel.Text(trip)
 }
 
 /**
@@ -137,18 +157,27 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
         if (permissionsGranted) controller.bindCamera(null, lifecycleOwner)
     }
     var mapData by remember(controller) { mutableStateOf<Result<MapData>?>(null) }
-    LaunchedEffect(controller) {
-        mapData = withContext(Dispatchers.IO) { MapDataLoader.load(controller.refpackDir) }
-    }
     val policy = remember { CameraPolicy() }
-    val routeStore = remember { RouteStore() }
+    // Страховка: между сессиями nav и так null, но маршрут прежней поездки не переживает смену поездки.
+    val routeStore = remember(s.trip) { RouteStore() }
     var map by remember { mutableStateOf<MapLibreMap?>(null) }
     var styleLoads by remember { mutableIntStateOf(0) }
     var free by remember { mutableStateOf(false) }
+    // Карта зависит только от каталога поездки: tripDir меняется один раз на смену поездки (сразу после resolve).
+    val tripDir = s.tripDir
+    LaunchedEffect(tripDir) {
+        val result = tripDir?.let { dir -> withContext(Dispatchers.IO) { MapDataLoader.load(File(dir)) } }
+        // key(data) пересоздаёт карту: старая MapLibreMap уничтожается, ждём onStyleLoaded новой.
+        map = null
+        free = false
+        mapData = result
+    }
+    // Вход на вкладку: перечитать список поездок (поездка могла появиться через adb push).
+    LaunchedEffect(Unit) { controller.refreshTrips() }
 
     // Каждая загрузка стиля (в том числе смена день/ночь) перезапускает эффект: маршрут, манёвры и позиция
     // отправляются заново в источники нового стиля. Источники берутся из map.style на каждом обновлении.
-    LaunchedEffect(map, styleLoads) {
+    LaunchedEffect(map, styleLoads, routeStore) {
         val m = map ?: return@LaunchedEffect
         var sentVersion = -1
         var sentPos: MapPos? = null
@@ -193,6 +222,7 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
                     "Дорога: привязана, ${Math.round(r.confidence * 100)} %" + if (r.used) ", уточняет позицию" else ""
                 } ?: "Дорога: не найдена")
             }
+            TripRow(tripLabel(s.trip, s.trips, s.running, s.loading), controller::refreshTrips, controller::selectTrip)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = { if (s.running) controller.stop() else controller.start() },
@@ -212,26 +242,36 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
         }
         Box(Modifier.weight(0.64f).fillMaxHeight()) {
             when (val r = mapData) {
-                null -> Text("Загрузка карты…", Modifier.padding(16.dp))
+                null -> if (tripDir == null && !s.loading) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Нет карты: поездка не выбрана")
+                        Text(s.status, style = MaterialTheme.typography.bodySmall)
+                    }
+                } else {
+                    Text("Загрузка карты…", Modifier.padding(16.dp))
+                }
                 else -> r.fold(
                     onSuccess = { data ->
                         val night = isSystemInDarkTheme()
                         val styleJson = remember(data, night) { data.styleJson(night) }
-                        MapLibreMap(
-                            modifier = Modifier.fillMaxSize(),
-                            styleJson = styleJson,
-                            onMapReady = { m ->
-                                // Старт без позиции: центр bounds карты, масштаб 13.
-                                if (controller.state.value.pos == null) {
-                                    val b = data.bounds
-                                    val camera = CameraPosition.Builder()
-                                        .target(LatLng((b[1] + b[3]) / 2, (b[0] + b[2]) / 2)).zoom(13.0).tilt(0.0).build()
-                                    m.moveCamera(CameraUpdateFactory.newCameraPosition(camera))
-                                }
-                            },
-                            onStyleLoaded = { m, _ -> map = m; styleLoads++ },
-                            onUserGesture = { policy.onUserGesture(SystemClock.elapsedRealtime()); free = true },
-                        )
+                        // Новая MapData (другая поездка) — новая карта: onMapReady ставит камеру в центр её bounds.
+                        key(data) {
+                            MapLibreMap(
+                                modifier = Modifier.fillMaxSize(),
+                                styleJson = styleJson,
+                                onMapReady = { m ->
+                                    // Старт без позиции: центр bounds карты, масштаб 13.
+                                    if (controller.state.value.pos == null) {
+                                        val b = data.bounds
+                                        val camera = CameraPosition.Builder()
+                                            .target(LatLng((b[1] + b[3]) / 2, (b[0] + b[2]) / 2)).zoom(13.0).tilt(0.0).build()
+                                        m.moveCamera(CameraUpdateFactory.newCameraPosition(camera))
+                                    }
+                                },
+                                onStyleLoaded = { m, _ -> map = m; styleLoads++ },
+                                onUserGesture = { policy.onUserGesture(SystemClock.elapsedRealtime()); free = true },
+                            )
+                        }
                         Text(
                             data.attribution,
                             Modifier.align(Alignment.BottomEnd)
@@ -242,7 +282,7 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
                         )
                     },
                     onFailure = { e ->
-                        val mapDir = File(controller.refpackDir, "map").absolutePath
+                        val mapDir = File(tripDir ?: "<каталог поездки>", "map").path
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("Нет карты: ${e.message?.removePrefix("нет карты: ") ?: e}")
                             Text("Скопируйте карту: adb push <map>/. $mapDir/", style = MaterialTheme.typography.bodySmall)
@@ -250,6 +290,27 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
                         }
                     },
                 )
+            }
+        }
+    }
+}
+
+/**
+ * «Поездка: <имя>»: текстом или кнопкой с меню поездок (текущая отмечена «✓»); в старой раскладке ничего.
+ * Открытие меню вызывает [onOpen] — перечитать список поездок.
+ */
+@Composable
+private fun TripRow(label: TripLabel, onOpen: () -> Unit, onSelect: (String) -> Unit) {
+    when (label) {
+        TripLabel.None -> Unit
+        is TripLabel.Text -> Text("Поездка: ${label.name}")
+        is TripLabel.Picker -> Box {
+            var expanded by remember { mutableStateOf(false) }
+            OutlinedButton(onClick = { onOpen(); expanded = true }) { Text("Поездка: ${label.name} ▾") }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                for (t in label.trips) {
+                    DropdownMenuItem(text = { Text(if (t == label.name) "✓ $t" else t) }, onClick = { expanded = false; onSelect(t) })
+                }
             }
         }
     }

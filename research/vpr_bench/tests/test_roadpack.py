@@ -1,3 +1,4 @@
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -74,7 +75,7 @@ def fixture_graph_v2() -> RoadGraph:
 
 
 def test_v2_roundtrip_and_fixture(tmp_path):
-    write_roadpack(tmp_path, fixture_graph_v2(), FIXTURE_META)
+    write_roadpack(tmp_path, fixture_graph_v2(), FIXTURE_META, version=2)
     g, meta = read_roadpack(tmp_path)
     assert meta["format"] == "VNRD/2"
     assert list(g.edge_speed) == [20, 48] and list(g.edge_name) == [0, -1] and g.names == ("Тверская улица",)
@@ -83,7 +84,7 @@ def test_v2_roundtrip_and_fixture(tmp_path):
 
 
 def test_v2_defaults_without_attributes(tmp_path):
-    write_roadpack(tmp_path, fixture_graph(), FIXTURE_META)  # v2 по умолчанию
+    write_roadpack(tmp_path, fixture_graph(), FIXTURE_META)  # v3 по умолчанию
     g, _ = read_roadpack(tmp_path)
     assert list(g.edge_speed) == [DEFAULT_SPEED_KMH[7], DEFAULT_SPEED_KMH[3]]
     assert list(g.edge_name) == [-1, -1] and g.names == () and len(g.restrictions) == 0
@@ -101,7 +102,7 @@ def test_v1_writer_rejects_attributes(tmp_path):
 
 
 def test_v2_rejects_trailing_bytes(tmp_path):
-    write_roadpack(tmp_path, fixture_graph_v2(), FIXTURE_META)
+    write_roadpack(tmp_path, fixture_graph_v2(), FIXTURE_META, version=2)
     p = tmp_path / "roadpack.bin"
     p.write_bytes(p.read_bytes() + b"\x00")
     with pytest.raises(ValueError, match="trailing"):
@@ -113,3 +114,61 @@ def test_bad_restriction_rejected():
     with pytest.raises(ValueError, match="restriction"):
         RoadGraph(g.node_lats, g.node_lons, g.edge_way, g.edge_from, g.edge_to, g.edge_flags, g.edge_class,
                   restrictions=np.array([[0, 1, 5, KIND_NO]], dtype=np.int32))
+
+
+FIXTURE_V3_DIR = Path(__file__).parent / "data" / "roadpack_v3_fixture"
+
+
+def fixture_graph_v3() -> RoadGraph:
+    g = fixture_graph_v2()
+    return dataclasses.replace(g, boundary_nodes=np.array([0, 2], dtype=np.int32))
+
+
+def test_v3_roundtrip(tmp_path):
+    write_roadpack(tmp_path, fixture_graph_v3(), FIXTURE_META)
+    g, meta = read_roadpack(tmp_path)
+    assert meta["format"] == "VNRD/3" and g.boundary_nodes.tolist() == [0, 2]
+
+
+def test_v2_still_readable_and_has_no_boundary(tmp_path):
+    write_roadpack(tmp_path, fixture_graph_v2(), FIXTURE_META, version=2)
+    g, meta = read_roadpack(tmp_path)
+    assert meta["format"] == "VNRD/2" and g.boundary_nodes.tolist() == []
+
+
+def test_v3_fixture_matches_writer(tmp_path):
+    # Фикстура для Kotlin: пересоздаётся, если отличается (как roadpack_v2_fixture), и сравнивается побайтно.
+    write_roadpack(tmp_path, fixture_graph_v3(), FIXTURE_META)
+    if not FIXTURE_V3_DIR.exists() or (FIXTURE_V3_DIR / "roadpack.bin").read_bytes() != (tmp_path / "roadpack.bin").read_bytes():
+        FIXTURE_V3_DIR.mkdir(parents=True, exist_ok=True)
+        write_roadpack(FIXTURE_V3_DIR, fixture_graph_v3(), FIXTURE_META)
+    assert (FIXTURE_V3_DIR / "roadpack.bin").read_bytes() == (tmp_path / "roadpack.bin").read_bytes()
+
+
+@pytest.mark.parametrize("bad", [[2, 0], [0, 0], [-1], [99]])
+def test_bad_boundary_rejected(bad):
+    with pytest.raises(ValueError, match="boundary"):
+        dataclasses.replace(fixture_graph_v2(), boundary_nodes=np.array(bad, dtype=np.int32))
+
+
+def test_v3_truncated_boundary_raises(tmp_path):
+    write_roadpack(tmp_path, fixture_graph_v3(), FIXTURE_META)
+    raw = (tmp_path / "roadpack.bin").read_bytes()
+    (tmp_path / "roadpack.bin").write_bytes(raw[:-2])
+    with pytest.raises(ValueError):
+        read_roadpack(tmp_path)
+
+
+def test_any_truncation_raises(tmp_path):
+    # Обрыв в любой секции (названия, запреты, края) — ValueError, а не struct.error/IndexError.
+    write_roadpack(tmp_path, fixture_graph_v3(), FIXTURE_META)
+    raw = (tmp_path / "roadpack.bin").read_bytes()
+    for cut in range(len(raw)):
+        (tmp_path / "roadpack.bin").write_bytes(raw[:cut])
+        with pytest.raises(ValueError):
+            read_roadpack(tmp_path)
+
+
+def test_v1_v2_cannot_store_boundary(tmp_path):
+    with pytest.raises(ValueError, match="boundary"):
+        write_roadpack(tmp_path, fixture_graph_v3(), FIXTURE_META, version=2)

@@ -6,7 +6,10 @@ plugins {
 
 kotlin { jvmToolchain(17) }
 
-application { mainClass.set("io.visnav.replay.MainKt") }
+application {
+    mainClass.set("io.visnav.replay.MainKt")
+    applicationDefaultJvmArgs = listOf("-Xmx4g")
+}
 
 dependencies {
     implementation(project(":core"))

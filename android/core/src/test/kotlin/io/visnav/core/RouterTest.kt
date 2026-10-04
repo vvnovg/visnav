@@ -2,6 +2,7 @@ package io.visnav.core
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -12,13 +13,13 @@ class RouterTest {
     /** Узлы в метрах; рёбра (from, to, way, flags, cls, speedKmh); запреты по индексам рёбер. */
     private fun pack(
         nodes: List<Pair<Double, Double>>, edges: List<EdgeSpec>, speeds: List<Int>? = null,
-        restrictions: List<TurnRestriction> = emptyList(),
+        restrictions: List<TurnRestriction> = emptyList(), boundary: IntArray = IntArray(0),
     ): RoadPack {
         val base = roadPackOf(enu, nodes, edges)
         val sp = speeds?.let { s -> ByteArray(s.size) { s[it].toByte() } }
             ?: ByteArray(edges.size) { RoadClass.defaultSpeedKmh(edges[it].cls).toByte() }
         return RoadPack(base.lats, base.lons, base.way, base.from, base.to, base.flags, base.cls, sp,
-            IntArray(edges.size) { -1 }, emptyList(), restrictions)
+            IntArray(edges.size) { -1 }, emptyList(), restrictions, boundary)
     }
 
     private fun ways(r: Route, p: RoadPack) = r.steps.map { p.way[it.edge] }.distinct()
@@ -229,5 +230,61 @@ class RouterTest {
         val plain = assertNotNull(router.route(500.0, 0.0, null, 800.0, 0.0))
         val west = assertNotNull(router.route(500.0, 0.0, -Math.PI / 2, 800.0, 0.0))
         assertEquals(plain.durationS + RouterConfig().wrongHeadingPenaltyS, west.durationS, 1e-6)
+    }
+
+    @Test fun noUturnAtCorridorBoundary() {
+        // Та же геометрия, что в deadEndUturnLosesToBlockLoop, но без петли: отросток B(200,0)–S(200,−50).
+        // Если S — край коридора (дорога за ним обрезана), разворота в S нет: по курсу (на восток) маршрута назад нет,
+        // и поиск повторяется по всем кандидатам — старт против курса на запад: 100 м = 10 с + штраф 60 с.
+        val nodes = listOf(0.0 to 0.0, 100.0 to 0.0, 200.0 to 0.0, 200.0 to -50.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2), EdgeSpec(2, 3, 3))
+        val p = pack(nodes, edges, speeds = List(3) { 36 }, boundary = intArrayOf(3))
+        val r = assertNotNull(Router(RoadIndex(p, enu)).route(150.0, 0.0, Math.PI / 2, 50.0, 0.0))
+        assertEquals(listOf(RouteStep(1, false), RouteStep(0, false)), r.steps)
+        assertEquals(100.0, r.lengthM, 1e-6)
+        assertEquals(10.0 + RouterConfig().wrongHeadingPenaltyS, r.durationS, 1e-6)
+        assertTrue(r.steps.zipWithNext().none { (a, b) -> a.edge == b.edge && a.forward != b.forward })
+        assertTrue(r.startsAgainstHeading)
+    }
+
+    @Test fun headingFilterRouteSkipsFallback() {
+        // Геометрия uTurnAtDeadEndWhenHeadingAway (тупик настоящий): по курсу маршрут есть — через разворот в тупике,
+        // поэтому повторного поиска против курса нет. 350 м по 36 км/ч = 35 с + 120 с за разворот, без штрафа за курс.
+        val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 350.0 to 0.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 1))
+        val p = pack(nodes, edges, speeds = List(2) { 36 })
+        val r = assertNotNull(Router(RoadIndex(p, enu)).route(250.0, 0.0, Math.PI / 2, 100.0, 0.0))
+        assertEquals(RouteStep(0, true), r.steps.first())
+        assertEquals(350.0, r.lengthM, 1e-6)
+        assertEquals(35.0 + RouterConfig().deadEndUturnPenaltyS, r.durationS, 1e-6)
+        assertFalse(r.startsAgainstHeading)
+    }
+
+    @Test fun loopUsedWhenStubEndsAtBoundary() {
+        // deadEndUturnLosesToBlockLoop с краем в S и штрафом за разворот 0: без отметки края дешевле был бы разворот
+        // в отростке (300 м, 30 с + 2·5 с = 40 с < 60 с), с отметкой остаётся только петля (400 м).
+        val nodes = listOf(0.0 to 0.0, 100.0 to 0.0, 200.0 to 0.0, 200.0 to -50.0, 200.0 to 100.0, 100.0 to 100.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2), EdgeSpec(2, 3, 3), EdgeSpec(2, 4, 4), EdgeSpec(4, 5, 5),
+            EdgeSpec(5, 1, 6))
+        val cheapUturn = RouterConfig(deadEndUturnPenaltyS = 0.0)
+        val free = pack(nodes, edges, speeds = List(edges.size) { 36 })
+        assertEquals(300.0, assertNotNull(Router(RoadIndex(free, enu), cheapUturn).route(150.0, 0.0, Math.PI / 2, 50.0, 0.0)).lengthM, 1e-6)
+        val marked = pack(nodes, edges, speeds = List(edges.size) { 36 }, boundary = intArrayOf(3))
+        val r = assertNotNull(Router(RoadIndex(marked, enu), cheapUturn).route(150.0, 0.0, Math.PI / 2, 50.0, 0.0))
+        assertEquals(400.0, r.lengthM, 1e-6)
+    }
+
+    @Test fun fallbackDoesNotJumpToOppositeCarriageway() {
+        // Разделённая дорога без перемычки: своя часть на восток (way 1) и встречная на запад (way 2) обрезаны краем
+        // коридора в (2000, …). Машина посередине (обе части в пределах запаса), курс на восток, цель позади на встречной.
+        // По курсу маршрута нет (край впереди); повторный поиск — только по своей дороге (way 1), а она односторонняя,
+        // встречного направления у неё нет, поэтому маршрута нет. Без ограничения поиск взял бы встречную часть.
+        val nodes = listOf(0.0 to 0.0, 2000.0 to 0.0, 2000.0 to 15.0, 0.0 to 15.0)
+        val edges = listOf(EdgeSpec(0, 1, 1, RoadPack.FLAG_ONEWAY), EdgeSpec(2, 3, 2, RoadPack.FLAG_ONEWAY))
+        val p = pack(nodes, edges, boundary = intArrayOf(1, 2))
+        val router = Router(RoadIndex(p, enu))
+        assertNull(router.route(500.0, 7.5, Math.PI / 2, 100.0, 15.0))
+        // Без курса та же точка даёт маршрут по встречной части — значит, null выше обеспечен ограничением по way.
+        assertEquals(2L, p.way[assertNotNull(router.route(500.0, 7.5, null, 100.0, 15.0)).steps[0].edge])
     }
 }

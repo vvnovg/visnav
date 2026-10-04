@@ -39,7 +39,17 @@ class FrameLogTest {
             startedMs = 5, mode = "gps")
         assertEquals(
             "{\"v\":1,\"type\":\"session\",\"model\":\"m\",\"refpack_created_at\":\"2026-09-27T00:00:00Z\"," +
-                "\"device\":\"d\",\"started_ms\":5,\"mode\":\"gps\"}",
+                "\"device\":\"d\",\"started_ms\":5,\"mode\":\"gps\",\"trip\":null}",
+            LogJson.line(h),
+        )
+    }
+
+    @Test fun sessionHeaderLineWithTrip() {
+        val h = SessionHeader(model = "m", refpackCreatedAt = "c", device = "d", startedMs = 5, mode = "gps",
+            trip = "home-work")
+        assertEquals(
+            "{\"v\":1,\"type\":\"session\",\"model\":\"m\",\"refpack_created_at\":\"c\"," +
+                "\"device\":\"d\",\"started_ms\":5,\"mode\":\"gps\",\"trip\":\"home-work\"}",
             LogJson.line(h),
         )
     }

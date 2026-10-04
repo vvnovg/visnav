@@ -6,7 +6,10 @@ import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
 
-/** Offline map data from `refpack/map/`: style builder, `bounds [minlon,minlat,maxlon,maxlat]`, attribution. */
+/**
+ * Offline map data from `<trip data dir>/map/` (`refpack/trips/<name>/map/`, or `refpack/map/` in the legacy
+ * layout): style builder, `bounds [minlon,minlat,maxlon,maxlat]`, attribution.
+ */
 class MapData(
     val dir: File,
     val styleJson: (night: Boolean) -> String,
@@ -15,8 +18,9 @@ class MapData(
 )
 
 object MapDataLoader {
-    fun load(refpackDir: File): Result<MapData> {
-        val dir = File(refpackDir, "map")
+    /** [dataDir] — каталог данных поездки (`UiState.tripDir`). */
+    fun load(dataDir: File): Result<MapData> {
+        val dir = File(dataDir, "map")
         val mbtiles = File(dir, "corridor.mbtiles")
         val fonts = File(dir, "fonts")
         val glyphs = File(fonts, "Noto Sans Regular/0-255.pbf")

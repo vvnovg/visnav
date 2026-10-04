@@ -15,8 +15,13 @@ data class RouteStep(val edge: Int, val forward: Boolean)
  * durationS — стоимость маршрута для поиска, а не чистое время в пути: кроме времени езды по рёбрам включает
  * штрафы за повороты (turnPenaltyS), за разворот в тупике (deadEndUturnPenaltyS) и за старт против курса
  * (wrongHeadingPenaltyS). Это оценка.
+ *
+ * startsAgainstHeading — первый шаг отклоняется от курса при планировании больше чем на 90°: в начале нужно развернуться.
  */
-class Route(val steps: List<RouteStep>, val points: List<DoubleArray>, val cumM: DoubleArray, val durationS: Double) {
+class Route(
+    val steps: List<RouteStep>, val points: List<DoubleArray>, val cumM: DoubleArray, val durationS: Double,
+    val startsAgainstHeading: Boolean = false,
+) {
     val lengthM: Double get() = cumM.last()
 }
 
@@ -30,8 +35,8 @@ data class RouterConfig(
     val maxCandidateWays: Int = 4,
     val turnPenaltyS: Double = 5.0,
     /**
-     * Разворот на том же ребре в тупике (в том числе у края коридора, где обрезанная дорога выглядит тупиком): дороже
-     * обычного поворота, чтобы объезд квартала выигрывал у разворота в коротком отростке.
+     * Разворот на том же ребре в тупике: дороже обычного поворота, чтобы объезд квартала выигрывал у разворота
+     * в коротком отростке. У края коридора (roadpack v3) разворот запрещён.
      */
     val deadEndUturnPenaltyS: Double = 120.0,
     val wrongHeadingPenaltyS: Double = 60.0,
@@ -40,7 +45,10 @@ data class RouterConfig(
 
 /**
  * A* по направленным рёбрам графа коридора: односторонние улицы, запреты поворотов (no_* / only_*), стоимость —
- * время в пути. Разворот на том же ребре — только в тупике, со штрафом deadEndUturnPenaltyS.
+ * время в пути. Разворот на том же ребре — только в тупике, со штрафом deadEndUturnPenaltyS; у края коридора
+ * (roadpack v3) разворота нет. С курсом поиск идёт от стартов по курсу; если от них маршрута нет, поиск повторяется
+ * один раз от стартов на тех же дорогах (way) в обратном направлении — старт против курса стоит wrongHeadingPenaltyS,
+ * а в Route выставляется startsAgainstHeading. Другую проезжую часть разделённой дороги повтор не берёт.
  */
 class Router(private val index: RoadIndex, private val config: RouterConfig = RouterConfig()) {
     private val pack = index.pack
@@ -86,12 +94,25 @@ class Router(private val index: RoadIndex, private val config: RouterConfig = Ro
             return cs.filter { it.proj.distM <= nearestStart + config.startSlackM }
         }
         // С курсом: сначала кандидаты, в чью сторону едем (≤ 90°), затем запас startSlackM внутри них; если таких нет —
-        // запас по всем кандидатам (штраф за встречное направление тогда остаётся).
-        val starts = (if (headingRad == null) null else
+        // запас по всем кандидатам (штраф за встречное направление тогда остаётся). Если от кандидатов по курсу
+        // маршрута нет, поиск повторяется один раз (см. ниже).
+        val headed = if (headingRad == null) null else
             startsAll.filter { abs(wrapAngle(headingRad - travelBearing(it.proj.edge, it.forward))) <= PI / 2 }
-                .takeIf { it.isNotEmpty() }?.let { withinSlack(it) }) ?: withinSlack(startsAll)
+                .takeIf { it.isNotEmpty() }?.let { withinSlack(it) }
         val nearest = goalsAll.minOf { it.proj.distM }
         val goals = goalsAll.filter { it.proj.distM <= nearest + config.goalSlackM }
+        if (headed == null) return search(withinSlack(startsAll), goals, headingRad)
+        search(headed, goals, headingRad)?.let { return it }
+        // По курсу маршрута нет (например, впереди край коридора, где разворот запрещён) — один повторный поиск по
+        // кандидатам на тех же дорогах (way), что и кандидаты по курсу, то есть по встречному направлению своей дороги:
+        // на другую проезжую часть разделённой дороги не перескакиваем. Старт против курса стоит wrongHeadingPenaltyS.
+        val ways = headed.mapTo(HashSet()) { pack.way[it.proj.edge] }
+        val reverse = startsAll.filter { pack.way[it.proj.edge] in ways }
+        if (reverse.size == headed.size) return null
+        return search(reverse, goals, headingRad)
+    }
+
+    private fun search(starts: List<Cand>, goals: List<Cand>, headingRad: Double?): Route? {
         val goalOf = HashMap<Int, MutableList<Cand>>()
         for (g in goals) goalOf.getOrPut(state(g.proj.edge, g.forward)) { ArrayList() }.add(g)
 
@@ -142,7 +163,8 @@ class Router(private val index: RoadIndex, private val config: RouterConfig = Ro
             for (k2 in index.incident[v]) {
                 val fwd2 = pack.from[k2] == v
                 if (!fwd2 && (pack.to[k2] != v || pack.oneway(k2))) continue
-                if (k2 == edge && index.degree[v] > 1) continue
+                // Разворот на том же ребре — только в настоящем тупике: у края коридора дорога продолжается за обрезкой.
+                if (k2 == edge && (index.degree[v] > 1 || pack.isBoundary(v))) continue
                 if (!allowed(edge, v, k2)) continue
                 val turn = abs(wrapAngle(travelBearing(k2, fwd2) - travelBearing(edge, s % 2 == 0)))
                 // У ребра нулевой длины нет направления — поворот не определён, штраф не начисляется.
@@ -170,11 +192,12 @@ class Router(private val index: RoadIndex, private val config: RouterConfig = Ro
             }
         }
         if (bestGoalState < 0) return null
-        return build(bestGoalState, bestGoalPos, bestGoalPrev, directStart, prev, startPos, bestTotal)
+        return build(bestGoalState, bestGoalPos, bestGoalPrev, directStart, prev, startPos, bestTotal, headingRad)
     }
 
     private fun build(
         goal: Int, goalPos: Double, goalPrev: Int, direct: Cand?, prev: IntArray, startPos: DoubleArray, total: Double,
+        headingRad: Double?,
     ): Route {
         val chain = ArrayList<Int>()
         if (direct == null) {
@@ -209,6 +232,7 @@ class Router(private val index: RoadIndex, private val config: RouterConfig = Ro
         for (i in 1 until points.size) {
             cum[i] = cum[i - 1] + hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1])
         }
-        return Route(steps, points, cum, total)
+        val against = headingRad != null && abs(wrapAngle(headingRad - travelBearing(first.edge, first.forward))) > PI / 2
+        return Route(steps, points, cum, total, against)
     }
 }

@@ -29,6 +29,8 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--pbf", required=True, type=Path, help="выгрузка OSM (.osm.pbf или .osm)")
     pr.add_argument("--gpx", action="append", default=[], type=Path, help="трек поездки GPX")
     pr.add_argument("--log", action="append", default=[], type=Path, help="журнал кадров сессии (.jsonl): его GPS-трек")
+    pr.add_argument("--bbox", default=None, help="min_lon,min_lat,max_lon,max_lat — граф всего района без обрезки по треку; краёв нет: "
+                    "линии, пересекающие границу, читаются целиком, их внешние концы выглядят как тупики")
     pr.add_argument("--buffer-m", type=float, default=300.0)
     pr.add_argument("--out", required=True, type=Path)
     rd = sub.add_parser("road-eval", help="оценить привязку к дорогам (NFR-3)")
@@ -41,9 +43,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _pack_roads(args) -> int:
     from vpr_bench.db_builder import Corridor
+    from vpr_bench.geo import BBox
     from vpr_bench.osmgraph import build_graph, read_osm
     from vpr_bench.query import clean_track, parse_gpx
 
+    if args.bbox is not None:
+        if args.gpx or args.log:
+            print("error: --bbox cannot be combined with --gpx or --log", file=sys.stderr)
+            return 2
+        try:
+            bbox = BBox.parse(args.bbox)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        ways, rs = read_osm(args.pbf, bbox)
+        graph = build_graph(ways, keep=None, restrictions=rs)
+        extra = {"bbox": [bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat], "buffer_m": None}
+        return _write_roads(args, graph, extra, "error: no drivable roads in the bbox")
     tracks = [parse_gpx(p) for p in args.gpx]
     # Трек из журнала очищаем от подмены, иначе коридор уедет к точке, куда «прыгал» GPS.
     tracks += [clean_track(gps_track(read_log(p)[1]), max_hdop=None)[0] for p in args.log]
@@ -54,17 +70,22 @@ def _pack_roads(args) -> int:
     corridor = Corridor(tracks, args.buffer_m)
     ways, rs = read_osm(args.pbf, corridor.bbox())
     graph = build_graph(ways, keep=corridor.contains, restrictions=rs)
+    return _write_roads(args, graph, {"buffer_m": args.buffer_m}, "error: no drivable roads in the corridor")
+
+
+def _write_roads(args, graph, extra: dict, empty_error: str) -> int:
     if len(graph.edge_from) == 0:
-        print("error: no drivable roads in the corridor", file=sys.stderr)
+        print(empty_error, file=sys.stderr)
         return 2
     meta = {
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "source": args.pbf.name, "buffer_m": args.buffer_m,
+        "source": args.pbf.name, **extra,
         "attribution": "© участники OpenStreetMap, ODbL 1.0",
         "restrictions_dropped": graph.restrictions_dropped,
+        "boundary_nodes": len(graph.boundary_nodes),
     }
     write_roadpack(args.out, graph, meta)
-    print(f"nodes={len(graph.node_lats)} edges={len(graph.edge_from)} -> {args.out}")
+    print(f"nodes={len(graph.node_lats)} edges={len(graph.edge_from)} boundary={len(graph.boundary_nodes)} -> {args.out}")
     return 0
 
 

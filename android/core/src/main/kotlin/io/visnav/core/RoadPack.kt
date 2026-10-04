@@ -16,11 +16,12 @@ import kotlinx.serialization.json.Json
 data class TurnRestriction(val fromEdge: Int, val via: Int, val toEdge: Int, val only: Boolean)
 
 /**
- * roadpack v1/v2 («VNRD»): дорожный граф OSM. Заголовок 16 байт (magic, version u16, reserved u16, nodeCount u32,
+ * roadpack v1/v2/v3 («VNRD»): дорожный граф OSM. Заголовок 16 байт (magic, version u16, reserved u16, nodeCount u32,
  * edgeCount u32), затем lats f64[n], lons f64[n], way i64[m], from i32[m], to i32[m], flags u8[m] (1 oneway, 2 tunnel, 4 bridge, 8 roundabout, 16 link = highway=*_link), cls u8[m]
  * (little-endian). v2 дополнительно: speedKmh u8[m] (0 = по классу), nameIdx i32[m] (-1 = без названия),
  * nameCount u32 + names (u16 длина + UTF-8), restrictionCount u32 + по 13 байт (from i32, via i32, to i32, kind u8:
- * 1 = no, 2 = only). Ребро — прямой отрезок между соседними узлами OSM-линии; по односторонней — только from → to.
+ * 1 = no, 2 = only). v3 дополнительно: boundaryCount u32 + boundary i32[boundaryCount] — узлы края коридора
+ * (дорога за ними обрезана; индексы строго по возрастанию). Ребро — прямой отрезок между соседними узлами OSM-линии; по односторонней — только from → to.
  */
 class RoadPack(
     val lats: DoubleArray, val lons: DoubleArray,
@@ -30,6 +31,7 @@ class RoadPack(
     val nameIdx: IntArray = IntArray(from.size) { -1 },
     val names: List<String> = emptyList(),
     val restrictions: List<TurnRestriction> = emptyList(),
+    val boundary: IntArray = IntArray(0),
 ) {
     val nodeCount: Int get() = lats.size
     val edgeCount: Int get() = from.size
@@ -48,7 +50,16 @@ class RoadPack(
                 "bad restriction $r"
             }
         }
+        for (i in boundary.indices) {
+            require(boundary[i] in 0 until nodeCount) { "boundary node ${boundary[i]} out of range" }
+            require(i == 0 || boundary[i] > boundary[i - 1]) { "boundary nodes must be strictly increasing" }
+        }
     }
+
+    private val boundarySet = BooleanArray(nodeCount).also { b -> boundary.forEach { b[it] = true } }
+
+    /** Узел — край коридора (roadpack v3): дорога за ним обрезана, это не настоящий тупик. */
+    fun isBoundary(node: Int): Boolean = boundarySet[node]
 
     fun oneway(edge: Int): Boolean = flags[edge].toInt() and FLAG_ONEWAY != 0
     fun tunnel(edge: Int): Boolean = flags[edge].toInt() and FLAG_TUNNEL != 0
@@ -83,13 +94,13 @@ class RoadPack(
             require(b.int == MAGIC) { "not a roadpack (bad magic)" }
             val version = b.short.toInt() and 0xFFFF
             b.short // reserved
-            require(version == 1 || version == 2) { "unsupported roadpack version=$version" }
+            require(version in 1..3) { "unsupported roadpack version=$version" }
             val n = b.int
             val m = b.int
             require(n >= 0 && m >= 0) { "bad header nodes=$n edges=$m" }
             val expected = HEADER_SIZE + 16L * n + 18L * m
             if (version == 1) require(total == expected) { "roadpack size $total != expected $expected" }
-            else require(total >= expected + 5L * m + 8) { "roadpack v2 too short: $total" }
+            else require(total >= expected + 5L * m + 8) { "roadpack v$version too short: $total" }
             val lats = DoubleArray(n).also { b.asDoubleBuffer().get(it) }; b.position(b.position() + 8 * n)
             val lons = DoubleArray(n).also { b.asDoubleBuffer().get(it) }; b.position(b.position() + 8 * n)
             val way = LongArray(m).also { b.asLongBuffer().get(it) }; b.position(b.position() + 8 * m)
@@ -108,8 +119,14 @@ class RoadPack(
                 ByteArray(len).also { b.get(it) }.toString(Charsets.UTF_8)
             }
             val rc = b.int
-            require(rc >= 0 && b.remaining().toLong() == 13L * rc) {
-                "roadpack restriction table size mismatch (${b.remaining()} trailing bytes for $rc entries)"
+            // v2: после запретов файл кончается; v3: дальше идёт таблица края коридора (не меньше 4 байт счётчика).
+            val restrictionsFit = if (version == 2) {
+                b.remaining().toLong() == 13L * rc
+            } else {
+                b.remaining().toLong() >= 13L * rc + 4
+            }
+            require(rc >= 0 && restrictionsFit) {
+                "roadpack restriction table size mismatch (${b.remaining()} trailing bytes for $rc entries, v$version)"
             }
             val restrictions = List(rc) {
                 val f = b.int; val v = b.int; val t = b.int
@@ -117,7 +134,13 @@ class RoadPack(
                 require(kind == 1 || kind == 2) { "bad restriction kind $kind" }
                 TurnRestriction(f, v, t, kind == 2)
             }
-            return RoadPack(lats, lons, way, from, to, flags, cls, speed, nameIdx, names, restrictions)
+            if (version == 2) return RoadPack(lats, lons, way, from, to, flags, cls, speed, nameIdx, names, restrictions)
+            val bc = b.int
+            require(bc >= 0 && b.remaining().toLong() == 4L * bc) {
+                "roadpack boundary table size mismatch (${b.remaining()} trailing bytes for $bc entries)"
+            }
+            val boundary = IntArray(bc).also { b.asIntBuffer().get(it) }
+            return RoadPack(lats, lons, way, from, to, flags, cls, speed, nameIdx, names, restrictions, boundary)
         }
     }
 }

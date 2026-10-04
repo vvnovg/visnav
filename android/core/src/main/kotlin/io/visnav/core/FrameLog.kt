@@ -33,6 +33,8 @@ import kotlinx.serialization.json.Json
     val device: String,
     @SerialName("started_ms") val startedMs: Long,
     val mode: String,
+    /** Имя поездки (trips/<имя>); null — старая раскладка без trips/. */
+    val trip: String? = null,
 )
 
 object LogJson {

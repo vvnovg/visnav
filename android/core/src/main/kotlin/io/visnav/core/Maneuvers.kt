@@ -95,6 +95,13 @@ fun buildManeuvers(route: Route, index: RoadIndex): List<Maneuver> {
     val out = ArrayList<Maneuver>()
     out.add(Maneuver(ManeuverType.DEPART, 0.0, route.points[0][0], route.points[0][1], pack.name(steps[0].edge)))
     var lastBIn = 0.0   // входящий азимут последнего добавленного поворота (для слияния)
+    if (route.startsAgainstHeading) {
+        // Маршрут начинается против курса: сначала развернуться (на месте старта, улица первого шага).
+        out.add(Maneuver(ManeuverType.UTURN, 0.0, route.points[0][0], route.points[0][1], pack.name(steps[0].edge),
+            angleDeg = 180.0))
+        val b = index.bearing[steps[0].edge]
+        lastBIn = if (steps[0].forward) wrapAngle(b + PI) else b
+    }
     var i = 1
     while (i < steps.size) {
         val prev = steps[i - 1]; val cur = steps[i]
@@ -115,7 +122,7 @@ fun buildManeuvers(route: Route, index: RoadIndex): List<Maneuver> {
             continue
         }
         if (cur.edge == prev.edge && cur.forward != prev.forward) {
-            // Разворот на том же ребре — только в тупике (узел степени 1, в том числе обрезанная дорога у края коридора).
+            // Разворот на том же ребре — только в тупике (узел степени 1).
             val bIn = if (prev.forward) index.bearing[prev.edge] else wrapAngle(index.bearing[prev.edge] + PI)
             out.add(Maneuver(ManeuverType.UTURN, at, pe, pn, pack.name(cur.edge), angleDeg = 180.0))
             lastBIn = bIn
@@ -159,7 +166,9 @@ fun buildManeuvers(route: Route, index: RoadIndex): List<Maneuver> {
             if (type != null) {
                 val last = out.last()
                 val sameSide = sameSideTurn(last.type, type)
-                val mergeable = last.type in TURNS && (type == ManeuverType.CONTINUE || sameSide)
+                // В разворот в начале маршрута против курса ничего не сливается: он остаётся «развернитесь» на своей улице.
+                val startUturn = route.startsAgainstHeading && out.size == 2
+                val mergeable = !startUturn && last.type in TURNS && (type == ManeuverType.CONTINUE || sameSide)
                 if (mergeable && at - last.atM < MERGE_M) {
                     // Суммарный поворот — от входящего азимута первого манёвра до исходящего текущего.
                     val total = Math.toDegrees(wrapAngle(bOut - lastBIn))

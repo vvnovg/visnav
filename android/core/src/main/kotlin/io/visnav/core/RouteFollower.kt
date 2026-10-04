@@ -91,14 +91,21 @@ class RouteFollower(
     private var lastT: Long? = null
 
     val nextManeuver: Int?
-        get() = maneuvers.indices.firstOrNull { maneuvers[it].type != ManeuverType.DEPART && maneuvers[it].atM > progressM + 1 }
+        get() = maneuvers.indices.firstOrNull {
+            maneuvers[it].type != ManeuverType.DEPART && (maneuvers[it].atM > progressM + 1 || startUturn(it))
+        }
     val distanceToNextM: Double? get() = nextManeuver?.let { maneuvers[it].atM - progressM }
 
     private fun key(i: Int, s: PromptStage) = i.toLong() * 4 + s.ordinal
 
+    /** Разворот в начале маршрута против курса (atM = 0): следующий манёвр, пока машина не отъехала от старта. */
+    private fun startUturn(i: Int): Boolean =
+        route?.startsAgainstHeading == true && i == 1 && maneuvers[i].type == ManeuverType.UTURN && progressM <= 1.0
+
     /**
      * Новый маршрут; при неудаче прежний маршрут и его состояние сохраняются. После удачного плана в том же вызове
      * выдаётся подсказка о первом манёвре (прогресс 0), кроме «сейчас» — она прозвучит на следующем обновлении.
+     * Исключение — разворот в начале маршрута против курса: «Развернитесь» звучит сразу.
      */
     private fun plan(tMs: Long, e: Double, n: Double, psi: Double?, reroute: Boolean, v: Double, threshold: Double): List<NavEvent> {
         lastRouteAttempt = tMs
@@ -219,7 +226,8 @@ class RouteFollower(
             return text + ", затем " + Instructions.shortAction(maneuvers[j])
         }
         when {
-            allowNow && dist <= now && m.type != ManeuverType.ARRIVE && spoken.add(key(i, PromptStage.NOW)) -> {
+            (allowNow || startUturn(i)) && dist <= now && m.type != ManeuverType.ARRIVE &&
+                spoken.add(key(i, PromptStage.NOW)) -> {
                 spoken.add(key(i, PromptStage.NEAR)); spoken.add(key(i, PromptStage.FAR))
                 out += NavEvent.Prompt(tMs, i, PromptStage.NOW, chained(Instructions.prompt(m, null)), dist, j)
             }

@@ -103,6 +103,12 @@ def _flags(tags: dict[str, str], d: int) -> int:
 
 def build_graph(ways: Iterable[RawWay], keep: Callable[[float, float], bool] | None = None,
                 restrictions: Iterable[RawRestriction] = ()) -> RoadGraph:
+    """Граф из отрезков линий; при keep отрезок сохраняется, если хотя бы один конец внутри коридора.
+
+    Край коридора (boundary_nodes) — любой узел графа, для которого keep ложно: это внешний конец сохранённого
+    отрезка, и данные вокруг него неполны (продолжение дороги могло не попасть в выборку или быть обрезано).
+    Настоящий тупик сразу за коридором тоже считается краем. Без keep краёв нет.
+    """
     index: dict[int, int] = {}
     lats: list[float] = []
     lons: list[float] = []
@@ -162,6 +168,8 @@ def build_graph(ways: Iterable[RawWay], keep: Callable[[float, float], bool] | N
         edges_of_way.setdefault(wid, []).append(k)
     rows: list[tuple[int, int, int, int]] = []
     dropped = 0
+    boundary = [] if keep is None else sorted(
+        i for osm_id, i in index.items() if not inside((osm_id, lats[i], lons[i])))
 
     def candidates(way_id: int, via: int, arriving: bool) -> list[int]:
         # Односторонняя линия: въезжает в via только по ребру, которое в него приходит, выезжает — по уходящему.
@@ -194,6 +202,7 @@ def build_graph(ways: Iterable[RawWay], keep: Callable[[float, float], bool] | N
         np.array(e_flags, dtype=np.uint8), np.array(e_cls, dtype=np.uint8),
         edge_speed=np.array(e_speed, dtype=np.uint8), edge_name=np.array(e_name, dtype=np.int32),
         names=tuple(names), restrictions=np.array(rows, dtype=np.int32).reshape(len(rows), 4), restrictions_dropped=dropped,
+        boundary_nodes=np.array(boundary, dtype=np.int32),
     )
 
 

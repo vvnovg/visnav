@@ -87,4 +87,41 @@ class RoadPackTest {
             assertFailsWith<IllegalArgumentException>("kind=$bad") { RoadPack.parse(ByteBuffer.wrap(c)) }
         }
     }
+
+    private val fixtureV3 = File("../../research/vpr_bench/tests/data/roadpack_v3_fixture")
+
+    @Test fun parsesV3Boundary() {
+        val pack = RoadPack.parse(ByteBuffer.wrap(File(fixtureV3, "roadpack.bin").readBytes()))
+        assertTrue(pack.isBoundary(0)); assertFalse(pack.isBoundary(1)); assertTrue(pack.isBoundary(2))
+        val v2 = RoadPack.parse(ByteBuffer.wrap(File(fixtureV2, "roadpack.bin").readBytes()))
+        assertEquals(v2.nodeCount, pack.nodeCount); assertEquals(v2.edgeCount, pack.edgeCount)
+        assertTrue(v2.lats.contentEquals(pack.lats)); assertTrue(v2.lons.contentEquals(pack.lons))
+        assertEquals(v2.restrictions, pack.restrictions)
+        assertFalse((0 until v2.nodeCount).any { v2.isBoundary(it) })
+    }
+
+    @Test fun v3TruncatedBoundaryFails() {
+        val raw = File(fixtureV3, "roadpack.bin").readBytes()
+        assertFailsWith<IllegalArgumentException> { RoadPack.parse(ByteBuffer.wrap(raw.copyOf(raw.size - 2))) }
+    }
+
+    @Test fun rejectsBadV3BoundaryTable() {
+        val raw = File(fixtureV3, "roadpack.bin").readBytes()
+        assertFailsWith<IllegalArgumentException> { RoadPack.parse(ByteBuffer.wrap(raw + byteArrayOf(0))) }
+        val bcAt = raw.size - 4 - 4 * 2 // фикстура: boundary = [0, 2]
+        for (bad in listOf(-1, 0x7FFFFFFF)) {
+            val c = raw.copyOf()
+            ByteBuffer.wrap(c).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(bcAt, bad)
+            assertFailsWith<IllegalArgumentException>("bc=$bad") { RoadPack.parse(ByteBuffer.wrap(c)) }
+        }
+    }
+
+    @Test fun boundaryMustBeIncreasingAndInRange() {
+        val p = RoadPack.parse(ByteBuffer.wrap(File(fixtureV2, "roadpack.bin").readBytes()))
+        for (bad in listOf(intArrayOf(1, 0), intArrayOf(0, 0), intArrayOf(-1), intArrayOf(p.nodeCount))) {
+            assertFailsWith<IllegalArgumentException> {
+                RoadPack(p.lats, p.lons, p.way, p.from, p.to, p.flags, p.cls, p.speedKmh, p.nameIdx, p.names, p.restrictions, bad)
+            }
+        }
+    }
 }

@@ -30,7 +30,7 @@ uv run vpr-m3 pack-map --mbtiles data/m3b/moscow.mbtiles --fonts-zip data/osm/no
 ```bash
 adb push data/m3b/map /sdcard/Android/data/io.visnav.app/files/refpack/
 ```
-В итоге на телефоне получается `files/refpack/map/` с файлами `corridor.mbtiles`, `fonts/…` и `map.json`. Если карту положили, когда приложение уже открыто, нужно переключить вкладку, и карта загрузится.
+В итоге на телефоне получается `files/refpack/map/` с файлами `corridor.mbtiles`, `fonts/…` и `map.json`. В пакете поездки (M3c, `docs/research/m3c-trip.md`) карта лежит в `files/refpack/trips/<имя>/map/` и собирается командой `vpr-m3 pack-trip`. Если карту положили, когда приложение уже открыто, нужно переключить вкладку, и карта загрузится.
 
 - **Вкладка «Навигация»:**
   - слева — стрелка следующего манёвра, расстояние до него («Сейчас» ближе 30 м), улица, режим позиционирования с точностью, остаток пути и времени, кнопки «Старт/Стоп» и «В центр»;
