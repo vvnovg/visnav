@@ -28,4 +28,20 @@ class CameraPolicyTest {
         c.recenter()
         assertNotNull(c.update(12_500, 55.75, 37.6, 10.0, 0.0))
     }
+
+    @Test fun freeTimeoutBoundaryAndClockReset() {
+        val c = CameraPolicy(freeHoldMs = 10_000)
+        c.onUserGesture(1_000)
+        assertNull(c.update(11_000, 55.75, 37.6, 10.0, 0.0))
+        assertNotNull(c.update(11_001, 55.75, 37.6, 10.0, 0.0))
+        c.onUserGesture(50_000)
+        assertNotNull(c.update(100, 55.75, 37.6, 10.0, 0.0))   // часы сброшены — свободный режим истёк
+    }
+
+    @Test fun speedThresholdAndNaNSpeed() {
+        val c = CameraPolicy()
+        assertEquals(90.0, c.update(0, 55.75, 37.6, 3.0, Math.PI / 2)!!.bearingDeg, 1e-9)
+        val t = c.update(100, 55.75, 37.6, Double.NaN, Math.PI)!!
+        assertEquals(15.0, t.zoom); assertEquals(90.0, t.bearingDeg, 1e-9)
+    }
 }

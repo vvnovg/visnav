@@ -21,7 +21,7 @@ class CameraPolicy(private val freeHoldMs: Long = 10_000) {
     fun update(tMs: Long, lat: Double, lon: Double, speedMps: Double, psiRad: Double): CameraTarget? {
         val since = freeSinceMs
         if (since != null) {
-            if (tMs - since > freeHoldMs) freeSinceMs = null else return null
+            if (tMs < since || tMs - since > freeHoldMs) freeSinceMs = null else return null
         }
         if (speedMps >= 3.0 && psiRad.isFinite()) {
             lastBearing = ((Math.toDegrees(psiRad) % 360.0) + 360.0) % 360.0
