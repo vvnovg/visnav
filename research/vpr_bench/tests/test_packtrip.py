@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 
 import pytest
 
@@ -238,3 +239,60 @@ def test_route_without_points(tmp_path, fakes):
     assert _run(tmp_path, route=route) == 2
     calls, _ = fakes
     assert calls["refs"] == []
+
+
+def test_interrupted_swap_restores_old(tmp_path, fakes, capsys):
+    _, state = fakes
+    assert _run(tmp_path) == 0
+    trips = tmp_path / "root" / "trips"
+    os.replace(trips / "work", trips / ".work.old")  # сбой между двумя os.replace
+    capsys.readouterr()
+    assert _run(tmp_path) == 2
+    err = capsys.readouterr().err
+    assert "restored" in err and "trip exists" in err
+    assert (trips / "work" / "trip.json").exists()
+    assert not (trips / ".work.old").exists()
+    os.replace(trips / "work", trips / ".work.old")
+    state["tag"] = b"v2"
+    assert _run(tmp_path, "work", "--force") == 0
+    assert (trips / "work" / "roadpack.bin").read_bytes() == b"RDv2"
+    assert _no_temp(tmp_path / "root")
+
+
+@pytest.mark.parametrize("existing", [True, False])
+def test_swap_failure_keeps_old_trip_and_root_model(tmp_path, fakes, monkeypatch, existing):
+    root = tmp_path / "root"
+    trips = root / "trips"
+    if existing:
+        assert _run(tmp_path) == 0
+        before = (trips / "work" / "trip.json").read_bytes()
+    else:
+        trips.mkdir(parents=True)
+    real_replace = os.replace
+
+    def failing(src, dst):
+        if os.path.basename(src) == ".work.tmp":
+            raise OSError("disk gone")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(m3cli.os, "replace", failing)
+    with pytest.raises(OSError, match="disk gone"):
+        _run(tmp_path, "work", "--force")
+    monkeypatch.setattr(m3cli.os, "replace", real_replace)
+    assert _no_temp(root)
+    if existing:
+        assert (trips / "work" / "trip.json").read_bytes() == before
+        assert (root / "model.onnx").read_bytes() == b"M1"
+    else:
+        assert not (trips / "work").exists()
+        assert not (root / "model.onnx").exists()
+
+
+def test_force_without_root_model_ignores_replaced_trip(tmp_path, fakes):
+    assert _run(tmp_path) == 0
+    root = tmp_path / "root"
+    (root / "model.onnx").unlink()
+    assert _run(tmp_path, "work", "--force", model=b"M2") == 0
+    assert (root / "model.onnx").read_bytes() == b"M2"
+    meta = json.loads((root / "trips" / "work" / "trip.json").read_text(encoding="utf-8"))
+    assert meta["onnx_sha256"] == hashlib.sha256(b"M2").hexdigest()

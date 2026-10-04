@@ -35,7 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--log", action="append", default=[], type=Path)
     m.add_argument("--buffer-m", type=float, default=500.0)
     m.add_argument("--out", required=True, type=Path)
-    t = sub.add_parser("pack-trip", help="собрать пакет поездки (эталоны, дороги, карта, маршрут) в <out>/trips/<name>")
+    t = sub.add_parser("pack-trip", help="собрать пакет поездки (эталоны, дороги, карта, маршрут) в <out>/trips/<name>; "
+                                         "модель общая: источник истины — <out>/model.onnx, без него модель сверяется "
+                                         "с остальными поездками (заменяемая не учитывается)")
     t.add_argument("--route", required=True, type=Path)
     t.add_argument("--name", required=True)
     t.add_argument("--refs", required=True, type=Path)
@@ -138,6 +140,11 @@ def _shared_model_shas(root: Path, skip: str | None) -> set[str]:
 
 
 def _pack_trip(args: argparse.Namespace) -> int:
+    """Собрать <out>/trips/<name> атомарно: сборка в trips/.<name>.tmp, затем подмена.
+
+    Модель общая для всех поездок. Источник истины — <out>/model.onnx; если его нет, модель сверяется
+    с onnx_sha256 остальных поездок (заменяемая через --force поездка не учитывается).
+    """
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", args.name):
         print("error: bad trip name", file=sys.stderr)
         return 2
@@ -151,6 +158,11 @@ def _pack_trip(args: argparse.Namespace) -> int:
         return 2
     trips = args.out / "trips"
     trip = trips / args.name
+    tmp = trips / f".{args.name}.tmp"
+    old = trips / f".{args.name}.old"
+    if old.exists() and not trip.exists():
+        os.replace(old, trip)
+        print(f"note: restored {trip} from an interrupted swap", file=sys.stderr)
     if trip.exists() and not args.force:
         print("error: trip exists, pass --force", file=sys.stderr)
         return 2
@@ -164,11 +176,10 @@ def _pack_trip(args: argparse.Namespace) -> int:
         print(f"error: trip model differs from the shared model of {args.out} — all trips share one model",
               file=sys.stderr)
         return 2
-    tmp = trips / f".{args.name}.tmp"
-    old = trips / f".{args.name}.old"
-    for leftover in (tmp, old):
-        if leftover.exists():
-            shutil.rmtree(leftover)
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    if old.exists() and trip.exists():
+        shutil.rmtree(old)
     tmp.mkdir(parents=True)
     ok = False
     try:
@@ -212,11 +223,6 @@ def _pack_trip(args: argparse.Namespace) -> int:
             "nfr8_target_mb_per_100km": 50,
         }
         (tmp / "trip.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        # модель — в корень до подмены: сбой после этого не оставит поездку без модели
-        if root_model.exists():
-            (tmp / "model.onnx").unlink()
-        else:
-            os.replace(tmp / "model.onnx", root_model)
         if trip.exists():
             os.replace(trip, old)
             try:
@@ -231,6 +237,11 @@ def _pack_trip(args: argparse.Namespace) -> int:
     finally:
         if not ok:
             shutil.rmtree(tmp, ignore_errors=True)
+    # модель — в корень только после подмены; до этого она лежит в каталоге поездки и приложение берёт её оттуда
+    if root_model.exists():
+        (trip / "model.onnx").unlink()
+    else:
+        os.replace(trip / "model.onnx", root_model)
     print(f"trip {args.name}: {route_km:.1f} km, refs {sizes['refs']:.2f} MB, roads {sizes['roads']:.2f} MB, "
           f"map {sizes['map']:.2f} MB, total {total_mb:.2f} MB = {per_100:.2f} MB per 100 km "
           f"(NFR-8 target 50, incl. refs) -> {trip}")
