@@ -115,7 +115,7 @@ fun buildManeuvers(route: Route, index: RoadIndex): List<Maneuver> {
             continue
         }
         if (cur.edge == prev.edge && cur.forward != prev.forward) {
-            // Разворот на том же ребре — только в тупике (узел степени 1, в том числе обрезанная дорога у края коридора).
+            // Разворот на том же ребре — только в тупике (узел степени 1).
             val bIn = if (prev.forward) index.bearing[prev.edge] else wrapAngle(index.bearing[prev.edge] + PI)
             out.add(Maneuver(ManeuverType.UTURN, at, pe, pn, pack.name(cur.edge), angleDeg = 180.0))
             lastBIn = bIn

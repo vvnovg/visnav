@@ -233,11 +233,28 @@ class RouterTest {
 
     @Test fun noUturnAtCorridorBoundary() {
         // Та же геометрия, что в deadEndUturnLosesToBlockLoop, но без петли: отросток B(200,0)–S(200,−50).
-        // Если S — край коридора (дорога за ним обрезана), разворота в S нет, и маршрута назад нет вовсе.
+        // Если S — край коридора (дорога за ним обрезана), разворота в S нет: по курсу (на восток) маршрута назад нет,
+        // и поиск повторяется по всем кандидатам — старт против курса на запад: 100 м = 10 с + штраф 60 с.
         val nodes = listOf(0.0 to 0.0, 100.0 to 0.0, 200.0 to 0.0, 200.0 to -50.0)
         val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2), EdgeSpec(2, 3, 3))
         val p = pack(nodes, edges, speeds = List(3) { 36 }, boundary = intArrayOf(3))
-        assertNull(Router(RoadIndex(p, enu)).route(150.0, 0.0, Math.PI / 2, 50.0, 0.0))
+        val r = assertNotNull(Router(RoadIndex(p, enu)).route(150.0, 0.0, Math.PI / 2, 50.0, 0.0))
+        assertEquals(listOf(RouteStep(1, false), RouteStep(0, false)), r.steps)
+        assertEquals(100.0, r.lengthM, 1e-6)
+        assertEquals(10.0 + RouterConfig().wrongHeadingPenaltyS, r.durationS, 1e-6)
+        assertTrue(r.steps.zipWithNext().none { (a, b) -> a.edge == b.edge && a.forward != b.forward })
+    }
+
+    @Test fun headingFilterRouteSkipsFallback() {
+        // Геометрия uTurnAtDeadEndWhenHeadingAway (тупик настоящий): по курсу маршрут есть — через разворот в тупике,
+        // поэтому повторного поиска против курса нет. 350 м по 36 км/ч = 35 с + 120 с за разворот, без штрафа за курс.
+        val nodes = listOf(0.0 to 0.0, 300.0 to 0.0, 350.0 to 0.0)
+        val edges = listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 1))
+        val p = pack(nodes, edges, speeds = List(2) { 36 })
+        val r = assertNotNull(Router(RoadIndex(p, enu)).route(250.0, 0.0, Math.PI / 2, 100.0, 0.0))
+        assertEquals(RouteStep(0, true), r.steps.first())
+        assertEquals(350.0, r.lengthM, 1e-6)
+        assertEquals(35.0 + RouterConfig().deadEndUturnPenaltyS, r.durationS, 1e-6)
     }
 
     @Test fun loopUsedWhenStubEndsAtBoundary() {

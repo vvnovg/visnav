@@ -40,7 +40,9 @@ data class RouterConfig(
 
 /**
  * A* по направленным рёбрам графа коридора: односторонние улицы, запреты поворотов (no_* / only_*), стоимость —
- * время в пути. Разворот на том же ребре — только в тупике, со штрафом deadEndUturnPenaltyS.
+ * время в пути. Разворот на том же ребре — только в тупике, со штрафом deadEndUturnPenaltyS; у края коридора
+ * (roadpack v3) разворота нет. С курсом поиск идёт от стартов по курсу; если от них маршрута нет, поиск повторяется
+ * один раз по всем стартам в пределах startSlackM, и старт против курса стоит wrongHeadingPenaltyS.
  */
 class Router(private val index: RoadIndex, private val config: RouterConfig = RouterConfig()) {
     private val pack = index.pack
@@ -87,11 +89,18 @@ class Router(private val index: RoadIndex, private val config: RouterConfig = Ro
         }
         // С курсом: сначала кандидаты, в чью сторону едем (≤ 90°), затем запас startSlackM внутри них; если таких нет —
         // запас по всем кандидатам (штраф за встречное направление тогда остаётся).
-        val starts = (if (headingRad == null) null else
+        val headed = if (headingRad == null) null else
             startsAll.filter { abs(wrapAngle(headingRad - travelBearing(it.proj.edge, it.forward))) <= PI / 2 }
-                .takeIf { it.isNotEmpty() }?.let { withinSlack(it) }) ?: withinSlack(startsAll)
+                .takeIf { it.isNotEmpty() }?.let { withinSlack(it) }
         val nearest = goalsAll.minOf { it.proj.distM }
         val goals = goalsAll.filter { it.proj.distM <= nearest + config.goalSlackM }
+        if (headed == null) return search(withinSlack(startsAll), goals, headingRad)
+        // По курсу маршрута нет (например, впереди край коридора, где разворот запрещён) — один повторный поиск по всем
+        // кандидатам; старт против курса оплачивается wrongHeadingPenaltyS.
+        return search(headed, goals, headingRad) ?: search(withinSlack(startsAll), goals, headingRad)
+    }
+
+    private fun search(starts: List<Cand>, goals: List<Cand>, headingRad: Double?): Route? {
         val goalOf = HashMap<Int, MutableList<Cand>>()
         for (g in goals) goalOf.getOrPut(state(g.proj.edge, g.forward)) { ArrayList() }.add(g)
 

@@ -119,11 +119,14 @@ class RoadPack(
                 ByteArray(len).also { b.get(it) }.toString(Charsets.UTF_8)
             }
             val rc = b.int
-            if (version == 2) require(rc >= 0 && b.remaining().toLong() == 13L * rc) {
-                "roadpack restriction table size mismatch (${b.remaining()} trailing bytes for $rc entries)"
+            // v2: после запретов файл кончается; v3: дальше идёт таблица края коридора (не меньше 4 байт счётчика).
+            val restrictionsFit = if (version == 2) {
+                b.remaining().toLong() == 13L * rc
+            } else {
+                b.remaining().toLong() >= 13L * rc + 4
             }
-            else require(rc >= 0 && b.remaining().toLong() >= 13L * rc + 4) {
-                "roadpack restriction table truncated (${b.remaining()} trailing bytes for $rc entries)"
+            require(rc >= 0 && restrictionsFit) {
+                "roadpack restriction table size mismatch (${b.remaining()} trailing bytes for $rc entries, v$version)"
             }
             val restrictions = List(rc) {
                 val f = b.int; val v = b.int; val t = b.int
