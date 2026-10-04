@@ -58,6 +58,7 @@ data class UiState(
     val gnssReasons: Set<GnssReason> = emptySet(),
     val roadsLoaded: Boolean = false,
     val road: RoadInfo? = null,
+    val nav: NavUi? = null,
 )
 
 /** Журнал траектории фильтра: заголовок и по строке на кадр. */
@@ -89,6 +90,7 @@ class M1Controller(private val context: Context) {
     @Volatile private var sensorLog: SensorLogger? = null
     @Volatile private var descLog: DescriptorLogWriter? = null
     @Volatile private var fusionLog: FusionLog? = null
+    @Volatile private var navSession: NavSession? = null
     /** Выпускает остаток очереди переупорядочителя (на executor) и возвращает число опоздавших событий. */
     @Volatile private var flush: (() -> Pair<Int, Int>)? = null
     /** Периодический drain на executor, независимо от кадров (иначе очередь растёт, если кадры встали). */
@@ -111,6 +113,10 @@ class M1Controller(private val context: Context) {
             analyzer.set(FrameAnalyzer(intervalMs = 500, inputW = b.meta.inputW, inputH = b.meta.inputH))
             _state.update { it.copy(loaded = true, roadsLoaded = b.roads != null,
                 status = "База: ${b.pack.count} эталонов, модель ${b.meta.model}") }
+            if (File(dataDir, "route.json").isFile && b.roads == null) {
+                _state.update { it.copy(status = it.status + " · route.json без графа дорог — маршрут не строится") }
+            }
+            b.routeWarning?.let { w -> _state.update { it.copy(status = it.status + " · " + w) } }
             // Parity — диагностика, а не условие готовности: провал не должен блокировать запись.
             try {
                 val parity = ParityCheck.runIfPresent(dataDir, b.embedder, File(logDir, "parity.json"))
@@ -167,7 +173,7 @@ class M1Controller(private val context: Context) {
             // дописываются к этому статусу через "it.status + ...", а не затираются им — раньше
             // финальный _state.update шёл последним и стирал их целиком.
             _state.update { it.copy(running = true, frames = 0, errors = 0, status = "Запись: ${mode.name}",
-                navMode = null, sigmaM = null, gnssReasons = emptySet(), road = null) }
+                navMode = null, sigmaM = null, gnssReasons = emptySet(), road = null, nav = null) }
             logDir.mkdirs()
             val startedMs = System.currentTimeMillis()
             val base = "session-$startedMs-${mode.name.lowercase()}"
@@ -191,10 +197,19 @@ class M1Controller(private val context: Context) {
             val fLog = FusionLog(File(logDir, "$base.fusion.jsonl"))
             fusionLog = fLog
             fLog.line(TrajectoryFormat.fusionHeader(startedMs, b.meta.createdAt, b.roadsMeta?.createdAt))
+            // start() вызывается из UI (кнопка «Старт»), т. е. на главном потоке — TextToSpeech создаётся здесь.
+            val nav = if (b.roads != null && b.destination != null) {
+                NavSession(context, b.roads, b.destination, File(logDir, "$base.nav.jsonl"), startedMs,
+                    b.roadsMeta!!.createdAt) {
+                    _state.update { it.copy(status = it.status + " · Голосовые подсказки недоступны") }
+                }
+            } else null
+            navSession = nav
             val localizer = Localizer(b.pack, LocalizerConfig(), b.roads)
             val reorderer = EventReorderer()
             var sensorFailureReported = false
             var frameFailureReported = false
+            var navFailureReported = false
             // Весь доступ к Localizer — только на потоке кадров (executor), через sink переупорядочителя.
             val sink: (ReorderItem) -> Unit = { item ->
                 when (item) {
@@ -211,7 +226,18 @@ class M1Controller(private val context: Context) {
                         val out = localizer.onFrame(item.frameTMs, item.desc)
                         if (out != null) {
                             fLog.line(TrajectoryFormat.row(out, false, null))
-                            _state.update { it.copy(navMode = out.mode, sigmaM = out.sigmaM, gnssReasons = out.reasons, road = out.road) }
+                            val navUi = try {
+                                nav?.onOutput(out)
+                            } catch (ex: Exception) {
+                                // Сбой ведения не останавливает запись; учитываем один раз, без обновления UI на каждый кадр.
+                                if (!navFailureReported) {
+                                    navFailureReported = true
+                                    _state.update { it.copy(errors = it.errors + 1, status = "Ошибка маршрута: ${ex.message}") }
+                                }
+                                null
+                            }
+                            _state.update { it.copy(navMode = out.mode, sigmaM = out.sigmaM, gnssReasons = out.reasons,
+                                road = out.road, nav = navUi ?: it.nav) }
                         }
                     } catch (e: Exception) {
                         // Сбой фильтра на кадре не останавливает запись.
@@ -334,11 +360,14 @@ class M1Controller(private val context: Context) {
             descLog = null
             val fl = fusionLog
             fusionLog = null
+            val ns = navSession
+            navSession = null
             val failedCount = sLog?.failed ?: 0
             val closeErrors = mutableListOf<String>()
             closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
             closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
             closeQuietly("журнала фильтра", fl)?.let { closeErrors.add(it) }
+            closeQuietly("журнала маршрута", ns)?.let { closeErrors.add(it) }
             try {
                 log?.close()
             } catch (closeError: Exception) {
@@ -352,7 +381,7 @@ class M1Controller(private val context: Context) {
             }
             _state.update { it.copy(running = false, status = "Ошибка запуска: ${e.message}$suffix",
                 navMode = null, sigmaM = null,
-                gnssReasons = emptySet(), road = null) }
+                gnssReasons = emptySet(), road = null, nav = null) }
         }
     }
 
@@ -373,6 +402,8 @@ class M1Controller(private val context: Context) {
         descLog = null
         val fl = fusionLog
         fusionLog = null
+        val ns = navSession
+        navSession = null
         stopDrainTimer()
         val flushFn = flush
         flush = null
@@ -395,6 +426,7 @@ class M1Controller(private val context: Context) {
             closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
             closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
             closeQuietly("журнала фильтра", fl)?.let { closeErrors.add(it) }
+            closeQuietly("журнала маршрута", ns)?.let { closeErrors.add(it) }
             val suffix = buildString {
                 if (late > 0) append(" · опоздавших событий фильтра: $late")
                 if (dropped > 0) append(" · отброшено событий фильтра: $dropped")
@@ -404,7 +436,7 @@ class M1Controller(private val context: Context) {
             }
             _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}$suffix",
                 navMode = null, sigmaM = null,
-                gnssReasons = emptySet(), road = null) }
+                gnssReasons = emptySet(), road = null, nav = null) }
         }
     }
 
@@ -430,6 +462,8 @@ class M1Controller(private val context: Context) {
         descLog = null
         val fl = fusionLog
         fusionLog = null
+        val ns = navSession
+        navSession = null
         stopDrainTimer()
         val flushFn = flush
         flush = null
@@ -439,6 +473,7 @@ class M1Controller(private val context: Context) {
         closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
         closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
         closeQuietly("журнала фильтра", fl)?.let { closeErrors.add(it) }
+        closeQuietly("журнала маршрута", ns)?.let { closeErrors.add(it) }
         try {
             log.close()
         } catch (closeError: Exception) {
@@ -450,7 +485,7 @@ class M1Controller(private val context: Context) {
         }
         _state.update { it.copy(running = false, status = "$message$suffix",
                 navMode = null, sigmaM = null,
-                gnssReasons = emptySet(), road = null) }
+                gnssReasons = emptySet(), road = null, nav = null) }
     }
 
     /** Освобождает камеру/GPS/логгер/модель. Вызывать один раз при уничтожении владельца. */
@@ -467,6 +502,8 @@ class M1Controller(private val context: Context) {
         descLog = null
         val fl = fusionLog
         fusionLog = null
+        val ns = navSession
+        navSession = null
         // bundle читаем внутри задачи на том же executor, а не здесь: если close() позвали, пока
         // init ещё грузит бандл на этом же executor, эта задача выполнится после неё и увидит уже
         // присвоенный bundle — иначе только что созданный OrtEmbedder не закрылся бы никогда.
@@ -481,6 +518,7 @@ class M1Controller(private val context: Context) {
             closeQuietly("журнала датчиков", sLog)?.let { closeErrors.add(it) }
             closeQuietly("журнала дескрипторов", dLog)?.let { closeErrors.add(it) }
             closeQuietly("журнала фильтра", fl)?.let { closeErrors.add(it) }
+            closeQuietly("журнала маршрута", ns)?.let { closeErrors.add(it) }
             if (failedCount > 0 || closeErrors.isNotEmpty()) {
                 val suffix = buildString {
                     if (failedCount > 0) append(" · ошибок записи датчиков: $failedCount")

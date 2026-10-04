@@ -41,4 +41,50 @@ class RoadPackTest {
         assertEquals(6.0, RoadClass.lateralSigmaM(RoadClass.PRIMARY))
         assertEquals(4.0, RoadClass.lateralSigmaM(RoadClass.RESIDENTIAL))
     }
+
+    private val fixtureV2 = File("../../research/vpr_bench/tests/data/roadpack_v2_fixture")
+
+    @Test fun parsesV2Fixture() {
+        val pack = RoadPack.parse(ByteBuffer.wrap(File(fixtureV2, "roadpack.bin").readBytes()))
+        assertEquals("Тверская улица", pack.name(0)); assertEquals(null, pack.name(1))
+        assertEquals(20 / 3.6, pack.speedMps(0), 1e-9); assertEquals(48 / 3.6, pack.speedMps(1), 1e-9)
+        assertTrue(pack.roundabout(1)); assertFalse(pack.roundabout(0))
+        assertEquals(listOf(TurnRestriction(0, 1, 1, false), TurnRestriction(1, 1, 0, true)), pack.restrictions)
+    }
+
+    @Test fun v1FixtureGetsDefaults() {
+        val pack = RoadPack.parse(ByteBuffer.wrap(File(fixture, "roadpack.bin").readBytes()))
+        assertEquals(RoadClass.defaultSpeedKmh(RoadClass.RESIDENTIAL) / 3.6, pack.speedMps(0), 1e-9)
+        assertEquals(null, pack.name(0)); assertTrue(pack.restrictions.isEmpty())
+    }
+
+    @Test fun rejectsV2TrailingBytes() {
+        val raw = File(fixtureV2, "roadpack.bin").readBytes()
+        assertFailsWith<IllegalArgumentException> { RoadPack.parse(ByteBuffer.wrap(raw + byteArrayOf(0))) }
+    }
+
+    @Test fun defaultSpeedTable() {
+        assertEquals(listOf(90, 70, 60, 50, 40, 30, 20, 10, 10), (1..9).map { RoadClass.defaultSpeedKmh(it) })
+    }
+
+    @Test fun rejectsTruncatedV2() {
+        val raw = File(fixtureV2, "roadpack.bin").readBytes()
+        val bb = ByteBuffer.wrap(raw).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val n = bb.getInt(8); val m = bb.getInt(12)
+        val namesAt = 16 + 16 * n + 18 * m + 5 * m
+        for (cut in listOf(10, 16 + 8 * n, 16 + 16 * n + 18 * m + 2, namesAt + 2, namesAt + 5, raw.size - 7, raw.size - 1)) {
+            assertFailsWith<IllegalArgumentException>("cut=$cut") { RoadPack.parse(ByteBuffer.wrap(raw.copyOf(cut))) }
+        }
+        val huge = raw.copyOf()
+        ByteBuffer.wrap(huge).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(namesAt, 0x7FFFFFFF)
+        assertFailsWith<IllegalArgumentException> { RoadPack.parse(ByteBuffer.wrap(huge)) }
+    }
+
+    @Test fun rejectsBadRestrictionKind() {
+        val raw = File(fixtureV2, "roadpack.bin").readBytes()
+        for (bad in listOf(0, 3)) {
+            val c = raw.copyOf(); c[c.size - 1] = bad.toByte()
+            assertFailsWith<IllegalArgumentException>("kind=$bad") { RoadPack.parse(ByteBuffer.wrap(c)) }
+        }
+    }
 }

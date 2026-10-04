@@ -59,6 +59,7 @@ data class TrajPoint(
     val mode: NavMode, val health: GnssHealth, val reasons: Set<GnssReason>,
     val injected: String? = null,
     val road: RoadInfo? = null,
+    val psiRad: Double = Double.NaN, val speedMps: Double = Double.NaN,
 )
 
 /** Прогон записанной сессии через общий [Localizer] с искусственными пропаданиями, глушением и подменой GNSS. */
@@ -98,6 +99,7 @@ class Replayer(private val pack: RefPack, private val config: ReplayConfig, priv
                     out.add(TrajPoint(
                         o.tMs, o.lat, o.lon, o.sigmaM, inOutage(t), o.visSim, o.visAccepted, o.visState,
                         o.stationary, o.mode, o.health, o.reasons, injected(t), o.road,
+                        o.psiRad, o.speedMps,
                     ))
                 }
                 is LocEvent -> {

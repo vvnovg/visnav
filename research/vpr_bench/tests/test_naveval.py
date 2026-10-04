@@ -1,0 +1,227 @@
+import json
+
+from vpr_bench.fieldlog import FieldFrame
+from vpr_bench.geo import offset_m
+from vpr_bench.m3cli import main
+from vpr_bench.naveval import evaluate_nav, read_nav, render_nav_report
+
+T0 = 1_700_000_000_000
+LAT0, LON0 = 55.75, 37.6
+
+
+def _ll(e, n):
+    return list(offset_m(LAT0, LON0, e, n))
+
+
+def _frames(path):
+    """path: [(e, n)] по секунде."""
+    out = []
+    for s, (e, n) in enumerate(path):
+        lat, lon = offset_m(LAT0, LON0, e, n)
+        out.append(FieldFrame(T0 + 1000 * s, "gps", (lat, lon, 4.0, T0 + 1000 * s), None,
+                              {"pre": 0.0, "inf": 0.0, "search": 0.0}))
+    return out
+
+
+EAST_THEN_SOUTH = [(10.0 * s, 0.0) for s in range(101)] + [(1000.0, -10.0 * s) for s in range(1, 51)]
+
+
+def _route(t_s, reroute=False, turn_at=(1000.0, 0.0), poly=((0, 0), (1000, 0), (1000, -500)), at_m=1000.0,
+           mtype="right"):
+    return {"t_ms": T0 + int(t_s * 1000), "ev": "route", "reroute": reroute, "length_m": 1500.0, "duration_s": 100.0,
+            "polyline": [_ll(*p) for p in poly],
+            "maneuvers": [{"type": "depart", "at_m": 0.0, "lat": LAT0, "lon": LON0, "street": None, "exit": 0},
+                          {"type": mtype, "at_m": at_m, "lat": _ll(*turn_at)[0], "lon": _ll(*turn_at)[1],
+                           "street": "Б", "exit": 0},
+                          {"type": "arrive", "at_m": 1500.0, "lat": _ll(1000, -500)[0], "lon": _ll(1000, -500)[1],
+                           "street": None, "exit": 0}]}
+
+
+def _prompt(t_s, i, stage, then=None):
+    return {"t_ms": T0 + int(t_s * 1000), "ev": "prompt", "maneuver": i, "then": then, "stage": stage, "dist_m": 0.0,
+            "text": "x"}
+
+
+def _header(**kw):
+    h = {"type": "nav", "session_started_ms": T0, "roads": "r", "dest": _ll(1000, -500), "outages": [], "jams": [],
+         "spoofs": []}
+    h.update(kw)
+    return h
+
+
+def test_prompt_in_time_and_arrival():
+    ev = [_route(0), _prompt(90, 1, "near"), _prompt(97, 1, "now"), {"t_ms": T0 + 150_000, "ev": "arrive"}]
+    r = evaluate_nav(_header(), ev, _frames(EAST_THEN_SOUTH))
+    # Пересечение цепочки 1000 м происходит ровно на 100-й секунде (раньше срабатывал круг 20 м — около 98-й).
+    assert len(r.checks) == 1 and 99.5 <= r.checks[0].reached_t <= 100.5
+    assert 9.5 <= r.checks[0].prompt_lead_s <= 10.5
+    assert r.arrived and r.end_dist_m < 1.0
+    rep = render_nav_report(r)
+    assert "✅" in [l for l in rep.splitlines() if "вовремя" in l][0]
+
+
+def test_late_prompt_fails():
+    ev = [_route(0), _prompt(99, 1, "now")]
+    r = evaluate_nav(_header(), ev, _frames(EAST_THEN_SOUTH))
+    assert r.checks[0].prompt_lead_s < 3.0
+    assert "❌" in [l for l in render_nav_report(r).splitlines() if "вовремя" in l][0]
+
+
+def test_chained_then_prompt_counts_for_next_maneuver():
+    # near для манёвра 0 со сцепкой «затем» на манёвр 1 — засчитывается манёвру 1.
+    ev = [_route(0), _prompt(90, 0, "near", then=1)]
+    r = evaluate_nav(_header(), ev, _frames(EAST_THEN_SOUTH))
+    assert r.checks[0].maneuver == 1 and r.checks[0].prompt_lead_s >= 3.0
+    assert "✅" in [l for l in render_nav_report(r).splitlines() if "вовремя" in l][0]
+
+
+def test_late_first_gps_sample_still_reaches_maneuver():
+    # Маршрут построен на 50-й секунде от (500,0); первая точка GPS — только на 72-й, в (720,0): цепочка 220 м уже
+    # за начальным окном 200 м. Окно растёт со временем от построения: 200 + 70·22 = 1740 м.
+    frames = [f for f in _frames(EAST_THEN_SOUTH) if f.t_ms >= T0 + 72_000]
+    ev = [_route(50, poly=((500, 0), (1000, 0), (1000, -500)), at_m=500.0), _prompt(90, 1, "near")]
+    r = evaluate_nav(_header(), ev, frames)
+    assert len(r.checks) == 1 and 99.5 <= r.checks[0].reached_t <= 100.5
+    assert 9.5 <= r.checks[0].prompt_lead_s <= 10.5
+
+
+def test_window_split():
+    ev = [_route(0), _prompt(90, 1, "near")]
+    r = evaluate_nav(_header(outages=[[T0 + 95_000, T0 + 120_000]]), ev, _frames(EAST_THEN_SOUTH))
+    assert r.checks[0].in_window
+    # Окно закончилось за 15 с до манёвра (окно перекрытия 10 с) — вне окна.
+    r2 = evaluate_nav(_header(outages=[[T0 + 70_000, T0 + 85_000]]), ev, _frames(EAST_THEN_SOUTH))
+    assert not r2.checks[0].in_window
+    # Окно закончилось за 8 с до манёвра — внутри окна [reached-10, reached].
+    r3 = evaluate_nav(_header(outages=[[T0 + 70_000, T0 + 92_000]]), ev, _frames(EAST_THEN_SOUTH))
+    assert r3.checks[0].in_window
+
+
+def test_false_and_true_reroutes():
+    # Перестроение в 50 с, когда по GPS машина на маршруте (n = 0) — ложное.
+    ev = [_route(0), _route(50, reroute=True)]
+    r = evaluate_nav(_header(), ev, _frames(EAST_THEN_SOUTH))
+    assert r.n_reroutes == 1 and r.false_reroutes == 1
+    # Та же поездка, но маршрут вёл на север; перестроение после съезда — не ложное.
+    north = _route(0, turn_at=(1000.0, 0.0), poly=((0, 0), (1000, 0), (1000, 500)))
+    r2 = evaluate_nav(_header(), [north, _route(130, reroute=True)], _frames(EAST_THEN_SOUTH))
+    assert r2.false_reroutes == 0
+
+
+def test_unreached_maneuver_excluded():
+    other = _route(0, turn_at=(3000.0, 0.0), poly=((0, 0), (3000, 0), (3000, -500)), at_m=3000.0)
+    r = evaluate_nav(_header(), [other], _frames(EAST_THEN_SOUTH))
+    assert r.checks == [] and r.n_not_driven == 1
+    assert "⚠️ нет данных" in render_nav_report(r)
+
+
+def test_uturn_parallel_carriageway_reached_on_return_pass():
+    path = ([(10.0 * s, 0.0) for s in range(51)] + [(500.0, -12.0)]
+            + [(500.0 - 10.0 * k, -12.0) for k in range(1, 41)] + [(100.0, -12.0 - 10.0 * j) for j in range(1, 21)])
+    poly = ((0, 0), (500, 0), (500, -12), (100, -12), (100, -212))
+    ev = [_route(0, turn_at=(100.0, -12.0), poly=poly, at_m=912.0, mtype="left"), _prompt(83, 1, "near")]
+    r = evaluate_nav(_header(), ev, _frames(path))
+    assert len(r.checks) == 1 and 90.5 <= r.checks[0].reached_t <= 91.5  # не на прямом проходе (~10 с)
+    assert 7.5 <= r.checks[0].prompt_lead_s <= 8.5
+
+
+def test_fast_pass_with_lane_offset_is_reached():
+    path = [(28.0 * s, -12.0) for s in range(50)]
+    ev = [_route(0), _prompt(20, 1, "near")]
+    r = evaluate_nav(_header(), ev, _frames(path))
+    assert len(r.checks) == 1 and 35.0 <= r.checks[0].reached_t <= 36.5
+    assert r.checks[0].prompt_lead_s >= 3.0
+
+
+def test_route_failed_then_retry_compared_with_kept_route():
+    ev = [_route(0), {"t_ms": T0 + 40_000, "ev": "route_failed"}, _route(50, reroute=True)]
+    r = evaluate_nav(_header(), ev, _frames(EAST_THEN_SOUTH))
+    assert r.n_reroutes == 1 and r.false_reroutes == 1
+
+
+def test_prompts_of_previous_route_not_credited():
+    # Новый маршрут начинается там, где машина в момент его построения (920 м): старт поиска — первые 200 м ломаной.
+    ev = [_route(0), _prompt(90, 1, "near"), _route(92, poly=((920, 0), (1000, 0), (1000, -500)), at_m=80.0)]
+    r = evaluate_nav(_header(), ev, _frames(EAST_THEN_SOUTH))
+    assert len(r.checks) == 1 and r.checks[0].route_idx == 1 and r.checks[0].prompt_lead_s is None
+
+
+def test_maneuver_too_close_to_route_start_excluded_and_listed():
+    r = evaluate_nav(_header(), [_route(98, poly=((980, 0), (1000, 0), (1000, -500)), at_m=20.0)],
+                     _frames(EAST_THEN_SOUTH))
+    assert r.checks == [] and len(r.excluded) == 1 and r.n_maneuvers == 1
+    rep = render_nav_report(r)
+    assert "исключено (слишком близко к началу маршрута): 1" in rep and "## Исключены" in rep
+
+
+def test_unverifiable_reroutes_not_counted_false():
+    # После конца трека (150 с) и в дыре трека (40..60 с) эталона нет.
+    r = evaluate_nav(_header(), [_route(0), _route(200, reroute=True)], _frames(EAST_THEN_SOUTH))
+    assert r.unverifiable_reroutes == 1 and r.false_reroutes == 0
+    frames = [f for f in _frames(EAST_THEN_SOUTH) if not 40 < (f.t_ms - T0) / 1000 < 60]
+    r2 = evaluate_nav(_header(), [_route(0), _route(50, reroute=True)], frames)
+    assert r2.unverifiable_reroutes == 1 and r2.false_reroutes == 0
+    assert "Непроверяемых перестроений (нет эталонной позиции): 1" in render_nav_report(r2)
+
+
+def test_reroute_far_from_first_route_uses_python_frame_chainage():
+    n0 = 11119.0  # ~0.1° широты от первого маршрута; длина ломаной в системе Python чуть короче at_m (cos φ)
+    path = [(20.0 * s, n0) for s in range(251)] + [(5000.0, n0 - 20.0 * k) for k in range(1, 26)]
+    poly = ((0, n0), (5000, n0), (5000, n0 - 500))
+    rr = _route(5, reroute=True, turn_at=(5000.0, n0), poly=poly, at_m=5000.0)
+    rr["length_m"] = 5500.0
+    r = evaluate_nav(_header(), [_route(0), rr], _frames(path))
+    assert len(r.checks) == 1 and r.checks[0].route_idx == 1
+    assert abs(r.checks[0].reached_t - 250.0) <= 0.2  # без пересчёта at_m ошибка ≈ 0.75 с
+
+
+def test_reach_unknown_when_gps_gap_covers_the_turn():
+    frames = [f for f in _frames(EAST_THEN_SOUTH) if not 60 < (f.t_ms - T0) / 1000 < 140]
+    r = evaluate_nav(_header(), [_route(0), _prompt(90, 1, "near")], frames)
+    assert r.checks == [] and r.n_unknown == 1 and r.n_not_driven == 0
+    assert "неизвестно: 1" in render_nav_report(r)
+
+
+def test_cli_session_mismatch_and_ok(tmp_path):
+    nav = tmp_path / "n.jsonl"
+    nav.write_text("\n".join(json.dumps(x) for x in [_header(), _route(0), _prompt(90, 1, "near")]) + "\n")
+    log = tmp_path / "s.jsonl"
+    lines = [json.dumps({"type": "session", "started_ms": T0})]
+    for f in _frames(EAST_THEN_SOUTH):
+        g = {"lat": f.gps[0], "lon": f.gps[1], "acc_m": f.gps[2], "t_ms": f.gps[3]}
+        lines.append(json.dumps({"t_ms": f.t_ms, "mode": f.mode, "gps": g, "fix": None, "lat_ms": f.lat_ms}))
+    log.write_text("\n".join(lines) + "\n")
+    out = tmp_path / "r.md"
+    assert main(["nav-eval", "--nav", str(nav), "--log", str(log), "--out", str(out)]) == 0
+    assert "Подсказки о манёврах" in out.read_text()
+    bad = tmp_path / "b.jsonl"
+    bad.write_text(json.dumps(_header(session_started_ms=T0 + 1)) + "\n")
+    assert main(["nav-eval", "--nav", str(bad), "--log", str(log), "--out", str(out)]) == 2
+    _, ev = read_nav(nav)
+    assert ev[0]["ev"] == "route"
+
+
+def test_kotlin_golden_nav_log_reads():
+    # Файл пишет NavFormatTest.goldenNavLogMatchesCommittedFile (Kotlin); здесь — чтение тем же read_nav.
+    from pathlib import Path
+    header, ev = read_nav(Path(__file__).parent / "data" / "nav_golden.jsonl")
+    assert header["session_started_ms"] == 1_700_000_000_000 and header["roads"] == "2026-10-01T00:00:00Z"
+    assert header["dest"] == [55.748, 37.604] and header["outages"] == [[1_700_000_030_000, 1_700_000_045_000]]
+    assert header["jams"] == [] and header["spoofs"] == []
+    assert [e["ev"] for e in ev] == ["route", "prompt", "prompt", "prompt", "prompt", "arrive"]
+    rt = ev[0]
+    assert rt["t_ms"] == 1_700_000_001_000 and rt["reroute"] is False
+    assert rt["length_m"] == 650.0 and rt["duration_s"] == 75.5 and len(rt["polyline"]) == 4
+    assert rt["polyline"][0] == [55.75, 37.6]
+    assert [m["type"] for m in rt["maneuvers"]] == ["depart", "right", "left", "arrive"]
+    right = rt["maneuvers"][1]
+    assert right["at_m"] == 300.0 and right["street"] == "Тверская улица" and right["exit"] == 0
+    assert abs(right["lat"] - 55.75) < 1e-9 and abs(right["lon"] - 37.6048) < 1e-4
+    assert rt["maneuvers"][2]["street"] is None
+    far, near, now, arrive_prompt = ev[1:5]
+    assert far["then"] is None and far["stage"] == "far" and far["maneuver"] == 1 and far["dist_m"] == 300.0
+    assert near["then"] == 2 and near["stage"] == "near"
+    assert near["text"] == "Через 100 м поверните направо — Тверская улица, затем налево"
+    assert now["then"] == 2 and now["stage"] == "now" and now["t_ms"] == 1_700_000_027_000
+    assert arrive_prompt["maneuver"] == 3 and arrive_prompt["text"] == "Вы прибыли"
+    assert ev[5] == {"t_ms": 1_700_000_050_000, "ev": "arrive"}

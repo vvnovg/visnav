@@ -3,6 +3,8 @@ package io.visnav.replay
 import io.visnav.core.AccelEvent
 import io.visnav.core.ClockEvent
 import io.visnav.core.GyroEvent
+import io.visnav.core.NavEvent
+import io.visnav.core.NavFormat
 import io.visnav.core.RefPack
 import io.visnav.core.RefPackMeta
 import io.visnav.core.RoadPack
@@ -16,7 +18,7 @@ import kotlin.system.exitProcess
 
 private const val USAGE =
     "usage: replay --session <prefix> --refpack <dir> --out <file> [--outage START_S:LEN_S]... [--jam START_S:LEN_S]... " +
-        "[--spoof START_S:LEN_S:EAST_M:NORTH_M[:RAMP_S]]... [--no-visual] [--no-monitor] [--roads DIR] [--no-road-constraint]"
+        "[--spoof START_S:LEN_S:EAST_M:NORTH_M[:RAMP_S]]... [--no-visual] [--no-monitor] [--roads DIR] [--no-road-constraint] [--dest LAT,LON --nav-out FILE]"
 private const val FIRST_SENSOR_TIME_TOLERANCE_MS = 5_000.0
 private const val CLOCK_DRIFT_WARN_MS = 1_000L
 
@@ -25,6 +27,7 @@ fun main(args: Array<String>) {
     var visual = true
     var monitor = true
     var roadsDir: String? = null; var roadConstraint = true
+    var destSpec: String? = null; var navOut: String? = null
     val jamSpecs = mutableListOf<String>()
     val spoofSpecs = mutableListOf<String>()
     val outageSpecs = mutableListOf<String>()
@@ -41,6 +44,8 @@ fun main(args: Array<String>) {
             "--no-monitor" -> monitor = false
             "--roads" -> roadsDir = args.getOrNull(++i) ?: fail("--roads needs DIR")
             "--no-road-constraint" -> roadConstraint = false
+            "--dest" -> destSpec = args.getOrNull(++i) ?: fail("--dest needs LAT,LON")
+            "--nav-out" -> navOut = args.getOrNull(++i) ?: fail("--nav-out needs FILE")
             else -> fail("unknown argument ${args[i]}")
         }
         i++
@@ -90,6 +95,10 @@ fun main(args: Array<String>) {
         parseSpoof(spec, t0)
             ?: fail("bad --spoof $spec (expected START_S:LEN_S:EAST_M:NORTH_M[:RAMP_S], start >= 0, len > 0, ramp >= 0)")
     }
+    val dest = destSpec?.let { parseDest(it) ?: fail("bad --dest $it (expected LAT,LON within [-90,90],[-180,180])") }
+    if (dest != null && roadsDir == null) fail("--dest needs --roads")
+    if (navOut != null && dest == null) fail("--nav-out needs --dest")
+    if (dest != null && navOut == null) fail("--dest needs --nav-out")
     val roads = roadsDir?.let { dir ->
         try { loadRoads(File(dir)) } catch (e: IllegalArgumentException) { fail(e.message ?: "bad roadpack in $dir") }
     }
@@ -100,6 +109,16 @@ fun main(args: Array<String>) {
     }
     TrajectoryWriter.write(File(out), data, config, outages, points, jams, spoofs, roads?.second?.createdAt)
     println("${points.size} points (${points.count { it.inOutage }} in outages, ${points.count { it.road?.used == true }} with road constraint) -> $out")
+    if (dest != null && navOut != null) {
+        val (enu, events) = runNavigation(points, roads!!.first, dest.first, dest.second)
+        val header = NavFormat.header(data.header.startedMs, roads.second.createdAt, dest.first, dest.second,
+            outages.map { longArrayOf(it.startMs, it.endMs) }, jams.map { longArrayOf(it.startMs, it.endMs) },
+            spoofs.map { longArrayOf(it.startMs, it.endMs) })
+        writeNav(File(navOut), header, enu, events)
+        println("nav: ${events.count { it is NavEvent.Prompt }} prompts, " +
+            "${events.count { it is NavEvent.RouteReady && it.reroute }} reroutes, " +
+            "arrived=${events.any { it is NavEvent.Arrived }} -> $navOut")
+    }
 }
 
 /** Читает roadpack.json и roadpack.bin из каталога; бросает IllegalArgumentException с понятным текстом. */
@@ -158,6 +177,16 @@ private fun parseOutage(spec: String, t0: Long): Outage {
 }
 
 private fun finiteOrNull(s: String): Double? = s.toDoubleOrNull()?.takeIf { it.isFinite() }
+
+/** "LAT,LON" → пара; null при неверной форме или координатах вне диапазона. */
+internal fun parseDest(spec: String): Pair<Double, Double>? {
+    val parts = spec.split(",")
+    if (parts.size != 2) return null
+    val lat = finiteOrNull(parts[0].trim()) ?: return null
+    val lon = finiteOrNull(parts[1].trim()) ?: return null
+    if (lat !in -90.0..90.0 || lon !in -180.0..180.0) return null
+    return lat to lon
+}
 
 /** START_S:LEN_S → [Jam]; null при неверной форме, нефинитных числах, start < 0 или len <= 0. */
 internal fun parseJam(spec: String, t0: Long): Jam? {
