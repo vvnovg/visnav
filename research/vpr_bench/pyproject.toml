@@ -23,6 +23,7 @@ vpr-bench = "vpr_bench.cli:main"
 vpr-m1 = "vpr_bench.m1cli:main"
 vpr-m2 = "vpr_bench.m2cli:main"
 vpr-m3 = "vpr_bench.m3cli:main"
+vpr-m4 = "vpr_bench.m4cli:main"
 
 [build-system]
 requires = ["hatchling"]
