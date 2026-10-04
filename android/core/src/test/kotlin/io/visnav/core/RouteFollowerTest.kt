@@ -410,4 +410,41 @@ class RouteFollowerTest {
         assertTrue(r.ev.filterIsInstance<NavEvent.Prompt>().any { it.maneuver == uturn && it.stage == PromptStage.NOW },
             "prompts ${r.ev.filterIsInstance<NavEvent.Prompt>().map { it.maneuver to it.stage }}")
     }
+
+    /** Улица W(0,0)–A(100,0)–B(200,0) и отросток на юг до S(200,−50); S — край коридора (разворота там нет). */
+    private fun corridorEdge(): RoadIndex {
+        val nodes = listOf(0.0 to 0.0, 100.0 to 0.0, 200.0 to 0.0, 200.0 to -50.0)
+        val base = roadPackOf(enu, nodes, listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2), EdgeSpec(2, 3, 3)))
+        val p = RoadPack(base.lats, base.lons, base.way, base.from, base.to, base.flags, base.cls, boundary = intArrayOf(3))
+        return RoadIndex(p, enu)
+    }
+
+    private fun assertUturnFirst(ev: List<NavEvent>, reroute: Boolean) {
+        val ready = ev.filterIsInstance<NavEvent.RouteReady>().single()
+        assertEquals(reroute, ready.reroute)
+        assertTrue(ready.route.startsAgainstHeading)
+        val prompt = ev.filterIsInstance<NavEvent.Prompt>().single()
+        assertEquals(ManeuverType.UTURN, ready.maneuvers[prompt.maneuver].type)
+        assertEquals(PromptStage.NOW, prompt.stage)
+        assertEquals("Развернитесь", prompt.text)
+    }
+
+    @Test fun startAgainstHeadingPromptsUturnWithRoute() {
+        // Курс на восток к краю коридора, цель позади: маршрут только против курса, первая подсказка — «Развернитесь».
+        val f = RouteFollower(corridorEdge(), 20.0, 0.0)
+        assertUturnFirst(f.update(0, 150.0, 0.0, 5.0, Math.PI / 2, 15.0), reroute = false)
+    }
+
+    @Test fun rerouteAgainstHeadingPromptsUturn() {
+        // Маршрут на запад; машина уезжает на восток (30 м от начала маршрута > порога 20 м) — перестроение против курса
+        // (после rerouteCooldownMs от первого плана, t = 10 с).
+        val f = RouteFollower(corridorEdge(), 20.0, 0.0, NavConfig(offRouteM = 20.0))
+        val first = f.update(0, 150.0, 0.0, 5.0, -Math.PI / 2, 15.0)
+        assertTrue(!first.filterIsInstance<NavEvent.RouteReady>().single().route.startsAgainstHeading)
+        f.update(500, 145.0, 0.0, 5.0, -Math.PI / 2, 15.0)   // на маршруте: съезд дальше ждёт offRouteHoldMs
+        var t = 1000L
+        var ev: List<NavEvent> = emptyList()
+        while (t <= 10_000L && ev.none { it is NavEvent.RouteReady }) { ev = f.update(t, 180.0, 0.0, 5.0, Math.PI / 2, 15.0); t += 500 }
+        assertUturnFirst(ev, reroute = true)
+    }
 }

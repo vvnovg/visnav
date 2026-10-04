@@ -235,4 +235,18 @@ class ManeuversTest {
         assertEquals(listOf(ManeuverType.DEPART, ManeuverType.LEFT, ManeuverType.ARRIVE), types(ms))
         assertEquals("Б", ms[1].street)
     }
+
+    @Test fun startAgainstHeadingAddsUturnAtStart() {
+        val nodes = listOf(0.0 to 0.0, 300.0 to 0.0)
+        val idx = RoadIndex(named(nodes, listOf(EdgeSpec(0, 1, 1)), listOf("А")), enu)
+        val r = Route(
+            listOf(RouteStep(0, false)),
+            listOf(doubleArrayOf(200.0, 0.0), doubleArrayOf(50.0, 0.0)),
+            doubleArrayOf(0.0, 150.0), 15.0, startsAgainstHeading = true)
+        val ms = buildManeuvers(r, idx)
+        assertEquals(listOf(ManeuverType.DEPART, ManeuverType.UTURN, ManeuverType.ARRIVE), types(ms))
+        assertEquals(0.0, ms[1].atM); assertEquals("А", ms[1].street)
+        assertEquals(listOf(ManeuverType.DEPART, ManeuverType.ARRIVE),
+            types(buildManeuvers(Route(r.steps, r.points, r.cumM, r.durationS), idx)))
+    }
 }

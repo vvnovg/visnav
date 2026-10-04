@@ -2,6 +2,7 @@ package io.visnav.core
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -243,6 +244,7 @@ class RouterTest {
         assertEquals(100.0, r.lengthM, 1e-6)
         assertEquals(10.0 + RouterConfig().wrongHeadingPenaltyS, r.durationS, 1e-6)
         assertTrue(r.steps.zipWithNext().none { (a, b) -> a.edge == b.edge && a.forward != b.forward })
+        assertTrue(r.startsAgainstHeading)
     }
 
     @Test fun headingFilterRouteSkipsFallback() {
@@ -255,6 +257,7 @@ class RouterTest {
         assertEquals(RouteStep(0, true), r.steps.first())
         assertEquals(350.0, r.lengthM, 1e-6)
         assertEquals(35.0 + RouterConfig().deadEndUturnPenaltyS, r.durationS, 1e-6)
+        assertFalse(r.startsAgainstHeading)
     }
 
     @Test fun loopUsedWhenStubEndsAtBoundary() {
@@ -269,5 +272,19 @@ class RouterTest {
         val marked = pack(nodes, edges, speeds = List(edges.size) { 36 }, boundary = intArrayOf(3))
         val r = assertNotNull(Router(RoadIndex(marked, enu), cheapUturn).route(150.0, 0.0, Math.PI / 2, 50.0, 0.0))
         assertEquals(400.0, r.lengthM, 1e-6)
+    }
+
+    @Test fun fallbackDoesNotJumpToOppositeCarriageway() {
+        // Разделённая дорога без перемычки: своя часть на восток (way 1) и встречная на запад (way 2) обрезаны краем
+        // коридора в (2000, …). Машина посередине (обе части в пределах запаса), курс на восток, цель позади на встречной.
+        // По курсу маршрута нет (край впереди); повторный поиск — только по своей дороге (way 1), а она односторонняя,
+        // встречного направления у неё нет, поэтому маршрута нет. Без ограничения поиск взял бы встречную часть.
+        val nodes = listOf(0.0 to 0.0, 2000.0 to 0.0, 2000.0 to 15.0, 0.0 to 15.0)
+        val edges = listOf(EdgeSpec(0, 1, 1, RoadPack.FLAG_ONEWAY), EdgeSpec(2, 3, 2, RoadPack.FLAG_ONEWAY))
+        val p = pack(nodes, edges, boundary = intArrayOf(1, 2))
+        val router = Router(RoadIndex(p, enu))
+        assertNull(router.route(500.0, 7.5, Math.PI / 2, 100.0, 15.0))
+        // Без курса та же точка даёт маршрут по встречной части — значит, null выше обеспечен ограничением по way.
+        assertEquals(2L, p.way[assertNotNull(router.route(500.0, 7.5, null, 100.0, 15.0)).steps[0].edge])
     }
 }

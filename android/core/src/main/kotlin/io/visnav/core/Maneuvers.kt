@@ -95,6 +95,13 @@ fun buildManeuvers(route: Route, index: RoadIndex): List<Maneuver> {
     val out = ArrayList<Maneuver>()
     out.add(Maneuver(ManeuverType.DEPART, 0.0, route.points[0][0], route.points[0][1], pack.name(steps[0].edge)))
     var lastBIn = 0.0   // входящий азимут последнего добавленного поворота (для слияния)
+    if (route.startsAgainstHeading) {
+        // Маршрут начинается против курса: сначала развернуться (на месте старта, улица первого шага).
+        out.add(Maneuver(ManeuverType.UTURN, 0.0, route.points[0][0], route.points[0][1], pack.name(steps[0].edge),
+            angleDeg = 180.0))
+        val b = index.bearing[steps[0].edge]
+        lastBIn = if (steps[0].forward) wrapAngle(b + PI) else b
+    }
     var i = 1
     while (i < steps.size) {
         val prev = steps[i - 1]; val cur = steps[i]
