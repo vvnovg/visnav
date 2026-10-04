@@ -84,20 +84,20 @@ fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
     }
 }
 
-private fun modeLabel(m: NavMode) = when (m) {
+internal fun modeLabel(m: NavMode) = when (m) {
     NavMode.GNSS -> "GNSS"
     NavMode.FUSED -> "GNSS + камера"
     NavMode.VISUAL -> "Визуальная навигация"
     NavMode.DEAD_RECKONING -> "Счисление пути — точность снижена"
 }
 
-private fun modeColor(m: NavMode) = when (m) {
+internal fun modeColor(m: NavMode) = when (m) {
     NavMode.GNSS, NavMode.FUSED -> Color(0xFF2E7D32)
     NavMode.VISUAL -> Color(0xFF1565C0)
     NavMode.DEAD_RECKONING -> Color(0xFFEF6C00)
 }
 
-private fun reasonLabel(r: GnssReason): String = when (r) {
+internal fun reasonLabel(r: GnssReason): String = when (r) {
     GnssReason.NO_FIX -> "нет фикса"
     GnssReason.FEW_SATS -> "мало спутников"
     GnssReason.LOW_CN0 -> "слабый сигнал"

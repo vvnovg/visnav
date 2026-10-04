@@ -7,8 +7,23 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.material3.Text
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import org.maplibre.android.MapLibre
@@ -39,7 +54,29 @@ class MainActivity : ComponentActivity() {
         MapLibre.setConnected(false)
         setContent {
             val viewModel: M1ViewModel = viewModel()
-            MaterialTheme { M1Screen(viewModel.controller, granted.value) }
+            // Обе вкладки работают с одним контроллером (сессия записи не зависит от вкладки).
+            var tab by rememberSaveable { mutableIntStateOf(0) }
+            MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
+                Surface(Modifier.fillMaxSize()) {
+                    Column(Modifier.fillMaxSize()) {
+                        TabRow(selectedTabIndex = tab) {
+                            TABS.forEachIndexed { i, title ->
+                                Tab(selected = tab == i, onClick = { tab = i }, text = { Text(title) })
+                            }
+                        }
+                        Box(Modifier.weight(1f)) {
+                            when (tab) {
+                                0 -> NavScreen(viewModel.controller, granted.value)
+                                else -> M1Screen(viewModel.controller, granted.value)
+                            }
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    private companion object {
+        val TABS = listOf("Навигация", "Отладка")
     }
 }
