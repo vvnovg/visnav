@@ -21,19 +21,29 @@ import org.maplibre.android.maps.Style
  * MapLibre [MapView] inside Compose. Forwards lifecycle events and low-memory callbacks,
  * reloads the style whenever [styleJson] changes, disables the logo, the attribution button
  * (both lead to the internet) and tilt, and reports user gestures to [onUserGesture].
- * [onMapReady] is called once the first style has loaded.
+ *
+ * [onMapReady] is called once, after the first style has loaded (camera setup).
+ * [onStyleLoaded] is called after every style load, including the reload on a day/night switch.
+ * A reload replaces all sources and layers, so callers must look up GeoJSON sources from the
+ * [Style] passed here (or `map.style`) each time and must not cache source objects across loads.
+ *
+ * `onSaveInstanceState` is deliberately not forwarded: after recreation the follow camera
+ * re-centres the map, so there is no camera state worth restoring.
  */
 @Composable
 fun MapLibreMap(
     modifier: Modifier,
     styleJson: String,
     onMapReady: (MapLibreMap) -> Unit,
+    onStyleLoaded: (MapLibreMap, Style) -> Unit,
     onUserGesture: () -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val mapView = remember { MapView(context) }
+    // One MapView per lifecycle owner: a destroyed view is never handed to a new owner's onCreate.
+    val mapView = remember(lifecycleOwner) { MapView(context) }
     val currentOnMapReady = rememberUpdatedState(onMapReady)
+    val currentOnStyleLoaded = rememberUpdatedState(onStyleLoaded)
     val currentOnUserGesture = rememberUpdatedState(onUserGesture)
 
     DisposableEffect(lifecycleOwner, mapView) {
@@ -83,14 +93,15 @@ fun MapLibreMap(
     }
 
     // Style reload on every styleJson change (day <-> night); onMapReady after the first load only.
-    val firstStyle = remember { booleanArrayOf(true) }
+    val firstStyle = remember(mapView) { booleanArrayOf(true) }
     LaunchedEffect(mapView, styleJson) {
         mapView.getMapAsync { map ->
-            map.setStyle(Style.Builder().fromJson(styleJson)) {
+            map.setStyle(Style.Builder().fromJson(styleJson)) { style ->
                 if (firstStyle[0]) {
                     firstStyle[0] = false
                     currentOnMapReady.value(map)
                 }
+                currentOnStyleLoaded.value(map, style)
             }
         }
     }

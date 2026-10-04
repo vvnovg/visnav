@@ -33,6 +33,10 @@ class MainActivity : ComponentActivity() {
         }
         if (!granted.value) request.launch(permissions)
         MapLibre.getInstance(applicationContext)
+        // The app has no network permissions (removed in the manifest). With a fixed connectivity state
+        // MapLibre never calls ConnectivityManager.getActiveNetworkInfo() (MapView init, CONNECTIVITY_CHANGE
+        // receiver), which would throw SecurityException without ACCESS_NETWORK_STATE.
+        MapLibre.setConnected(false)
         setContent {
             val viewModel: M1ViewModel = viewModel()
             MaterialTheme { M1Screen(viewModel.controller, granted.value) }
