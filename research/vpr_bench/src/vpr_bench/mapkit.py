@@ -31,7 +31,7 @@ class MbtilesInfo:
 
 
 def check_mbtiles(path: Path) -> MbtilesInfo:
-    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
     try:
         meta = dict(db.execute("SELECT name, value FROM metadata"))
         fmt = meta.get("format", "")
@@ -60,6 +60,10 @@ def tile_bbox(z: int, x: int, y_tms: int) -> BBox:
 
 
 def clip_mbtiles(src: Path, dst: Path, corridor: Corridor, min_clip_zoom: int = 10) -> tuple[int, int]:
+    """Копия + VACUUM: на диске временно нужно около 3x размера исходника (src, dst и временная копия VACUUM).
+
+    bounds в metadata результата заменяются bbox коридора (с буфером).
+    """
     shutil.copyfile(src, dst)
     db = sqlite3.connect(dst)
     try:
@@ -72,6 +76,9 @@ def clip_mbtiles(src: Path, dst: Path, corridor: Corridor, min_clip_zoom: int = 
         if table == "tiles_shallow":
             db.execute("DELETE FROM tiles_data WHERE tile_data_id NOT IN (SELECT tile_data_id FROM tiles_shallow)")
         kept = db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        b = corridor.bbox()
+        db.execute("DELETE FROM metadata WHERE name = 'bounds'")
+        db.execute("INSERT INTO metadata VALUES ('bounds', ?)", (f"{b.min_lon},{b.min_lat},{b.max_lon},{b.max_lat}",))
         db.commit()
         db.execute("VACUUM")
     finally:

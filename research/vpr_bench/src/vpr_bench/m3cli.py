@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
+import zipfile
 from pathlib import Path
 
 from vpr_bench.db_builder import Corridor
@@ -37,17 +39,13 @@ def _pack_map(args: argparse.Namespace) -> int:
     if not tracks:
         print("error: need at least one --gpx or --log track", file=sys.stderr)
         return 2
+    out = args.out
     try:
         check_mbtiles(args.mbtiles)
-    except ValueError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 2
-    out = args.out
-    out.mkdir(parents=True, exist_ok=True)
-    kept, removed = clip_mbtiles(args.mbtiles, out / "corridor.mbtiles", Corridor(tracks, args.buffer_m))
-    try:
+        out.mkdir(parents=True, exist_ok=True)
         extract_glyphs(args.fonts_zip, out / "fonts")
-    except ValueError as e:
+        kept, removed = clip_mbtiles(args.mbtiles, out / "corridor.mbtiles", Corridor(tracks, args.buffer_m))
+    except (ValueError, sqlite3.Error, FileNotFoundError, zipfile.BadZipFile) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     info = check_mbtiles(out / "corridor.mbtiles")
