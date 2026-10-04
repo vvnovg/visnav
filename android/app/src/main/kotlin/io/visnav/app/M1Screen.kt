@@ -48,7 +48,11 @@ fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
             Text("Инференс: ${s.lastInfMs?.let { "%.0f мс".format(it) } ?: "—"}")
             Text("Точность GPS: ${s.gpsAccM?.let { "%.0f м".format(it) } ?: "нет сигнала"}")
             s.nav?.let { nav ->
-                Text(if (nav.arrived) "Вы прибыли" else nav.nextText ?: "Маршрут строится…",
+                Text(when {
+                    nav.arrived -> "Вы прибыли"
+                    nav.routeFailed -> "Маршрут не найден"
+                    else -> nav.nextText ?: "Маршрут строится…"
+                },
                     style = MaterialTheme.typography.titleMedium)
                 if (nav.routeKm != null && nav.routeMin != null && !nav.arrived) {
                     Text("Маршрут: ${"%.1f".format(nav.routeKm)} км, ~${nav.routeMin.roundToInt()} мин")

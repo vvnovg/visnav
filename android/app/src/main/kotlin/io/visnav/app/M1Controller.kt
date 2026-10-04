@@ -116,6 +116,7 @@ class M1Controller(private val context: Context) {
             if (File(dataDir, "route.json").isFile && b.roads == null) {
                 _state.update { it.copy(status = it.status + " · route.json без графа дорог — маршрут не строится") }
             }
+            b.routeWarning?.let { w -> _state.update { it.copy(status = it.status + " · " + w) } }
             // Parity — диагностика, а не условие готовности: провал не должен блокировать запись.
             try {
                 val parity = ParityCheck.runIfPresent(dataDir, b.embedder, File(logDir, "parity.json"))

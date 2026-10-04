@@ -11,6 +11,8 @@ class LoadedBundle(
     val pack: RefPack, val meta: RefPackMeta, val embedder: OrtEmbedder,
     val roads: RoadPack? = null, val roadsMeta: RoadPackMeta? = null,
     val destination: Destination? = null,
+    /** Неисправный route.json: запись идёт без маршрута, текст показывается в статусе. */
+    val routeWarning: String? = null,
 )
 
 data class Destination(val lat: Double, val lon: Double, val name: String?)
@@ -43,6 +45,8 @@ object BundleLoader {
             }
         }
         val routeJson = File(dir, "route.json")
+        var routeWarning: String? = null
+        // Ошибка в route.json не мешает записи: маршрут просто не строится.
         val destination = if (roadsBin.isFile && routeJson.isFile) {
             try {
                 val o = org.json.JSONObject(routeJson.readText())
@@ -50,7 +54,8 @@ object BundleLoader {
                 check(lat in -90.0..90.0 && lon in -180.0..180.0) { "координаты вне диапазона" }
                 Destination(lat, lon, o.optString("dest_name").ifEmpty { null })
             } catch (e: Exception) {
-                throw IllegalStateException("route.json: ${e.message}", e)
+                routeWarning = "route.json: ${e.message} — маршрут не строится"
+                null
             }
         } else null
         val embedder = OrtEmbedder(model, meta.model)
@@ -68,6 +73,6 @@ object BundleLoader {
             embedder.close()
             throw e
         }
-        return LoadedBundle(pack, meta, embedder, roads, roadsMeta, destination)
+        return LoadedBundle(pack, meta, embedder, roads, roadsMeta, destination, routeWarning)
     }
 }
