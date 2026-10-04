@@ -61,6 +61,10 @@ data class UiState(
     val nav: NavUi? = null,
     /** Позиция фильтра на последнем кадре (для карты); сбрасывается вместе с nav. */
     val pos: MapPos? = null,
+    /** Выбранная поездка (trips/<имя>); null — старая раскладка без trips/. */
+    val trip: String? = null,
+    /** Поездки на телефоне по алфавиту; пусто — старая раскладка. */
+    val trips: List<String> = emptyList(),
 )
 
 /** Позиция для карты из LocalizerOutput: σ, курс (рад, от севера по часовой) и скорость (м/с) как в выводе. */
@@ -86,6 +90,10 @@ class M1Controller(private val context: Context) {
     private val dataDir = File(filesDir, "refpack")
     /** Каталог данных на телефоне (`files/refpack/`): база, граф дорог, карта `map/`. */
     val refpackDir: File get() = dataDir
+    /** Каталог данных выбранной поездки (`refpack/trips/<имя>/`) или `refpack/` в старой раскладке. */
+    @Volatile var tripDataDir: File = dataDir
+        private set
+    private val prefs = context.getSharedPreferences("visnav", Context.MODE_PRIVATE)
     private val logDir = File(filesDir, "logs")
     private val executor = Executors.newSingleThreadExecutor()
     private val gps = GpsSource(context)
@@ -106,33 +114,59 @@ class M1Controller(private val context: Context) {
     @Volatile private var drainTask: java.util.concurrent.ScheduledFuture<*>? = null
 
     init {
-        executor.execute {
-            val b = try {
-                BundleLoader.load(dataDir)
-            } catch (e: Exception) {
-                _state.update {
-                    it.copy(status = "Нет базы: ${e.message}. Скопируйте файлы: adb push <bundle>/. " +
+        executor.execute { loadBundle(prefs.getString("trip", null)) }
+    }
+
+    /**
+     * Выбор поездки (trips/<имя>): перезагружает базу и модель на executor. Во время записи не действует.
+     * Выбор запоминается и восстанавливается при следующем запуске.
+     */
+    fun selectTrip(name: String) {
+        if (_state.value.running) return
+        executor.execute { if (!runningFlag.get()) loadBundle(name) }
+    }
+
+    /** Только на executor: закрывает прежнюю базу и грузит выбранную поездку (или старую раскладку). */
+    private fun loadBundle(wanted: String?) {
+        bundle?.embedder?.close()
+        bundle = null
+        analyzer.set(null)
+        _state.update { it.copy(loaded = false, roadsLoaded = false, status = "Загрузка базы…") }
+        val trips = TripLayout.list(dataDir).orEmpty()
+        val dirs = TripLayout.resolve(dataDir, wanted).getOrElse { e ->
+            _state.update { it.copy(loaded = false, trip = null, trips = trips, status = e.message ?: "Нет поездок") }
+            return
+        }
+        val prefix = dirs.name?.let { "Поездка: $it · " }.orEmpty()
+        val b = try {
+            BundleLoader.load(dirs.dataDir, dirs.model)
+        } catch (e: Exception) {
+            _state.update {
+                it.copy(loaded = false, trip = dirs.name, trips = trips,
+                    status = prefix + "Нет базы: ${e.message}. Скопируйте файлы: adb push <bundle>/. " +
                         "/sdcard/Android/data/io.visnav.app/files/refpack/")
-                }
-                return@execute
             }
-            bundle = b
-            analyzer.set(FrameAnalyzer(intervalMs = 500, inputW = b.meta.inputW, inputH = b.meta.inputH))
-            _state.update { it.copy(loaded = true, roadsLoaded = b.roads != null,
-                status = "База: ${b.pack.count} эталонов, модель ${b.meta.model}") }
-            if (File(dataDir, "route.json").isFile && b.roads == null) {
-                _state.update { it.copy(status = it.status + " · route.json без графа дорог — маршрут не строится") }
+            return
+        }
+        bundle = b
+        tripDataDir = dirs.dataDir
+        if (dirs.name != null) prefs.edit().putString("trip", dirs.name).apply()
+        analyzer.set(FrameAnalyzer(intervalMs = 500, inputW = b.meta.inputW, inputH = b.meta.inputH))
+        _state.update { it.copy(loaded = true, roadsLoaded = b.roads != null, trip = dirs.name, trips = trips,
+            status = prefix + "База: ${b.pack.count} эталонов, модель ${b.meta.model}") }
+        if (File(dirs.dataDir, "route.json").isFile && b.roads == null) {
+            _state.update { it.copy(status = it.status + " · route.json без графа дорог — маршрут не строится") }
+        }
+        b.routeWarning?.let { w -> _state.update { it.copy(status = it.status + " · " + w) } }
+        // Parity — диагностика, а не условие готовности: провал не должен блокировать запись.
+        // Файлы parity лежат в корне refpack/, общие для всех поездок.
+        try {
+            val parity = ParityCheck.runIfPresent(dataDir, b.embedder, File(logDir, "parity.json"))
+            if (parity != null) {
+                _state.update { it.copy(status = it.status + " · parity cos=%.4f".format(parity)) }
             }
-            b.routeWarning?.let { w -> _state.update { it.copy(status = it.status + " · " + w) } }
-            // Parity — диагностика, а не условие готовности: провал не должен блокировать запись.
-            try {
-                val parity = ParityCheck.runIfPresent(dataDir, b.embedder, File(logDir, "parity.json"))
-                if (parity != null) {
-                    _state.update { it.copy(status = it.status + " · parity cos=%.4f".format(parity)) }
-                }
-            } catch (e: Exception) {
-                _state.update { it.copy(status = it.status + " · parity error: ${e.message}") }
-            }
+        } catch (e: Exception) {
+            _state.update { it.copy(status = it.status + " · parity error: ${e.message}") }
         }
     }
 
@@ -321,7 +355,7 @@ class M1Controller(private val context: Context) {
                             model = b.meta.model, refpackCreatedAt = b.meta.createdAt,
                             device = "${Build.MANUFACTURER} ${Build.MODEL}; " +
                                 "analysis ${frameAnalyzer.lastFrameW}x${frameAnalyzer.lastFrameH}",
-                            startedMs = startedMs, mode = mode.name.lowercase(),
+                            startedMs = startedMs, mode = mode.name.lowercase(), trip = _state.value.trip,
                         ))
                         headerWritten = true
                     } catch (e: Exception) {
