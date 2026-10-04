@@ -154,6 +154,17 @@ def test_maneuver_too_close_to_route_start_excluded_and_listed():
     assert "исключено (слишком близко к началу маршрута): 1" in rep and "## Исключены" in rep
 
 
+def test_starting_uturn_of_route_against_heading_skipped():
+    # Маршрут против курса: сразу после depart — разворот в 0 м; он не манёвр на пути и не считается.
+    rt = _route(0)
+    rt["maneuvers"].insert(1, {"type": "uturn", "at_m": 0.0, "lat": LAT0, "lon": LON0, "street": None, "exit": 0})
+    ev = [rt, _prompt(0, 1, "now"), _prompt(90, 2, "near")]
+    r = evaluate_nav(_header(), ev, _frames(EAST_THEN_SOUTH))
+    assert r.n_maneuvers == 1 and r.n_not_driven == 0 and r.n_unknown == 0 and r.excluded == []
+    assert [c.maneuver for c in r.checks] == [2] and r.checks[0].prompt_lead_s >= 3.0
+    assert "не пройдено: 0" in render_nav_report(r)
+
+
 def test_unverifiable_reroutes_not_counted_false():
     # После конца трека (150 с) и в дыре трека (40..60 с) эталона нет.
     r = evaluate_nav(_header(), [_route(0), _route(200, reroute=True)], _frames(EAST_THEN_SOUTH))

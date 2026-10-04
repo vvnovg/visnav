@@ -174,6 +174,10 @@ def evaluate_nav(header: dict, events: list[dict], log_frames: list[FieldFrame],
         for mi, m in enumerate(rt["maneuvers"]):
             if m["type"] in ("depart", "arrive"):
                 continue
+            # Разворот в начале маршрута, построенного против курса (at_m = 0): это не манёвр на пути, а указание
+            # развернуться на месте. Его цепочка 0 никогда не «пересекается» треком, и он попал бы в «не пройдено».
+            if m["type"] == "uturn" and m["at_m"] == 0:
+                continue
             n_man += 1
             reached = None
             unknown = False

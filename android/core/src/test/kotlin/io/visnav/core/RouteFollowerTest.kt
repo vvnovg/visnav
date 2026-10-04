@@ -2,6 +2,7 @@ package io.visnav.core
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNotSame
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -446,5 +447,47 @@ class RouteFollowerTest {
         var ev: List<NavEvent> = emptyList()
         while (t <= 10_000L && ev.none { it is NavEvent.RouteReady }) { ev = f.update(t, 180.0, 0.0, 5.0, Math.PI / 2, 15.0); t += 500 }
         assertUturnFirst(ev, reroute = true)
+    }
+
+    /** corridorEdge и боковая улица на юг из A(100,0) до (100,−100): с запада на юг — налево. */
+    private fun corridorEdgeWithSide(): RoadIndex {
+        val nodes = listOf(0.0 to 0.0, 100.0 to 0.0, 200.0 to 0.0, 200.0 to -50.0, 100.0 to -100.0)
+        val base = roadPackOf(enu, nodes,
+            listOf(EdgeSpec(0, 1, 1), EdgeSpec(1, 2, 2), EdgeSpec(2, 3, 3), EdgeSpec(1, 4, 4)))
+        val p = RoadPack(base.lats, base.lons, base.way, base.from, base.to, base.flags, base.cls, boundary = intArrayOf(3))
+        return RoadIndex(p, enu)
+    }
+
+    @Test fun startUturnNowSpokenOnceWhileMovingAway() {
+        val f = RouteFollower(corridorEdge(), 20.0, 0.0)
+        val ev = ArrayList<NavEvent>()
+        ev += f.update(0, 150.0, 0.0, 5.0, Math.PI / 2, 15.0)
+        for (k in 1..10) ev += f.update(500L * k, 150.0 + 2.0 * k, 0.0, 5.0, Math.PI / 2, 15.0)
+        assertEquals(0.0, f.progressM)
+        val prompts = ev.filterIsInstance<NavEvent.Prompt>()
+        assertEquals(listOf(1 to PromptStage.NOW), prompts.map { it.maneuver to it.stage })
+        assertEquals(1, ev.count { it is NavEvent.RouteReady })
+    }
+
+    @Test fun afterStartUturnNextIsRealManeuver() {
+        val f = RouteFollower(corridorEdgeWithSide(), 100.0, -80.0)
+        f.update(0, 150.0, 0.0, 5.0, Math.PI / 2, 15.0)
+        assertEquals(1, f.nextManeuver)
+        assertEquals(ManeuverType.UTURN, f.maneuvers[1].type)
+        f.update(500, 145.0, 0.0, 5.0, -Math.PI / 2, 15.0)   // развернулись, 5 м по маршруту
+        assertTrue(f.progressM > 1.0)
+        val next = assertNotNull(f.nextManeuver)
+        assertEquals(ManeuverType.LEFT, f.maneuvers[next].type)
+        assertEquals(45.0, assertNotNull(f.distanceToNextM), 1e-6)
+    }
+
+    @Test fun startUturnChainedWithNearTurn() {
+        // Поворот налево через 50 м после старта — в пределах «близко» (120 м при 15 м/с): «Развернитесь, затем налево».
+        val f = RouteFollower(corridorEdgeWithSide(), 100.0, -80.0)
+        val ev = f.update(0, 150.0, 0.0, 5.0, Math.PI / 2, 15.0)
+        val p = ev.filterIsInstance<NavEvent.Prompt>().single()
+        assertEquals(PromptStage.NOW, p.stage)
+        assertEquals("Развернитесь, затем налево", p.text)
+        assertEquals(ManeuverType.LEFT, f.maneuvers[assertNotNull(p.thenManeuver)].type)
     }
 }

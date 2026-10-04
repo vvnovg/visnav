@@ -166,7 +166,9 @@ fun buildManeuvers(route: Route, index: RoadIndex): List<Maneuver> {
             if (type != null) {
                 val last = out.last()
                 val sameSide = sameSideTurn(last.type, type)
-                val mergeable = last.type in TURNS && (type == ManeuverType.CONTINUE || sameSide)
+                // В разворот в начале маршрута против курса ничего не сливается: он остаётся «развернитесь» на своей улице.
+                val startUturn = route.startsAgainstHeading && out.size == 2
+                val mergeable = !startUturn && last.type in TURNS && (type == ManeuverType.CONTINUE || sameSide)
                 if (mergeable && at - last.atM < MERGE_M) {
                     // Суммарный поворот — от входящего азимута первого манёвра до исходящего текущего.
                     val total = Math.toDegrees(wrapAngle(bOut - lastBIn))
