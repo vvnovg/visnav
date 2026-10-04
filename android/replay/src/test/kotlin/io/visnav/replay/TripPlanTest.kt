@@ -3,7 +3,9 @@ package io.visnav.replay
 import io.visnav.core.Enu
 import io.visnav.core.Geo.haversineM
 import io.visnav.core.RoadPack
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.PrintStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.time.Instant
@@ -18,8 +20,11 @@ import kotlin.test.assertTrue
 class TripPlanTest {
     private val enu = Enu(55.75, 37.6)
 
-    /** Сетка 3×3 улиц с шагом 200 м (узлы (i·200, j·200)); по желанию — изолированная дорога в 1 км к востоку. */
-    private fun grid(isolated: Boolean = false): RoadPack {
+    /**
+     * Сетка 3×3 улиц с шагом 200 м (узлы (i·200, j·200)); по желанию — изолированная дорога в 1 км к востоку
+     * и тупик (400,200) → (600,200).
+     */
+    private fun grid(isolated: Boolean = false, deadEnd: Boolean = false): RoadPack {
         val en = ArrayList<DoubleArray>()
         for (j in 0..2) for (i in 0..2) en += doubleArrayOf(i * 200.0, j * 200.0)
         val from = ArrayList<Int>(); val to = ArrayList<Int>()
@@ -28,6 +33,10 @@ class TripPlanTest {
         if (isolated) {
             en += doubleArrayOf(1400.0, 0.0); en += doubleArrayOf(1400.0, 200.0)
             from += 9; to += 10
+        }
+        if (deadEnd) {
+            en += doubleArrayOf(600.0, 200.0)
+            from += 5; to += en.size - 1
         }
         val ll = en.map { enu.toLatLon(it[0], it[1]) }
         val m = from.size
@@ -49,6 +58,19 @@ class TripPlanTest {
         File(dir, "roadpack.bin").writeBytes(b.array())
     }
 
+    private fun <T> withTempDir(body: (File) -> T): T {
+        val dir = createTempDirectory().toFile()
+        try { return body(dir) } finally { dir.deleteRecursively() }
+    }
+
+    private fun dist(a: DoubleArray, b: DoubleArray) = haversineM(a[0], a[1], b[0], b[1])
+
+    /** Нет повторов подряд и нет возврата A → B → A (точка не совпадает с точкой двумя позициями раньше). */
+    private fun assertNoBacktrack(pts: List<DoubleArray>) {
+        for (i in 1 until pts.size) assertTrue(dist(pts[i - 1], pts[i]) > 1e-3, "duplicate at $i")
+        for (i in 2 until pts.size) assertTrue(dist(pts[i - 2], pts[i]) > 1e-3, "A->B->A at $i")
+    }
+
     private fun spec(p: DoubleArray) = "%.8f,%.8f".format(java.util.Locale.ROOT, p[0], p[1])
 
     @Test fun planOverViaConcatenatesLegs() {
@@ -58,8 +80,29 @@ class TripPlanTest {
         assertEquals(400.0, direct.lengthM, 1.0)
         val r = assertNotNull(planTrip(pack, listOf(from, via, to)))
         assertTrue(r.lengthM >= 800.0, "length ${r.lengthM}")
+        // Via — угловой узел степени 2: разворота нет, обратно — объездом через (200,400)…(200,200): 800 + 800 м.
+        assertEquals(1600.0, r.lengthM, 1.0)
         assertTrue(haversineM(r.latLon.first()[0], r.latLon.first()[1], from[0], from[1]) <= 1.0)
         assertTrue(haversineM(r.latLon.last()[0], r.latLon.last()[1], to[0], to[1]) <= 1.0)
+        assertNoBacktrack(densify(r.latLon))
+    }
+
+    @Test fun viaMidEdgeDoesNotUturnInPlace() {
+        // Приехали в via (400,100) на север; разворот на месте дал бы 800 м, законный путь — 1000 м.
+        val r = assertNotNull(planTrip(grid(), listOf(ll(0.0, 0.0), ll(400.0, 100.0), ll(200.0, 0.0))))
+        assertEquals(1000.0, r.lengthM, 1.0)
+        assertNoBacktrack(densify(r.latLon))
+    }
+
+    @Test fun viaInDeadEndTurnsAtTheEnd() {
+        // Via в тупике (550,200): маршрут доезжает до конца тупика (600,200), разворачивается и едет к to (0,400).
+        val via = ll(550.0, 200.0); val end = ll(600.0, 200.0); val to = ll(0.0, 400.0)
+        val r = assertNotNull(planTrip(grid(deadEnd = true), listOf(ll(0.0, 0.0), via, to)))
+        val pts = densify(r.latLon)
+        assertTrue(pts.any { dist(it, via) <= 1.0 }, "via not reached")
+        assertTrue(pts.any { dist(it, end) <= 1.0 }, "dead end not reached")
+        assertTrue(dist(pts.last(), to) <= 1.0)
+        assertEquals(1600.0, r.lengthM, 1.0)
     }
 
     @Test fun unreachableReturnsNull() {
@@ -69,7 +112,7 @@ class TripPlanTest {
 
     @Test fun densifyKeepsStepAndEnds() {
         val a = ll(0.0, 0.0); val b = ll(1000.0, 0.0)
-        val d = densify(listOf(a, a.copyOf(), b, b.copyOf()))
+        val d = densify(listOf(a, a.copyOf(), ll(0.0, 0.01), b, b.copyOf()))
         assertTrue(d.size >= 41, "size ${d.size}")
         for (i in 1 until d.size) {
             val s = haversineM(d[i - 1][0], d[i - 1][1], d[i][0], d[i][1])
@@ -80,29 +123,54 @@ class TripPlanTest {
         assertEquals(b[0], d.last()[0], 1e-12); assertEquals(b[1], d.last()[1], 1e-12)
     }
 
-    @Test fun gpxHasTimesAndParsesBack() {
-        val f = File(createTempDirectory().toFile(), "sub/t.gpx")
+    private fun gpxTimes(text: String) =
+        Regex("<time>([^<]+)</time>").findAll(text).map { Instant.parse(it.groupValues[1]) }.toList()
+
+    @Test fun gpxHasTimesAndParsesBack() = withTempDir { dir ->
+        val f = File(dir, "sub/t.gpx")
         writeGpx(f, listOf(ll(0.0, 0.0), ll(100.0, 0.0), ll(100.0, 50.0)))
         val text = f.readText()
         assertTrue(text.contains("<gpx version=\"1.1\" creator=\"visnav trip-plan\""))
         assertEquals(3, Regex("<trkpt").findAll(text).count())
-        val times = Regex("<time>([^<]+)</time>").findAll(text).map { Instant.parse(it.groupValues[1]) }.toList()
+        val times = gpxTimes(text)
         assertEquals(3, times.size)
         assertEquals(Instant.parse("2000-01-01T00:00:00Z"), times[0])
         assertTrue(times[1] > times[0] && times[2] > times[1])
         assertTrue(Regex("<trkpt lat=\"-?\\d+\\.\\d{7}\" lon=\"-?\\d+\\.\\d{7}\">").findAll(text).count() == 3)
     }
 
-    @Test fun cliErrors() {
-        val dir = createTempDirectory().toFile()
+    @Test fun gpxTimesStrictlyIncreaseForClosePoints() = withTempDir { dir ->
+        val f = File(dir, "t.gpx")
+        writeGpx(f, listOf(ll(0.0, 0.0), ll(0.001, 0.0)))
+        val times = gpxTimes(f.readText())
+        assertEquals(2, times.size)
+        assertTrue(times[1] > times[0], "$times")
+    }
+
+    /** Запускает tripPlanMain, перехватывая stderr. */
+    private fun runCli(args: List<String>): Pair<Int, String> {
+        val buf = ByteArrayOutputStream(); val old = System.err
+        System.setErr(PrintStream(buf, true, "UTF-8"))
+        val code = try { tripPlanMain(args) } finally { System.setErr(old) }
+        return code to buf.toString("UTF-8")
+    }
+
+    private fun assertCliError(args: List<String>) {
+        val (code, err) = runCli(args)
+        assertEquals(2, code)
+        assertTrue(err.startsWith("error:"), err)
+    }
+
+    @Test fun cliErrors() = withTempDir { dir ->
         val roads = File(dir, "roads"); writePack(roads, grid(isolated = true))
         val out = File(dir, "out.gpx")
         val from = spec(ll(0.0, 0.0)); val to = spec(ll(400.0, 0.0))
-        assertEquals(2, tripPlanMain(listOf("--roads", roads.path, "--from", "x", "--to", "1,2", "--out", out.path)))
-        assertEquals(2, tripPlanMain(listOf("--roads", roads.path, "--from", from, "--out", out.path)))
-        assertEquals(2, tripPlanMain(listOf("--roads", roads.path, "--from", from, "--to", spec(ll(1400.0, 100.0)),
-            "--out", out.path)))
+        assertCliError(listOf("--roads", roads.path, "--from", "x", "--to", "1,2", "--out", out.path))
+        assertCliError(listOf("--roads", roads.path, "--from", from, "--out", out.path))
+        assertCliError(listOf("--roads", roads.path, "--from", from, "--to", spec(ll(1400.0, 100.0)), "--out", out.path))
         assertFalse(out.exists())
+        // Каталог вместо файла: ошибка записи → 2 без трассировки стека.
+        assertCliError(listOf("--roads", roads.path, "--from", from, "--to", to, "--out", roads.path))
         assertEquals(0, tripPlanMain(listOf("--roads", roads.path, "--from", from, "--to", to,
             "--via", spec(ll(400.0, 400.0)), "--out", out.path)))
         assertTrue(out.isFile)
