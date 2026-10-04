@@ -23,6 +23,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.visnav.core.GnssReason
 import io.visnav.core.NavMode
 import io.visnav.core.PriorMode
+import kotlin.math.roundToInt
 
 @Composable
 fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
@@ -46,6 +47,14 @@ fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
             Text("Ошибка к GPS: ${s.lastErrM?.let { "%.0f м".format(it) } ?: "—"}")
             Text("Инференс: ${s.lastInfMs?.let { "%.0f мс".format(it) } ?: "—"}")
             Text("Точность GPS: ${s.gpsAccM?.let { "%.0f м".format(it) } ?: "нет сигнала"}")
+            s.nav?.let { nav ->
+                Text(if (nav.arrived) "Вы прибыли" else nav.nextText ?: "Маршрут строится…",
+                    style = MaterialTheme.typography.titleMedium)
+                if (nav.routeKm != null && nav.routeMin != null && !nav.arrived) {
+                    Text("Маршрут: ${"%.1f".format(nav.routeKm)} км, ~${nav.routeMin.roundToInt()} мин")
+                }
+                if (nav.rerouted) Text("Маршрут перестроен")
+            }
             s.navMode?.let { m ->
                 Text("${modeLabel(m)}${s.sigmaM?.let { " ±${Math.round(it)} м" } ?: ""}", color = modeColor(m))
                 val reasons = s.gnssReasons.map { reasonLabel(it) }

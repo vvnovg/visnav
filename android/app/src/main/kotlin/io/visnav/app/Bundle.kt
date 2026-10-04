@@ -10,7 +10,10 @@ import java.nio.ByteBuffer
 class LoadedBundle(
     val pack: RefPack, val meta: RefPackMeta, val embedder: OrtEmbedder,
     val roads: RoadPack? = null, val roadsMeta: RoadPackMeta? = null,
+    val destination: Destination? = null,
 )
+
+data class Destination(val lat: Double, val lon: Double, val name: String?)
 
 object BundleLoader {
     /** Бросает IllegalStateException с понятным текстом, если файлы не положены через adb push. */
@@ -39,6 +42,17 @@ object BundleLoader {
                 "roadpack.bin не совпадает с roadpack.json"
             }
         }
+        val routeJson = File(dir, "route.json")
+        val destination = if (roadsBin.isFile && routeJson.isFile) {
+            try {
+                val o = org.json.JSONObject(routeJson.readText())
+                val lat = o.getDouble("dest_lat"); val lon = o.getDouble("dest_lon")
+                check(lat in -90.0..90.0 && lon in -180.0..180.0) { "координаты вне диапазона" }
+                Destination(lat, lon, o.optString("dest_name").ifEmpty { null })
+            } catch (e: Exception) {
+                throw IllegalStateException("route.json: ${e.message}", e)
+            }
+        } else null
         val embedder = OrtEmbedder(model, meta.model)
         try {
             check(embedder.inputH == meta.inputH && embedder.inputW == meta.inputW) {
@@ -54,6 +68,6 @@ object BundleLoader {
             embedder.close()
             throw e
         }
-        return LoadedBundle(pack, meta, embedder, roads, roadsMeta)
+        return LoadedBundle(pack, meta, embedder, roads, roadsMeta, destination)
     }
 }
