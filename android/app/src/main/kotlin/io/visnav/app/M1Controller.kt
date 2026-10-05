@@ -379,6 +379,7 @@ class M1Controller(private val context: Context) {
             // Поставлена перезагрузка (смена ORT или поездки) — не стартуем на прежней базе.
             if (b == null || frameAnalyzer == null || _state.value.loading) {
                 runningFlag.set(false)
+                if (_state.value.loading) _state.update { it.copy(status = "Загрузка базы — подождите") }
                 return
             }
             val mode = _state.value.mode
@@ -541,11 +542,21 @@ class M1Controller(private val context: Context) {
             }
             // baseline: пустой кадр (без дескриптора) с текущим интервалом регулятора — фильтр выдаёт позицию
             // по GNSS/IMU, экран, ведение и .fusion.jsonl работают как в full, но без камеры и модели.
+            // Ошибка push не должна останавливать цепочку пустых кадров: сообщаем один раз и повторяем через 1 с.
+            var baselineErrorReported = false
             val baselineFrame: (() -> Long)? = if (baseline) {
                 {
-                    val now = System.currentTimeMillis()
-                    reorderer.push(ReorderItem.Frame(now, null), now)
-                    governor.intervalMs
+                    try {
+                        val now = System.currentTimeMillis()
+                        reorderer.push(ReorderItem.Frame(now, null), now)
+                        governor.intervalMs
+                    } catch (e: Exception) {
+                        if (!baselineErrorReported) {
+                            baselineErrorReported = true
+                            _state.update { it.copy(errors = it.errors + 1, status = it.status + " · ошибка пустого кадра: ${e.message}") }
+                        }
+                        BASELINE_RETRY_MS
+                    }
                 }
             } else null
             startDrainTimer({ reorderer.drain(System.currentTimeMillis(), sink) }, perfTick, baselineFrame)
@@ -753,14 +764,16 @@ class M1Controller(private val context: Context) {
                 if (failedCount > 0) append(" · журнал датчиков прерван после ошибки записи")
                 for (err in closeErrors) append(" · $err")
             }
-            _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}$suffix",
-                navMode = null, sigmaM = null,
-                gnssReasons = emptySet(), road = null, nav = null, pos = null) }
-            // Настройку ORT могли сменить в гонке со «Стартом» — тогда база загружена с прежней.
+            // Настройку ORT могли сменить в гонке со «Стартом» — тогда база загружена с прежней. Перезагрузку
+            // ставим до финального update: postLoad поднимает loading, а update ниже его сохраняет, так что
+            // «Старт» не проскочит между running = false и loading = true.
             val loaded = bundle
             if (loaded != null && loaded.requestedOrt != _state.value.settings.ort) {
                 postLoad { loadBundle(_state.value.trip ?: prefs.getString("trip", null)) }
             }
+            _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}$suffix",
+                navMode = null, sigmaM = null,
+                gnssReasons = emptySet(), road = null, nav = null, pos = null) }
         }
     }
 
@@ -941,5 +954,7 @@ class M1Controller(private val context: Context) {
         const val PREF_PROFILE = "profile"
         const val PREF_DURATION = "duration_min"
         const val PERF_TICK_MS = 5_000L
+        /** Повтор пустого кадра baseline после ошибки push. */
+        const val BASELINE_RETRY_MS = 1_000L
     }
 }
