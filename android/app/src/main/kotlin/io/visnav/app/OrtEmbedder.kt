@@ -20,21 +20,29 @@ class OrtEmbedder(modelFile: File, override val name: String, xnnpack: Boolean =
     private val session: OrtSession
     /** Фактический исполнитель: "cpu" или "xnnpack". */
     val ort: String
+    /** Почему XNNPACK не подключился (сессия не создалась); null — не запрашивался или работает. */
+    val xnnpackError: String?
     val inputH: Int
     val inputW: Int
 
     init {
         var created: Pair<OrtSession.SessionOptions, OrtSession>? = null
+        var error: String? = null
         if (xnnpack) {
-            val opts = cpuOptions()
+            // Потоки — у XNNPACK; пул ORT в 1 поток и без ожидания в цикле, чтобы два пула не делили ядра.
+            val opts = OrtSession.SessionOptions()
             created = try {
+                opts.setIntraOpNumThreads(1)
                 opts.addXnnpack(mapOf("intra_op_num_threads" to "4"))
+                opts.addConfigEntry("session.intra_op.allow_spinning", "0")
                 opts to env.createSession(modelFile.absolutePath, opts)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 opts.close()
+                error = e.message ?: e.javaClass.simpleName
                 null
             }
         }
+        xnnpackError = error
         ort = if (created != null) PerfSettings.ORT_XNNPACK else PerfSettings.ORT_CPU
         val (opts, s) = created ?: cpuOptions().let { opts ->
             try {

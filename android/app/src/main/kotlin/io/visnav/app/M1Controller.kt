@@ -85,7 +85,10 @@ data class UiState(
     val perf: PerfUi? = null,
 )
 
-/** Замеры на вкладке «Отладка»: интервал кадров, thermal status, медиана e2e за 5 с, ток батареи. */
+/**
+ * Замеры на вкладке «Отладка»: интервал кадров, thermal status, медиана e2e за 5 с, ток батареи.
+ * e2e — от t_ms (приход кадра в анализатор), а не от снимка камеры; в baseline e2e не считается.
+ */
 data class PerfUi(val intervalMs: Long, val thermal: Int?, val e2eP50: Double?, val currentMa: Double?)
 
 /**
@@ -127,6 +130,11 @@ class M1Controller(private val context: Context) {
     private val swapLock = Any()
     /** Последняя выбранная поездка, ещё не загруженная executor'ом (схлопывает частые selectTrip). */
     private val pendingTrip = AtomicReference<String?>(null)
+    /**
+     * Перезагрузки базы, поставленные на executor и ещё не начатые (selectTrip, setOrt, после stop()).
+     * loading = true ставится синхронно при постановке, чтобы «Старт» был недоступен до конца загрузки.
+     */
+    private val queuedLoads = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile private var logger: SessionLogger? = null
     @Volatile private var sensorLog: SensorLogger? = null
     @Volatile private var descLog: DescriptorLogWriter? = null
@@ -146,6 +154,8 @@ class M1Controller(private val context: Context) {
     /** Замеры раз в 5 с на executor (sys, late, регулятор кадров). */
     @Volatile private var perfTickNow: (() -> Unit)? = null
     @Volatile private var perfTask: java.util.concurrent.ScheduledFuture<*>? = null
+    /** Пустые кадры профиля baseline (на том же таймере). */
+    @Volatile private var baselineTask: java.util.concurrent.ScheduledFuture<*>? = null
 
     init {
         _state.update { it.copy(settings = readSettings()) }
@@ -186,11 +196,26 @@ class M1Controller(private val context: Context) {
     fun setOrt(ort: String) {
         val old = _state.value.settings.ort
         if (!updateSettings { it.copy(ort = PerfSettings.ort(ort)) } || _state.value.settings.ort == old) return
+        postLoad { loadBundle(_state.value.trip ?: prefs.getString("trip", null)) }
+    }
+
+    /**
+     * Ставит перезагрузку базы на executor и сразу (синхронно) поднимает loading. Флаг снимается, когда
+     * не осталось поставленных перезагрузок: в конце loadBundle() или задачи, если та ничего не загрузила.
+     */
+    private fun postLoad(task: () -> Unit) {
         if (executor.isShutdown) return
+        queuedLoads.incrementAndGet()
+        _state.update { it.copy(loading = true) }
         try {
-            executor.execute { loadBundle(_state.value.trip ?: prefs.getString("trip", null)) }
+            executor.execute {
+                queuedLoads.decrementAndGet()
+                try { task() } finally { _state.update { it.copy(loading = queuedLoads.get() > 0) } }
+            }
         } catch (_: java.util.concurrent.RejectedExecutionException) {
             // close() уже закрыл executor.
+            queuedLoads.decrementAndGet()
+            _state.update { it.copy(loading = queuedLoads.get() > 0) }
         }
     }
 
@@ -206,11 +231,7 @@ class M1Controller(private val context: Context) {
         // Повторный выбор уже загруженной поездки отменяет ещё не загруженный выбор (A → B → A: остаётся A).
         if (name == s.trip && s.loaded) { pendingTrip.set(null); return }
         pendingTrip.set(name)
-        try {
-            executor.execute { pendingTrip.getAndSet(null)?.let { loadBundle(it) } }
-        } catch (_: java.util.concurrent.RejectedExecutionException) {
-            // close() уже закрыл executor.
-        }
+        postLoad { pendingTrip.getAndSet(null)?.let { loadBundle(it) } }
     }
 
     /**
@@ -246,7 +267,8 @@ class M1Controller(private val context: Context) {
         try {
             loadTrip(wanted)
         } finally {
-            _state.update { it.copy(loading = false) }
+            // Пока поставлены следующие перезагрузки, «Старт» остаётся недоступен.
+            _state.update { it.copy(loading = queuedLoads.get() > 0) }
         }
     }
 
@@ -293,7 +315,8 @@ class M1Controller(private val context: Context) {
         }
         b.routeWarning?.let { w -> _state.update { it.copy(status = it.status + " · " + w) } }
         if (wantXnnpack && b.embedder.ort != PerfSettings.ORT_XNNPACK) {
-            _state.update { it.copy(status = it.status + " · XNNPACK недоступен — CPU") }
+            val reason = b.xnnpackError?.let { " ($it)" }.orEmpty()
+            _state.update { it.copy(status = it.status + " · XNNPACK недоступен$reason — CPU") }
         }
         // Parity — диагностика, а не условие готовности: провал не должен блокировать запись.
         // Файлы parity лежат в корне refpack/ и относятся к общей модели refpack/model.onnx.
@@ -353,7 +376,8 @@ class M1Controller(private val context: Context) {
         if (!runningFlag.compareAndSet(false, true)) return
         try {
             val (b, frameAnalyzer) = synchronized(swapLock) { bundle to analyzer.get() }
-            if (b == null || frameAnalyzer == null) {
+            // Поставлена перезагрузка (смена ORT или поездки) — не стартуем на прежней базе.
+            if (b == null || frameAnalyzer == null || _state.value.loading) {
                 runningFlag.set(false)
                 return
             }
@@ -456,15 +480,20 @@ class M1Controller(private val context: Context) {
                             _state.update { it.copy(navMode = out.mode, sigmaM = out.sigmaM, gnssReasons = out.reasons,
                                 road = out.road, nav = mergeNav(it.nav, navUi), pos = pos) }
                             // Тот же (настенный) час, что t_ms кадра.
+                            // e2e считается от t_ms — прихода кадра в анализатор, а не от снимка камеры.
                             e2eMs = (System.currentTimeMillis() - item.frameTMs).toDouble()
-                            e2eWindow.add(e2eMs)
+                            if (!baseline) e2eWindow.add(e2eMs)
                         }
-                        val lat = latencies.remove(item.frameTMs)
-                        val pre = lat?.pre ?: Double.NaN
-                        val inf = lat?.inf ?: Double.NaN
-                        val search = lat?.search ?: Double.NaN
-                        governor.onFrameCost(pre + inf + search + fuseMs)
-                        pLog.line(PerfLog.frame(item.frameTMs, pre, inf, search, fuseMs, navMs, e2eMs, frameAnalyzer.intervalMs))
+                        // baseline: пустые кадры по таймеру — без строк frame и без стоимости кадра в регуляторе.
+                        if (!baseline) {
+                            val lat = latencies.remove(item.frameTMs)
+                            val pre = lat?.pre ?: Double.NaN
+                            val inf = lat?.inf ?: Double.NaN
+                            val search = lat?.search ?: Double.NaN
+                            governor.onFrameCost(pre + inf + search + fuseMs)
+                            pLog.line(PerfLog.frame(item.frameTMs, pre, inf, search, fuseMs, navMs, e2eMs,
+                                frameAnalyzer.intervalMs))
+                        }
                     } catch (e: Exception) {
                         // Сбой фильтра на кадре не останавливает запись.
                         val first = !frameFailureReported
@@ -475,7 +504,18 @@ class M1Controller(private val context: Context) {
                     }
                 }
             }
-            flush = { reorderer.drainAll(sink); Pair(reorderer.late, reorderer.dropped) }
+            flush = {
+                reorderer.drainAll(sink)
+                // Финальные строки late и sys перед закрытием perf-журнала (хвост после последнего тика).
+                try {
+                    val now = System.currentTimeMillis()
+                    pLog.line(PerfLog.late(now, reorderer.latenessSnapshotAndReset(), reorderer.late, reorderer.dropped))
+                    pLog.line(PerfLog.sys(sysSampler.sample(now, frameAnalyzer.intervalMs)))
+                } catch (_: Exception) {
+                    // Журнал замеров вторичен: сбой здесь не мешает закрыть остальные журналы.
+                }
+                Pair(reorderer.late, reorderer.dropped)
+            }
             // Раз в 5 с на executor: батарея и нагрев, опоздания событий, регулятор частоты кадров.
             val perfTick: () -> Unit = {
                 val e2eP50 = p50(e2eWindow)
@@ -499,7 +539,16 @@ class M1Controller(private val context: Context) {
                     }
                 }
             }
-            startDrainTimer({ reorderer.drain(System.currentTimeMillis(), sink) }, perfTick)
+            // baseline: пустой кадр (без дескриптора) с текущим интервалом регулятора — фильтр выдаёт позицию
+            // по GNSS/IMU, экран, ведение и .fusion.jsonl работают как в full, но без камеры и модели.
+            val baselineFrame: (() -> Long)? = if (baseline) {
+                {
+                    val now = System.currentTimeMillis()
+                    reorderer.push(ReorderItem.Frame(now, null), now)
+                    governor.intervalMs
+                }
+            } else null
+            startDrainTimer({ reorderer.drain(System.currentTimeMillis(), sink) }, perfTick, baselineFrame)
             // Колбэки датчиков/GNSS: журнал, затем только постановка в очередь (коротко, без фильтра).
             val feed: (SensorEvent) -> Unit = { e ->
                 sLog.event(e)
@@ -538,7 +587,8 @@ class M1Controller(private val context: Context) {
                 _state.update { it.copy(status = it.status + " · нет гироскопа/акселерометра — датчики не пишутся") }
             }
             if (baseline) {
-                // Кадров не будет: заголовок журнала кадров пишется сразу, чтобы .jsonl не остался пустым.
+                // Кадров камеры не будет (сессия ORT загружена, но простаивает): заголовок журнала кадров
+                // пишется сразу, чтобы .jsonl не остался пустым.
                 log.header(SessionHeader(
                     model = b.meta.model, refpackCreatedAt = b.meta.createdAt,
                     device = "${Build.MANUFACTURER} ${Build.MODEL}; analysis none (baseline)",
@@ -706,6 +756,11 @@ class M1Controller(private val context: Context) {
             _state.update { it.copy(running = false, status = "Остановлено, кадров: ${it.frames}$suffix",
                 navMode = null, sigmaM = null,
                 gnssReasons = emptySet(), road = null, nav = null, pos = null) }
+            // Настройку ORT могли сменить в гонке со «Стартом» — тогда база загружена с прежней.
+            val loaded = bundle
+            if (loaded != null && loaded.requestedOrt != _state.value.settings.ort) {
+                postLoad { loadBundle(_state.value.trip ?: prefs.getString("trip", null)) }
+            }
         }
     }
 
@@ -808,7 +863,7 @@ class M1Controller(private val context: Context) {
         executor.shutdown()
     }
 
-    private fun startDrainTimer(drain: () -> Unit, perfTick: () -> Unit) {
+    private fun startDrainTimer(drain: () -> Unit, perfTick: () -> Unit, baselineFrame: (() -> Long)?) {
         stopDrainTimer()
         // drainNow и perfTickNow ставим после stopDrainTimer(): тот обнуляет их.
         drainNow = drain
@@ -830,6 +885,20 @@ class M1Controller(private val context: Context) {
                 // executor уже закрыт — таймер остановит close().
             }
         }, PERF_TICK_MS, PERF_TICK_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+        baselineFrame?.let { scheduleBaselineFrame(timer, 0, it) }
+    }
+
+    /** Пустой кадр baseline: только push в очередь; следующий — через возвращённый интервал регулятора. */
+    private fun scheduleBaselineFrame(
+        timer: java.util.concurrent.ScheduledExecutorService, delayMs: Long, push: () -> Long,
+    ) {
+        try {
+            baselineTask = timer.schedule({
+                scheduleBaselineFrame(timer, push(), push)
+            }, delayMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            // Таймер остановлен (stop/fail/close).
+        }
     }
 
     private fun stopDrainTimer() {
@@ -837,6 +906,8 @@ class M1Controller(private val context: Context) {
         drainTask = null
         perfTask?.cancel(false)
         perfTask = null
+        baselineTask?.cancel(false)
+        baselineTask = null
         drainTimer?.shutdownNow()
         drainTimer = null
         drainNow = null

@@ -247,7 +247,7 @@ fun NavScreen(controller: M1Controller, permissionsGranted: Boolean) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = { if (s.running) controller.stop() else controller.start() },
-                    enabled = s.loaded && permissionsGranted,
+                    enabled = s.loaded && permissionsGranted && (s.running || !s.loading),
                 ) { Text(if (s.running) "Стоп" else "Старт") }
                 val m = map
                 if (free && m != null) {

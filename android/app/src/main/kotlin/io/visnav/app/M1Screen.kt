@@ -93,7 +93,7 @@ fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
             ) { Text("Режим: ${if (s.mode == PriorMode.GPS) "окно по GPS" else "визуальное слежение"}") }
             Button(
                 onClick = { if (s.running) controller.stop() else controller.start() },
-                enabled = s.loaded && permissionsGranted,
+                enabled = s.loaded && permissionsGranted && (s.running || !s.loading),
             ) { Text(if (s.running) "Стоп" else "Старт") }
             s.perf?.let { p ->
                 Text("Интервал кадров: ${p.intervalMs} мс")
