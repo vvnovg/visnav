@@ -349,7 +349,7 @@ def test_lateness_over_1500(tmp_path):
 def test_only_sparse_sources_is_no_data(tmp_path):
     res = evaluate(read_perf(_write(tmp_path, _windows(3, "imu", 10, 10, 1600, 1700))))
     assert res.recommendation == "few"
-    assert "нет данных (ни у одного источника нет 1000 событий)" in render(res)
+    assert "нет данных (ни у одного источника нет 300 событий)" in render(res)
 
 
 def test_cli_writes_report(tmp_path):
@@ -403,3 +403,53 @@ def test_mean_current_skips_gaps(tmp_path):
 def test_late_share_label(tmp_path):
     res = evaluate(read_perf(_write(tmp_path, _windows(20, "frame", 100, 50, 120, 150))))
     assert "доля опоздавших (по всем источникам, в основном IMU)" in render(res)
+
+
+def test_late_src_max_and_share(tmp_path):
+    recs = _windows(6, "frame", 100, 50, 120, 150)
+    recs[0]["sources"]["gnss_fix"] = {"n": 400, "p50": 10.0, "p99": 20.0, "max": 30.0}
+    recs[2]["late_src"] = {"frame": 1}
+    recs[4]["late_src"] = {"frame": 3}  # нули не пишутся
+    res = evaluate(read_perf(_write(tmp_path, recs)))
+    assert res.late_src == {"frame": 3}
+    assert res.late_src_share("frame") == pytest.approx(3 / 600)
+    assert res.late_src_share("gnss_fix") == 0.0
+    text = render(res)
+    assert "| frame | 600 |" in text and "| 3 | 0.50 % ❌ |" in text
+    assert "| 0 | 0.00 % ✅ |" in text
+
+
+def test_old_log_without_late_src(tmp_path):
+    res = evaluate(read_perf(_write(tmp_path, _windows(6, "frame", 100, 50, 120, 150))))
+    assert res.late_src is None
+    assert res.late_src_share("frame") is None
+    assert "| — | — |" in render(res)
+
+
+def test_frame_with_600_events_takes_part(tmp_path):
+    res = evaluate(read_perf(_write(tmp_path, _windows(6, "frame", 100, 100, 420, 450))))
+    assert res.recommendation == "ok"
+    assert res.recommended_delay_ms == 800
+
+
+def test_frame_with_150_events_takes_part_roughly(tmp_path):
+    res = evaluate(read_perf(_write(tmp_path, _windows(3, "frame", 50, 100, 420, 450))))
+    assert res.recommended_delay_ms == 800
+    assert "мало кадров, оценка грубая" in render(res)
+
+
+def test_e2e_minus_buffer_row(tmp_path):
+    frames = [_frame(T0 + i * 500, e2e=1500 + i + 1) for i in range(100)]
+    res = evaluate(read_perf(_write(tmp_path, frames)))
+    assert res.e2e_minus_buffer.p50 == pytest.approx(50.5)
+    assert res.e2e_minus_buffer.p95 == pytest.approx(95.05)
+    text = render(res)
+    assert "| e2e − буфер | 100 | 50.5 |" in text
+    assert "e2e ≥ задержки буфера по построению" in text
+
+
+def test_nfr7_59_7_min_is_yes(tmp_path):
+    recs = [r for r in _sys_run(61, thermal=lambda m: 1) if r["t_ms"] <= T0 + 59.7 * MIN]
+    res = evaluate(read_perf(_write(tmp_path, recs)))
+    assert res.duration_min == pytest.approx(59.75, abs=0.1)
+    assert res.nfr7 == "да"

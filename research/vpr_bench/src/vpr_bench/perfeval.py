@@ -11,11 +11,13 @@ import numpy as np
 
 MAX_E2E_P95_MS = 300.0
 MAX_EXCESS_PCT_PER_H = 15.0
-MIN_RUN_MIN = 60.0
+MIN_RUN_MIN = 59.5  # допуск на автостоп ровно в 60 мин и скачки часов; в тексте вердикта — «≥ 60 мин»
 DELAY_STEPS_MS = (300, 500, 800, 1500)
 DELAY_MARGIN_MS = 100.0
 MAX_LATE_SHARE = 0.001  # цель: не больше 0.1 % опоздавших событий
-MIN_SOURCE_N = 1000  # источник с меньшим числом событий в выборе буфера не участвует
+MIN_SOURCE_N = 300  # источник с меньшим числом событий в выборе буфера не участвует
+MIN_FRAME_N = 100  # кадры участвуют уже с этого числа — «мало кадров, оценка грубая»
+STRICT_LATE_SOURCES = ("frame", "gnss_fix")  # фактическая доля опоздавших > 0.1 % — ❌
 MAX_SYS_GAP_MS = 15_000  # разрыв между сэмплами sys длиннее — выпадает из долей времени
 MIN_THERMAL_COVERAGE = 0.95
 CHARGE_JUMP_FRAC = 0.005  # рост счётчика больше 0.5 % ёмкости или такое же падение быстрее 60 с — «счётчик скачет»
@@ -108,6 +110,7 @@ class PerfResult:
     duration_min: float
     stages: dict[str, StageStats]
     buffer_ratio: float | None  # reorder_delay_ms / p50(e2e)
+    e2e_minus_buffer: StageStats | None  # e2e_ms − reorder_delay_ms: обработка и ожидание слива
     nfr4_ok: bool | None
     drain: DrainResult
     baseline_header: dict | None
@@ -126,11 +129,19 @@ class PerfResult:
     nfr7: str
     lateness: dict[str, SourceLateness]
     late_count: int
+    late_src: dict[str, int] | None  # накопительные счётчики опоздавших по источникам; None — старый журнал
     dropped_count: int
     late_share: float | None
     recommended_delay_ms: int | None
     recommendation: str  # "ok" | "over" | "few"
     table_delay_ms: int  # ступень, для которой в таблице показана share_ub
+
+    def late_src_share(self, src: str) -> float | None:
+        """Фактическая доля опоздавших событий источника: late_src / Σn."""
+        st = self.lateness.get(src)
+        if self.late_src is None or st is None or st.n <= 0:
+            return None
+        return self.late_src.get(src, 0) / st.n
 
 
 def read_perf(path: Path) -> PerfLog:
@@ -274,9 +285,26 @@ def _lateness(late: list[dict]) -> dict[str, SourceLateness]:
     return {src: SourceLateness(tuple(acc[src])) for src in order}
 
 
+def _eligible(src: str, st: SourceLateness) -> bool:
+    return st.n >= MIN_SOURCE_N or (src == "frame" and st.n >= MIN_FRAME_N)
+
+
+def _late_src(late: list[dict]) -> dict[str, int] | None:
+    """Максимум накопительных счётчиков late_src по записям; None — поля нет ни в одной записи (старый журнал)."""
+    if not any(isinstance(r.get("late_src"), dict) for r in late):
+        return None
+    out: dict[str, int] = {}
+    for r in late:
+        for src, v in (r.get("late_src") or {}).items():
+            n = _num(v)
+            if n is not None:
+                out[src] = max(out.get(src, 0), int(n))
+    return out
+
+
 def _recommend(lateness: dict[str, SourceLateness]) -> tuple[int | None, str]:
-    """Наименьшая ступень D, при которой share_ub(D − 100) ≤ 0.1 % для всех источников с n ≥ 1000."""
-    eligible = [s for s in lateness.values() if s.n >= MIN_SOURCE_N]
+    """Наименьшая ступень D, при которой share_ub(D − 100) ≤ 0.1 % для всех источников с n ≥ 300 (кадры — с 100)."""
+    eligible = [s for src, s in lateness.items() if _eligible(src, s)]
     if not eligible:
         return None, "few"
     for d in DELAY_STEPS_MS:
@@ -311,6 +339,8 @@ def evaluate(full: PerfLog, baseline: PerfLog | None = None) -> PerfResult:
     delay = _num(full.header.get("reorder_delay_ms"))
     buffer_ratio = delay / e2e.p50 if delay is not None and e2e.p50 is not None and e2e.p50 > 0 else None
     nfr4_ok = None if e2e.p95 is None else e2e.p95 <= MAX_E2E_P95_MS
+    e2e_minus_buffer = (_stage([v - delay for v in _vals(full.frames, "e2e_ms")])
+                        if delay is not None and e2e.n > 0 else None)
 
     drain = _drain(full)
     base_drain = _drain(baseline) if baseline is not None else None
@@ -345,7 +375,8 @@ def evaluate(full: PerfLog, baseline: PerfLog | None = None) -> PerfResult:
     dropped_count = max((int(_num(r.get("dropped")) or 0) for r in full.late), default=0)
 
     return PerfResult(
-        header=full.header, duration_min=duration_min, stages=stages, buffer_ratio=buffer_ratio, nfr4_ok=nfr4_ok,
+        header=full.header, duration_min=duration_min, stages=stages, buffer_ratio=buffer_ratio,
+        e2e_minus_buffer=e2e_minus_buffer, nfr4_ok=nfr4_ok,
         drain=drain, baseline_header=baseline.header if baseline is not None else None, baseline_drain=base_drain,
         excess_pct_per_h=excess, nfr6_ok=nfr6_ok, nfr6_rough=nfr6_rough, run_warnings=run_warnings,
         first_thermal2_min=first_at_least(2),
@@ -353,7 +384,7 @@ def evaluate(full: PerfLog, baseline: PerfLog | None = None) -> PerfResult:
         interval_share=_time_shares(spans, "interval_ms"),
         interval_min=min(intervals) if intervals else None, interval_max=max(intervals) if intervals else None,
         gaps_ms=gaps, nfr7=_nfr7(duration_min, first_at_least(3), coverage, gaps),
-        lateness=lateness, late_count=late_count, dropped_count=dropped_count,
+        lateness=lateness, late_count=late_count, late_src=_late_src(full.late), dropped_count=dropped_count,
         late_share=late_count / total_n if total_n > 0 else None,
         recommended_delay_ms=recommended, recommendation=status,
         table_delay_ms=recommended if recommended is not None else DELAY_STEPS_MS[-1],
@@ -408,11 +439,17 @@ def render(r: PerfResult) -> str:
     lines += ["| этап | n | p50, мс | p95, мс | max, мс |", "|---|---|---|---|---|"]
     for name, st in r.stages.items():
         lines.append(f"| {name} | {st.n} | {_f(st.p50)} | {_f(st.p95)} | {_f(st.max)} |")
+        if name == "e2e" and r.e2e_minus_buffer is not None:
+            mb = r.e2e_minus_buffer
+            lines.append(f"| e2e − буфер | {mb.n} | {_f(mb.p50)} | {_f(mb.p95)} | {_f(mb.max)} |")
     ratio = "—" if r.buffer_ratio is None else f"×{r.buffer_ratio:.1f}"
     lines += [
         "",
         f"- Задержка буфера относительно p50(e2e) (reorder_delay_ms / p50): {ratio}",
         f"- p95 e2e ≤ {MAX_E2E_P95_MS:.0f} мс — {_with_unit(r.stages['e2e'].p95, 'мс')}{_mark(r.nfr4_ok)}",
+        "",
+        "e2e ≥ задержки буфера по построению: при буфере ≥ 300 мс NFR-4 (≤ 300 мс) не выполняется; "
+        "строка “e2e − буфер” показывает собственную задержку обработки.",
         "",
         "## NFR-6: батарея", "",
         f"- Расход full: {_drain_text(r.drain)}",
@@ -451,14 +488,28 @@ def render(r: PerfResult) -> str:
         "",
         "## Опоздания событий", "",
         f"| источник | n | p50 (среднее), мс | p99 (макс. по окнам), мс | max, мс | доля > {r.table_delay_ms - 100:.0f} мс "
-        f"(верх. оценка) |",
-        "|---|---|---|---|---|---|",
+        f"(верх. оценка) | опоздало (факт) | доля опоздавших (факт) |",
+        "|---|---|---|---|---|---|---|---|",
     ]
+    rough_frames = False
     for src, st in r.lateness.items():
         share = st.share_ub(r.table_delay_ms - DELAY_MARGIN_MS)
-        few = " (мало данных)" if st.n < MIN_SOURCE_N else ""
+        if not _eligible(src, st):
+            few = " (мало данных)"
+        elif src == "frame" and st.n < MIN_SOURCE_N:
+            few, rough_frames = " (мало кадров, оценка грубая)", True
+        else:
+            few = ""
+        fact = r.late_src_share(src)
+        if fact is None:
+            fact_cols = "— | —"
+        else:
+            mark = (" ✅" if fact <= MAX_LATE_SHARE else " ❌") if src in STRICT_LATE_SOURCES else ""
+            fact_cols = f"{r.late_src.get(src, 0)} | {fact * 100:.2f} %{mark}"
         lines.append(f"| {src}{few} | {st.n} | {_f(st.p50_mean)} | {_f(st.p99_max)} | {_f(st.max)} | "
-                     f"{'—' if share is None else f'{share * 100:.2f} %'} |")
+                     f"{'—' if share is None else f'{share * 100:.2f} %'} | {fact_cols} |")
+    if rough_frames:
+        lines += ["", f"Кадров меньше {MIN_SOURCE_N}: мало кадров, оценка грубая."]
     if r.recommendation == "few":
         rec = f"нет данных (ни у одного источника нет {MIN_SOURCE_N} событий)"
     elif r.recommendation == "over":
@@ -468,7 +519,8 @@ def render(r: PerfResult) -> str:
     late_share = "—" if r.late_share is None else f"{r.late_share * 100:.2f} %"
     lines += [
         "",
-        f"Источники с n < {MIN_SOURCE_N} в выборе буфера не участвуют.",
+        f"Источники с n < {MIN_SOURCE_N} в выборе буфера не участвуют (кадры — с n ≥ {MIN_FRAME_N}). "
+        f"Фактическая доля опоздавших для frame и gnss_fix должна быть ≤ {MAX_LATE_SHARE * 100:.1f} %.",
         "",
         f"- Опоздавших (late): {r.late_count}, отброшенных (dropped): {r.dropped_count} — счётчики за весь прогон",
         f"- При текущем буфере доля опоздавших (по всем источникам, в основном IMU): {late_share} "
