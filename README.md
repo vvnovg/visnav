@@ -4,7 +4,7 @@ Android-навигатор, который определяет положени
 
 *An Android navigator that localizes a car by matching camera frames against a pre-downloaded database of geotagged street-level imagery when GNSS is lost or spoofed. Research prototype; documentation is in Russian.*
 
-> **Статус: исследовательский прототип.** Этапы M0, M1, M2 (M2a, M2b, M2c) и M3 (M3a, M3b, M3c) готовы в коде. Полевые испытания ещё не проводились, пользоваться приложением для навигации пока нельзя.
+> **Статус: исследовательский прототип.** Этапы M0, M1, M2 (M2a, M2b, M2c) M3 (M3a, M3b, M3c) и M4a готовы в коде. Полевые испытания ещё не проводились, пользоваться приложением для навигации пока нельзя.
 
 ## Как это работает
 
@@ -28,7 +28,8 @@ Android-навигатор, который определяет положени
 | **M3a** | Офлайн-маршрут по графу коридора, голосовые подсказки о манёврах, перестроение, оценка в replay. Критерий: ≥ 95 % манёвров с подсказкой за ≥ 3 с, без ложных перестроений | Код готов, ждёт выгрузки OSM и поездок |
 | **M3b** | Навигационный экран с офлайн-картой MapLibre: маршрут, позиция с кругом неопределённости в цвете режима, следующий манёвр; вкладка отладки. Карта коридора собирается на ПК из выгрузки OSM | Код готов, ждёт проверки на телефоне и поездок |
 | **M3c** | Пакет поездки: маршрут на ПК тем же A*, что и на телефоне (через промежуточные точки), эталоны, граф дорог v3 с краями коридора (без разворотов у края), карта; несколько поездок на телефоне с выбором в приложении | Код готов, ждёт проверки на телефоне и поездок |
-| M4 | Оптимизация, бета-тест | План |
+| **M4a** | Производительность: журнал замеров (задержка, батарея, нагрев, опоздание событий), адаптивная частота кадров, быстрый путь кадра, настраиваемый буфер упорядочивания, отчёт `vpr-m4 perf-eval`. Критерий: NFR-4, NFR-6, NFR-7 | Код готов, ждёт замеров на телефоне; формулировка NFR-4 — решение владельца |
+| M4b–M4d | OBD-II, внешняя камера UVC/AAOS, закрытая бета | План |
 
 ## Структура
 
@@ -71,8 +72,10 @@ uv run pytest -q
   - `nav-eval` — подсказки о манёврах вовремя, ложные перестроения и прибытие по журналу ведения (`.nav.jsonl`);
   - `pack-map` — офлайн-карта для телефона: тайлы OpenMapTiles (собираются planetiler) обрезаются до коридора поездки, к ним добавляются шрифты Noto Sans;
   - `pack-trip` — пакет поездки `trips/<имя>/` (эталоны, граф дорог, карта, точка назначения, сводка) с общей моделью.
+- `vpr-m4`:
+  - `perf-eval` — отчёт по NFR-4/6/7 из журнала `.perf.jsonl` (задержка, расход батареи против профиля без камеры, нагрев) и рекомендация задержки буфера упорядочивания.
 
-Как запускать всё по шагам, описано в [drive-protocol.md](docs/research/drive-protocol.md), [m1-field-test.md](docs/research/m1-field-test.md), [m2a-replay.md](docs/research/m2a-replay.md), [m2b-roads.md](docs/research/m2b-roads.md), [m2c-monitor.md](docs/research/m2c-monitor.md), [m3a-route.md](docs/research/m3a-route.md), [m3b-map.md](docs/research/m3b-map.md) и [m3c-trip.md](docs/research/m3c-trip.md).
+Как запускать всё по шагам, описано в [drive-protocol.md](docs/research/drive-protocol.md), [m1-field-test.md](docs/research/m1-field-test.md), [m2a-replay.md](docs/research/m2a-replay.md), [m2b-roads.md](docs/research/m2b-roads.md), [m2c-monitor.md](docs/research/m2c-monitor.md), [m3a-route.md](docs/research/m3a-route.md), [m3b-map.md](docs/research/m3b-map.md), [m3c-trip.md](docs/research/m3c-trip.md) и [m4a-perf.md](docs/research/m4a-perf.md).
 
 ## Android
 
