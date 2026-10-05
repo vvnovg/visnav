@@ -95,37 +95,52 @@ fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
                 onClick = { if (s.running) controller.stop() else controller.start() },
                 enabled = s.loaded && permissionsGranted && (s.running || !s.loading),
             ) { Text(if (s.running) "Стоп" else "Старт") }
-            s.perf?.let { p ->
-                Text("Интервал кадров: ${p.intervalMs} мс")
-                Text("Нагрев (thermal): ${p.thermal ?: "—"}")
-                Text("e2e p50: ${p.e2eP50?.let { "%.0f мс".format(it) } ?: "—"}")
-                Text("Ток батареи: ${p.currentMa?.let { "%.0f мА".format(it) } ?: "—"}")
+            if (s.running) {
+                Text(perfLine(s.perf))
+            } else {
+                PerfSettingsControls(controller, s.settings, loading = s.loading)
             }
-            PerfSettingsControls(controller, s.settings, enabled = !s.running, loading = s.loading)
         }
     }
 }
 
-/** Настройки замеров: по нажатию — следующий вариант; только вне записи (ORT — ещё и не во время загрузки базы). */
+/** Блок «Замер»: по нажатию — следующий вариант; виден только вне записи (модель — ещё и не во время загрузки базы). */
 @Composable
-private fun PerfSettingsControls(controller: M1Controller, st: PerfSettings, enabled: Boolean, loading: Boolean) {
+private fun PerfSettingsControls(controller: M1Controller, st: PerfSettings, loading: Boolean) {
+    Text("Замер", style = MaterialTheme.typography.titleMedium)
+    OutlinedButton(
+        onClick = { controller.setProfile(PerfSettings.next(PerfSettings.PROFILES, st.profile)) },
+    ) { Text("Профиль: ${profileLabel(st.profile)}") }
+    OutlinedButton(
+        onClick = { controller.setDuration(PerfSettings.next(PerfSettings.DURATIONS_MIN, st.durationMin)) },
+    ) { Text("Длительность: ${durationLabel(st.durationMin)}") }
     OutlinedButton(
         onClick = { controller.setReorderDelay(PerfSettings.next(PerfSettings.REORDER_DELAYS_MS, st.reorderDelayMs)) },
-        enabled = enabled,
     ) { Text("Буфер: ${st.reorderDelayMs} мс") }
     OutlinedButton(
         onClick = { controller.setOrt(PerfSettings.next(PerfSettings.ORTS, st.ort)) },
-        enabled = enabled && !loading,
-    ) { Text("ORT: ${st.ort}") }
-    OutlinedButton(
-        onClick = { controller.setProfile(PerfSettings.next(PerfSettings.PROFILES, st.profile)) },
-        enabled = enabled,
-    ) { Text("Профиль: ${if (st.baseline) "baseline (без камеры)" else "full"}") }
-    OutlinedButton(
-        onClick = { controller.setDuration(PerfSettings.next(PerfSettings.DURATIONS_MIN, st.durationMin)) },
-        enabled = enabled,
-    ) { Text("Длительность: ${if (st.durationMin == 0) "без ограничения" else "${st.durationMin} мин"}") }
+        enabled = !loading,
+    ) { Text("Модель: ${ortLabel(st.ort)}") }
 }
+
+internal fun profileLabel(profile: String) =
+    if (profile == PerfSettings.PROFILE_BASELINE) "База (без камеры)" else "Полная"
+
+internal fun ortLabel(ort: String) = if (ort == PerfSettings.ORT_XNNPACK) "XNNPACK" else "CPU"
+
+internal fun durationLabel(min: Int) = if (min == 0) "без ограничения" else "$min мин"
+
+private val THERMAL_LABELS = listOf("нет", "слабый", "умеренный", "сильный", "критический", "аварийный", "отключение")
+
+/** Подпись уровня нагрева PowerManager (THERMAL_STATUS_NONE..SHUTDOWN); неизвестный или нет данных — «—». */
+internal fun thermalLabel(status: Int?): String = status?.let { THERMAL_LABELS.getOrNull(it) } ?: "—"
+
+/** Строка показателей во время записи; до первого замера — прочерки. */
+internal fun perfLine(p: PerfUi?): String =
+    "Кадр: каждые ${p?.let { "${it.intervalMs} мс" } ?: "—"}" +
+        " · Нагрев: ${thermalLabel(p?.thermal)}" +
+        " · E2E p50: ${p?.e2eP50?.let { "%.0f мс".format(it) } ?: "—"}" +
+        " · Ток: ${p?.currentMa?.let { "%.0f мА".format(it) } ?: "—"}"
 
 internal fun modeLabel(m: NavMode) = when (m) {
     NavMode.GNSS -> "GNSS"
