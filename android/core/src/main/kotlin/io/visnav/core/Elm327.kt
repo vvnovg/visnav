@@ -39,11 +39,11 @@ object Elm327 {
     /** Ответ — ошибка адаптера или шины (NO DATA, ?, UNABLE TO CONNECT, CAN ERROR, BUS ERROR, STOPPED, ERROR,
      * BUFFER FULL, BUS BUSY, ACT ALERT, LP ALERT, LV RESET, ERRxx, баннер сброса ELM327). */
     fun isError(response: String): Boolean = lines(response).any { line ->
-        line == "?" || ERRORS.any { line.contains(it) } || line.startsWith("ELM327") || ERR_CODE.matches(line)
+        line == "?" || ERRORS.any { line.contains(it) } || line.contains("ELM327") || ERR_CODE.matches(line)
     }
 
-    /** Адаптер сбросился (баннер ELM327 или LV RESET) — инициализацию нужно повторить. */
-    fun isReset(response: String): Boolean = lines(response).any { it.startsWith("ELM327") || it.contains("LV RESET") }
+    /** Адаптер сбросился (баннер ELM327 где угодно в строке — после просадки питания перед ним бывает мусор — или LV RESET). */
+    fun isReset(response: String): Boolean = lines(response).any { it.contains("ELM327") || it.contains("LV RESET") }
 
     private fun lines(response: String): List<String> =
         response.replace(">", "").split('\r', '\n').map { it.trim().uppercase() }.filter { it.isNotEmpty() }

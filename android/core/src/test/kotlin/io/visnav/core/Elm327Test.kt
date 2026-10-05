@@ -80,6 +80,8 @@ class Elm327Test {
         assertTrue(Elm327.isReset("ELM327 v1.5\r\r>"))
         assertTrue(Elm327.isReset("\r\rELM327 v2.1\r>"))
         assertTrue(Elm327.isReset("LV RESET\r>"))
+        assertTrue(Elm327.isReset("\u0000ÿELM327 v1.5\r>"))
+        assertTrue(Elm327.isError("\u0000ÿELM327 v1.5\r>"))
         assertFalse(Elm327.isReset("41 0D 3C\r>"))
         assertFalse(Elm327.isReset("NO DATA\r>"))
         assertFalse(Elm327.isReset("OK\r>"))
