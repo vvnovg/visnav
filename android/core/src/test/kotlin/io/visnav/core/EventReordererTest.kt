@@ -132,9 +132,28 @@ class EventReordererTest {
         r.push(ReorderItem.Frame(1, null), 2)
         val s = r.latenessSnapshotAndReset()
         assertEquals(listOf("frame", "gnss_fix", "imu", "agc", "other"), s.keys.toList())
-        val line = PerfLog.late(1L, s, 0, 0)
+        val line = PerfLog.late(1L, s, 0, 0, emptyMap())
         assertTrue(line.indexOf("\"frame\"") < line.indexOf("\"gnss_fix\"") &&
             line.indexOf("\"gnss_fix\"") < line.indexOf("\"imu\"") &&
             line.indexOf("\"imu\"") < line.indexOf("\"agc\"") && line.indexOf("\"agc\"") < line.indexOf("\"other\""))
+    }
+
+    @Test fun lateBySourceCountsLateItemsCumulativelyInFixedOrder() {
+        val r = EventReorderer(0)
+        r.push(ev(1000.0), 1000)
+        r.push(ReorderItem.Frame(1000, null), 1000)
+        r.drainList(1000)
+        assertEquals(emptyMap(), r.lateBySourceSnapshot())
+        r.push(ReorderItem.Sensor(AgcEvent(900.0, 1f, 1)), 1100)
+        r.push(ev(800.0), 1100); r.push(ev(700.0), 1100)
+        r.push(ReorderItem.Frame(900, null), 1100)
+        r.push(ev(2000.0), 1100)
+        val snap = r.lateBySourceSnapshot()
+        assertEquals(mapOf("frame" to 1, "imu" to 2, "agc" to 1), snap)
+        assertEquals(listOf("frame", "imu", "agc"), snap.keys.toList())
+        assertEquals(4, r.late)
+        r.latenessSnapshotAndReset()
+        r.drainList(1100)
+        assertEquals(snap, r.lateBySourceSnapshot())
     }
 }

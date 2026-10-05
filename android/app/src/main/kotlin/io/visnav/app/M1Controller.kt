@@ -142,7 +142,11 @@ class M1Controller(private val context: Context) {
     @Volatile private var perfLog: LineLog? = null
     private val sysSampler = SysSampler(context)
     private val mainHandler = Handler(Looper.getMainLooper())
-    /** Остановка по длительности прогона (duration_min); снимается при любой остановке. */
+    /**
+     * Остановка по длительности прогона (duration_min); снимается при любой остановке. Handler.postDelayed
+     * считает по uptimeMillis, который стоит во сне устройства, — это верно, потому что экран прогона держит
+     * FLAG_KEEP_SCREEN_ON и устройство не засыпает.
+     */
     @Volatile private var durationStop: Runnable? = null
     @Volatile private var navSession: NavSession? = null
     /** Выпускает остаток очереди переупорядочителя (на executor) и возвращает число опоздавших событий. */
@@ -151,6 +155,8 @@ class M1Controller(private val context: Context) {
     @Volatile private var drainNow: (() -> Unit)? = null
     @Volatile private var drainTimer: java.util.concurrent.ScheduledExecutorService? = null
     @Volatile private var drainTask: java.util.concurrent.ScheduledFuture<*>? = null
+    /** Drain уже стоит в очереди executor'а или выполняется — тик таймера пропускается, задачи не копятся. */
+    private val drainQueued = AtomicBoolean(false)
     /** Замеры раз в 5 с на executor (sys, late, регулятор кадров). */
     @Volatile private var perfTickNow: (() -> Unit)? = null
     @Volatile private var perfTask: java.util.concurrent.ScheduledFuture<*>? = null
@@ -513,7 +519,8 @@ class M1Controller(private val context: Context) {
                 // Финальные строки late и sys перед закрытием perf-журнала (хвост после последнего тика).
                 try {
                     val now = System.currentTimeMillis()
-                    pLog.line(PerfLog.late(now, reorderer.latenessSnapshotAndReset(), reorderer.late, reorderer.dropped))
+                    pLog.line(PerfLog.late(now, reorderer.latenessSnapshotAndReset(), reorderer.late, reorderer.dropped,
+                        reorderer.lateBySourceSnapshot()))
                     pLog.line(PerfLog.sys(sysSampler.sample(now, frameAnalyzer.intervalMs)))
                 } catch (_: Exception) {
                     // Журнал замеров вторичен: сбой здесь не мешает закрыть остальные журналы.
@@ -528,7 +535,8 @@ class M1Controller(private val context: Context) {
                     val now = System.currentTimeMillis()
                     val sys = sysSampler.sample(now, frameAnalyzer.intervalMs)
                     pLog.line(PerfLog.sys(sys))
-                    pLog.line(PerfLog.late(now, reorderer.latenessSnapshotAndReset(), reorderer.late, reorderer.dropped))
+                    pLog.line(PerfLog.late(now, reorderer.latenessSnapshotAndReset(), reorderer.late, reorderer.dropped,
+                        reorderer.lateBySourceSnapshot()))
                     // Регулятор — по монотонным часам.
                     val interval = governor.update(SystemClock.elapsedRealtime(), sys.thermal, sys.headroom,
                         lastOut?.mode, lastOut?.health)
@@ -886,14 +894,25 @@ class M1Controller(private val context: Context) {
         perfTickNow = perfTick
         val timer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
         drainTimer = timer
-        // Таймер только ставит задачу на executor: сам drain остаётся однопоточным.
+        // Таймер только ставит задачу на executor: сам drain остаётся однопоточным. Тик частый (DRAIN_TICK_MS),
+        // чтобы e2e не росло на ожидание тика сверх задержки переупорядочителя; в очереди executor'а не больше
+        // одной задачи drain, поэтому кадр ждёт за ней не дольше одного (обычно пустого) drain.
         drainTask = timer.scheduleWithFixedDelay({
-            try {
-                executor.execute { drainNow?.invoke() }
-            } catch (_: java.util.concurrent.RejectedExecutionException) {
-                // executor уже закрыт — таймер остановит close().
+            if (drainQueued.compareAndSet(false, true)) {
+                try {
+                    executor.execute {
+                        try {
+                            drainNow?.invoke()
+                        } finally {
+                            drainQueued.set(false)
+                        }
+                    }
+                } catch (_: java.util.concurrent.RejectedExecutionException) {
+                    // executor уже закрыт — таймер остановит close().
+                    drainQueued.set(false)
+                }
             }
-        }, 500, 500, java.util.concurrent.TimeUnit.MILLISECONDS)
+        }, DRAIN_TICK_MS, DRAIN_TICK_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
         perfTask = timer.scheduleWithFixedDelay({
             try {
                 executor.execute { perfTickNow?.invoke() }
@@ -957,6 +976,7 @@ class M1Controller(private val context: Context) {
         const val PREF_PROFILE = "profile"
         const val PREF_DURATION = "duration_min"
         const val PERF_TICK_MS = 5_000L
+        const val DRAIN_TICK_MS = 50L
         /** Повтор пустого кадра baseline после ошибки push. */
         const val BASELINE_RETRY_MS = 1_000L
     }

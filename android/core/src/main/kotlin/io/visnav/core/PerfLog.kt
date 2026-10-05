@@ -32,11 +32,14 @@ object PerfLog {
             "\"current_ua\":${s.currentUa ?: "null"},\"batt_temp_c\":${num(s.battTempC)},\"plugged\":${s.plugged}," +
             "\"thermal\":${s.thermal ?: "null"},\"headroom\":${num(s.headroom)},\"interval_ms\":${s.intervalMs}}"
 
-    fun late(tMs: Long, stats: Map<String, LatenessStats>, late: Int, dropped: Int): String {
+    /** [lateBySource] — накопительные счётчики опоздавших по источникам; в `late_src` идут только ненулевые, в порядке карты. */
+    fun late(tMs: Long, stats: Map<String, LatenessStats>, late: Int, dropped: Int, lateBySource: Map<String, Int>): String {
         val sources = stats.entries.joinToString(",") { (src, st) ->
             "${JsonPrimitive(src)}:{\"n\":${st.n},\"p50\":${ms(st.p50)},\"p99\":${ms(st.p99)},\"max\":${ms(st.max)}}"
         }
-        return "{\"type\":\"late\",\"t_ms\":$tMs,\"sources\":{$sources},\"late\":$late,\"dropped\":$dropped}"
+        val lateSrc = lateBySource.entries.filter { it.value != 0 }.joinToString(",") { (src, n) -> "${JsonPrimitive(src)}:$n" }
+        return "{\"type\":\"late\",\"t_ms\":$tMs,\"sources\":{$sources},\"late\":$late,\"dropped\":$dropped," +
+            "\"late_src\":{$lateSrc}}"
     }
 
     /** JSON не знает NaN/Infinity — не-конечное значение пишется как `null`. */

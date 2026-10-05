@@ -35,6 +35,8 @@ class EventReorderer(val delayMs: Long = 1500, private val maxQueued: Int = 20_0
     private var lateCount = 0
     private var droppedCount = 0
     private val lateness = HashMap<String, ArrayDeque<Double>>()
+    /** Накопительное число опоздавших элементов (попавших в lateQueue) по источникам; не сбрасывается. */
+    private val lateBySource = HashMap<String, Int>()
 
     val late: Int get() = synchronized(lock) { lateCount }
     val dropped: Int get() = synchronized(lock) { droppedCount }
@@ -45,14 +47,27 @@ class EventReorderer(val delayMs: Long = 1500, private val maxQueued: Int = 20_0
     fun push(item: ReorderItem, arrivalMs: Long) = push(item, arrivalMs - item.tMs)
 
     private fun push(item: ReorderItem, latenessMs: Double) = synchronized(lock) {
-        val window = lateness.getOrPut(sourceOf(item)) { ArrayDeque() }
+        val src = sourceOf(item)
+        val window = lateness.getOrPut(src) { ArrayDeque() }
         window.addLast(latenessMs)
         if (window.size > LATENESS_WINDOW) window.removeFirst()
-        if (item.tMs < lastReleased) { lateQueue.add(item); lateCount++ } else queue.add(Entry(seq++, item))
+        if (item.tMs < lastReleased) {
+            lateQueue.add(item); lateCount++
+            lateBySource[src] = (lateBySource[src] ?: 0) + 1
+        } else {
+            queue.add(Entry(seq++, item))
+        }
         while (queue.size + lateQueue.size > maxQueued) {
             if (queue.isNotEmpty()) queue.poll() else lateQueue.removeAt(0)
             droppedCount++
         }
+    }
+
+    /** Накопительные счётчики опоздавших по источникам с ненулевым счётом, в порядке [SOURCES]; без сброса. */
+    fun lateBySourceSnapshot(): Map<String, Int> = synchronized(lock) {
+        val out = LinkedHashMap<String, Int>()
+        for (src in SOURCES) lateBySource[src]?.let { out[src] = it }
+        out
     }
 
     /**

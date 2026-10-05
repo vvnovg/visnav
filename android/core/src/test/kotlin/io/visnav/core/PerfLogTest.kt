@@ -74,7 +74,9 @@ class PerfLogTest {
             "frame" to LatenessStats(3, 120.25, 300.0, 410.5),
             "imu" to LatenessStats(10, 5.0, 9.96, 12.0),
         )
-        val o = obj(PerfLog.late(7L, stats, 2, 1))
+        val line = PerfLog.late(7L, stats, 2, 1, linkedMapOf("frame" to 1, "gnss_fix" to 0, "imu" to 1))
+        assertTrue(line.endsWith(",\"late\":2,\"dropped\":1,\"late_src\":{\"frame\":1,\"imu\":1}}"), line)
+        val o = obj(line)
         assertEquals("late", o.str("type"))
         assertEquals("7", o.raw("t_ms"))
         assertEquals("2", o.raw("late"))
@@ -86,6 +88,8 @@ class PerfLogTest {
         assertEquals("300.0", f.raw("p99"))
         assertEquals("410.5", f.raw("max"))
         assertEquals("10.0", src.getValue("imu").jsonObject.raw("p99"))
-        assertTrue(obj(PerfLog.late(8L, emptyMap(), 0, 0)).getValue("sources").jsonObject.isEmpty())
+        val empty = obj(PerfLog.late(8L, emptyMap(), 0, 0, emptyMap()))
+        assertTrue(empty.getValue("sources").jsonObject.isEmpty())
+        assertTrue(empty.getValue("late_src").jsonObject.isEmpty())
     }
 }
