@@ -38,4 +38,50 @@ class Elm327Test {
         assertFalse(Elm327.isError("41 0D 3C\r\r>"))
         assertFalse(Elm327.isError("SEARCHING...\r41 0D 00\r>"))
     }
+
+    @Test fun compactNonSpeedResponseIsNotMisread() = assertNull(Elm327.parseSpeed("4100B410D3C0\r>"))
+
+    @Test fun linesAreNotStitched() = assertNull(Elm327.parseSpeed("41 00 BE 3F A8 41\r0D 3C\r>"))
+
+    @Test fun parsesCan11BitHeader() {
+        assertEquals(60, Elm327.parseSpeed("7E8 03 41 0D 3C\r>"))
+        assertEquals(60, Elm327.parseSpeed("7E803410D3C"))
+    }
+
+    @Test fun parsesCan29BitHeader() = assertEquals(60, Elm327.parseSpeed("18 DA F1 10 03 41 0D 3C"))
+
+    @Test fun parsesIsoHeaderWithChecksum() = assertEquals(60, Elm327.parseSpeed("48 6B 10 41 0D 3C A2"))
+
+    @Test fun canHeaderWithWrongPciIsRejected() = assertNull(Elm327.parseSpeed("7E8 0B 41 0D 3C\r>"))
+
+    @Test fun valueMustBeOneByte() {
+        assertNull(Elm327.parseSpeed("41 0D 3\r>"))
+        assertNull(Elm327.parseSpeed("41 0D 3C 00\r>"))
+    }
+
+    @Test fun parsesLowercaseAndCrLf() {
+        assertEquals(60, Elm327.parseSpeed("41 0d 3c\r\n>"))
+        assertEquals(60, Elm327.parseSpeed("010D\r\n41 0D 3C\r\n\r\n>"))
+        assertEquals(60, Elm327.parseSpeed("7e8 03 41 0d 3c\r\n>"))
+    }
+
+    @Test fun firstEcuWinsWhenValuesDiffer() = assertEquals(60, Elm327.parseSpeed("41 0D 3C\r41 0D 3D\r>"))
+
+    @Test fun moreErrorsAreRecognized() {
+        for (r in listOf("BUFFER FULL\r>", "BUS BUSY\r>", "ACT ALERT\r>", "LP ALERT\r>", "LV RESET\r>",
+            "ELM327 v1.5\r\r>", "ERR94\r>", "err7f\r\n>")) {
+            assertTrue(Elm327.isError(r), r)
+        }
+        assertFalse(Elm327.isError("41 0D 3C\r>"))
+        assertFalse(Elm327.isError("ERR9\r>"))
+    }
+
+    @Test fun resetIsRecognized() {
+        assertTrue(Elm327.isReset("ELM327 v1.5\r\r>"))
+        assertTrue(Elm327.isReset("\r\rELM327 v2.1\r>"))
+        assertTrue(Elm327.isReset("LV RESET\r>"))
+        assertFalse(Elm327.isReset("41 0D 3C\r>"))
+        assertFalse(Elm327.isReset("NO DATA\r>"))
+        assertFalse(Elm327.isReset("OK\r>"))
+    }
 }
