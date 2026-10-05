@@ -13,13 +13,17 @@ class LoadedBundle(
     val destination: Destination? = null,
     /** Неисправный route.json: запись идёт без маршрута, текст показывается в статусе. */
     val routeWarning: String? = null,
+    /** Запрошенный исполнитель ORT (cpu/xnnpack); фактический — embedder.ort. */
+    val requestedOrt: String = PerfSettings.ORT_CPU,
+    /** Почему XNNPACK запрошен, но не используется (сессия или пробный прогон); null — нет отката. */
+    val xnnpackError: String? = null,
 )
 
 data class Destination(val lat: Double, val lon: Double, val name: String?)
 
 object BundleLoader {
     /** Бросает IllegalStateException с понятным текстом, если файлы не положены через adb push. */
-    fun load(dir: File, model: File = File(dir, "model.onnx")): LoadedBundle {
+    fun load(dir: File, model: File = File(dir, "model.onnx"), xnnpack: Boolean = false): LoadedBundle {
         val bin = File(dir, "refpack.bin")
         val json = File(dir, "refpack.json")
         for (f in listOf(bin, json, model)) check(f.isFile) { "нет файла ${f.absolutePath}" }
@@ -57,7 +61,27 @@ object BundleLoader {
                 null
             }
         } else null
-        val embedder = OrtEmbedder(model, meta.model)
+        var xnnpackError: String? = null
+        val embedder = if (xnnpack) {
+            val x = OrtEmbedder(model, meta.model, xnnpack = true)
+            xnnpackError = x.xnnpackError
+            if (x.ort == PerfSettings.ORT_XNNPACK) {
+                // Сессия с XNNPACK создалась, но пробный прогон может упасть — тогда повтор на CPU.
+                try {
+                    checked(x, meta, pack)
+                } catch (e: Exception) {
+                    x.close()
+                    xnnpackError = e.message ?: e.javaClass.simpleName
+                    checked(OrtEmbedder(model, meta.model), meta, pack)
+                }
+            } else checked(x, meta, pack)
+        } else checked(OrtEmbedder(model, meta.model), meta, pack)
+        val requested = if (xnnpack) PerfSettings.ORT_XNNPACK else PerfSettings.ORT_CPU
+        return LoadedBundle(pack, meta, embedder, roads, roadsMeta, destination, routeWarning, requested, xnnpackError)
+    }
+
+    /** Проверяет вход и размерность дескриптора пробным прогоном; при ошибке закрывает embedder. */
+    private fun checked(embedder: OrtEmbedder, meta: RefPackMeta, pack: RefPack): OrtEmbedder {
         try {
             check(embedder.inputH == meta.inputH && embedder.inputW == meta.inputW) {
                 "модель ${embedder.inputW}x${embedder.inputH} не совпадает с refpack ${meta.inputW}x${meta.inputH}"
@@ -72,6 +96,6 @@ object BundleLoader {
             embedder.close()
             throw e
         }
-        return LoadedBundle(pack, meta, embedder, roads, roadsMeta, destination, routeWarning)
+        return embedder
     }
 }

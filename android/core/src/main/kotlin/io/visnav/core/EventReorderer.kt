@@ -1,6 +1,7 @@
 package io.visnav.core
 
 import java.util.PriorityQueue
+import kotlin.math.ceil
 
 /** Элемент очереди: событие датчика или кадр (время кадра в мс, дескриптор может отсутствовать). */
 sealed interface ReorderItem {
@@ -16,8 +17,12 @@ sealed interface ReorderItem {
  * порядке прибытия и учитывается в [late]. При переполнении ([maxQueued] элементов) отбрасываются
  * самые старые, счётчик — [dropped]. Порядок при равном времени: датчики, затем кадры, затем прибытие
  * (как стабильная сортировка `sensors + frames` в Replayer). push и drain потокобезопасны; sink вызывается вне замка.
+ *
+ * Опоздание элемента (`arrivalMs − tMs`) копится по источникам (frame, gnss_fix, gnss_status, imu,
+ * agc, other) в окне до [LATENESS_WINDOW] значений; [latenessSnapshotAndReset] отдаёт статистику и
+ * очищает окна.
  */
-class EventReorderer(private val delayMs: Long = 1500, private val maxQueued: Int = 20_000) {
+class EventReorderer(val delayMs: Long = 1500, private val maxQueued: Int = 20_000) {
     private class Entry(val seq: Long, val item: ReorderItem) {
         val kind: Int get() = if (item is ReorderItem.Frame) 1 else 0
     }
@@ -29,16 +34,59 @@ class EventReorderer(private val delayMs: Long = 1500, private val maxQueued: In
     private var lastReleased = Double.NEGATIVE_INFINITY
     private var lateCount = 0
     private var droppedCount = 0
+    private val lateness = HashMap<String, ArrayDeque<Double>>()
+    /** Накопительное число опоздавших элементов (попавших в lateQueue) по источникам; не сбрасывается. */
+    private val lateBySource = HashMap<String, Int>()
 
     val late: Int get() = synchronized(lock) { lateCount }
     val dropped: Int get() = synchronized(lock) { droppedCount }
 
-    fun push(item: ReorderItem) = synchronized(lock) {
-        if (item.tMs < lastReleased) { lateQueue.add(item); lateCount++ } else queue.add(Entry(seq++, item))
+    /** Время прибытия неизвестно — опоздание считается равным 0. */
+    fun push(item: ReorderItem) = push(item, 0.0)
+
+    fun push(item: ReorderItem, arrivalMs: Long) = push(item, arrivalMs - item.tMs)
+
+    private fun push(item: ReorderItem, latenessMs: Double) = synchronized(lock) {
+        val src = sourceOf(item)
+        val window = lateness.getOrPut(src) { ArrayDeque() }
+        window.addLast(latenessMs)
+        if (window.size > LATENESS_WINDOW) window.removeFirst()
+        if (item.tMs < lastReleased) {
+            lateQueue.add(item); lateCount++
+            lateBySource[src] = (lateBySource[src] ?: 0) + 1
+        } else {
+            queue.add(Entry(seq++, item))
+        }
         while (queue.size + lateQueue.size > maxQueued) {
             if (queue.isNotEmpty()) queue.poll() else lateQueue.removeAt(0)
             droppedCount++
         }
+    }
+
+    /** Накопительные счётчики опоздавших по источникам с ненулевым счётом, в порядке [SOURCES]; без сброса. */
+    fun lateBySourceSnapshot(): Map<String, Int> = synchronized(lock) {
+        val out = LinkedHashMap<String, Int>()
+        for (src in SOURCES) lateBySource[src]?.let { out[src] = it }
+        out
+    }
+
+    /**
+     * Статистика опоздания по источникам с непустым окном, в порядке [SOURCES]; окна очищаются.
+     * Под замком только копирование, сортировка и перцентили — вне замка.
+     */
+    fun latenessSnapshotAndReset(): Map<String, LatenessStats> {
+        val windows = synchronized(lock) {
+            val copy = lateness.mapValues { it.value.toDoubleArray() }
+            lateness.clear()
+            copy
+        }
+        val out = LinkedHashMap<String, LatenessStats>()
+        for (src in SOURCES) {
+            val sorted = windows[src]?.takeIf { it.isNotEmpty() }?.also { it.sort() } ?: continue
+            fun pct(q: Double) = sorted[ceil(q * sorted.size).toInt() - 1]
+            out[src] = LatenessStats(sorted.size, pct(0.5), pct(0.99), sorted.last())
+        }
+        return out
     }
 
     fun drain(nowMs: Long, sink: (ReorderItem) -> Unit) {
@@ -61,4 +109,20 @@ class EventReorderer(private val delayMs: Long = 1500, private val maxQueued: In
     }
 
     private fun release(items: List<ReorderItem>, sink: (ReorderItem) -> Unit) = items.forEach(sink)
+
+    private companion object {
+        const val LATENESS_WINDOW = 5000
+        val SOURCES = listOf("frame", "gnss_fix", "gnss_status", "imu", "agc", "other")
+
+        fun sourceOf(item: ReorderItem): String = when (item) {
+            is ReorderItem.Frame -> "frame"
+            is ReorderItem.Sensor -> when (item.event) {
+                is LocEvent -> "gnss_fix"
+                is GnssStatusEvent -> "gnss_status"
+                is GyroEvent, is AccelEvent, is GyroUncalEvent -> "imu"
+                is AgcEvent -> "agc"
+                is ClockEvent, is FrameCaptureEvent -> "other"
+            }
+        }
+    }
 }

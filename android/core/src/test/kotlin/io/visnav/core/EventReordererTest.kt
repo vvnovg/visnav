@@ -3,6 +3,7 @@ package io.visnav.core
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 class EventReordererTest {
     private fun ev(t: Double) = ReorderItem.Sensor(GyroEvent(t, 0f, 0f, 0f))
@@ -65,5 +66,94 @@ class EventReordererTest {
         for (t in listOf(5.0, 1.0, 4.0, 2.0, 3.0)) r.push(ev(t))
         assertEquals(2, r.dropped)
         assertEquals(listOf(3.0, 4.0, 5.0), r.drainList(100).times())
+    }
+
+    @Test fun latenessStatsPerSource() {
+        val r = EventReorderer(0)
+        r.push(ev(1000.0), 1100); r.push(ev(2000.0), 2300); r.push(ev(3000.0), 3200)
+        val imu = r.latenessSnapshotAndReset().getValue("imu")
+        assertEquals(LatenessStats(3, 200.0, 300.0, 300.0), imu)
+    }
+
+    @Test fun snapshotResetsWindow() {
+        val r = EventReorderer(0)
+        r.push(ev(1000.0), 1100)
+        assertEquals(1, r.latenessSnapshotAndReset().getValue("imu").n)
+        assertEquals(null, r.latenessSnapshotAndReset()["imu"])
+    }
+
+    @Test fun oldPushRecordsZeroLateness() {
+        val r = EventReorderer(0)
+        r.push(ev(1000.0))
+        assertEquals(LatenessStats(1, 0.0, 0.0, 0.0), r.latenessSnapshotAndReset().getValue("imu"))
+    }
+
+    @Test fun sourcesMappedByEventType() {
+        val r = EventReorderer(0)
+        r.push(ReorderItem.Frame(1, null), 11)
+        r.push(ReorderItem.Sensor(LocEvent(1.0, 55.0, 37.0, 3f, null, null, null, null)), 21)
+        r.push(ReorderItem.Sensor(GnssStatusEvent(1.0, 10, 8, 30f)), 31)
+        r.push(ReorderItem.Sensor(AccelEvent(1.0, 0f, 0f, 0f)), 41)
+        r.push(ReorderItem.Sensor(GyroUncalEvent(1.0, 0f, 0f, 0f, 0f, 0f, 0f)), 51)
+        r.push(ReorderItem.Sensor(AgcEvent(1.0, 1f, 1)), 61)
+        r.push(ReorderItem.Sensor(ClockEvent(1.0, 1, 1, 1)), 71)
+        val s = r.latenessSnapshotAndReset()
+        assertEquals(10.0, s.getValue("frame").max)
+        assertEquals(20.0, s.getValue("gnss_fix").max)
+        assertEquals(30.0, s.getValue("gnss_status").max)
+        assertEquals(LatenessStats(2, 40.0, 50.0, 50.0), s.getValue("imu"))
+        assertEquals(60.0, s.getValue("agc").max)
+        assertEquals(70.0, s.getValue("other").max)
+    }
+
+    @Test fun delayIsPublic() {
+        assertEquals(800L, EventReorderer(800).delayMs)
+    }
+
+    @Test fun latenessWindowKeepsNewest5000() {
+        val r = EventReorderer(0)
+        r.push(ev(0.0), 10_000)
+        for (i in 1..5000) r.push(ev(i.toDouble()), i + 1L)
+        assertEquals(LatenessStats(5000, 1.0, 1.0, 1.0), r.latenessSnapshotAndReset().getValue("imu"))
+    }
+
+    @Test fun oldPushIsZeroEvenForFractionalTime() {
+        val r = EventReorderer(0)
+        r.push(ev(1000.6))
+        assertEquals(0.0, r.latenessSnapshotAndReset().getValue("imu").max)
+    }
+
+    @Test fun snapshotSourceOrderIsFixed() {
+        val r = EventReorderer(0)
+        r.push(ReorderItem.Sensor(FrameCaptureEvent(1.0, 1L, 5L)), 2)
+        r.push(ReorderItem.Sensor(AgcEvent(1.0, 1f, 1)), 2)
+        r.push(ev(1.0), 2)
+        r.push(ReorderItem.Sensor(LocEvent(1.0, 55.0, 37.0, 3f, null, null, null, null)), 2)
+        r.push(ReorderItem.Frame(1, null), 2)
+        val s = r.latenessSnapshotAndReset()
+        assertEquals(listOf("frame", "gnss_fix", "imu", "agc", "other"), s.keys.toList())
+        val line = PerfLog.late(1L, s, 0, 0, emptyMap())
+        assertTrue(line.indexOf("\"frame\"") < line.indexOf("\"gnss_fix\"") &&
+            line.indexOf("\"gnss_fix\"") < line.indexOf("\"imu\"") &&
+            line.indexOf("\"imu\"") < line.indexOf("\"agc\"") && line.indexOf("\"agc\"") < line.indexOf("\"other\""))
+    }
+
+    @Test fun lateBySourceCountsLateItemsCumulativelyInFixedOrder() {
+        val r = EventReorderer(0)
+        r.push(ev(1000.0), 1000)
+        r.push(ReorderItem.Frame(1000, null), 1000)
+        r.drainList(1000)
+        assertEquals(emptyMap(), r.lateBySourceSnapshot())
+        r.push(ReorderItem.Sensor(AgcEvent(900.0, 1f, 1)), 1100)
+        r.push(ev(800.0), 1100); r.push(ev(700.0), 1100)
+        r.push(ReorderItem.Frame(900, null), 1100)
+        r.push(ev(2000.0), 1100)
+        val snap = r.lateBySourceSnapshot()
+        assertEquals(mapOf("frame" to 1, "imu" to 2, "agc" to 1), snap)
+        assertEquals(listOf("frame", "imu", "agc"), snap.keys.toList())
+        assertEquals(4, r.late)
+        r.latenessSnapshotAndReset()
+        r.drainList(1100)
+        assertEquals(snap, r.lateBySourceSnapshot())
     }
 }
