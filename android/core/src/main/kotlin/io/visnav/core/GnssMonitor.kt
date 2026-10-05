@@ -37,7 +37,7 @@ data class MonitorConfig(
     val mismatchAbsMps: Double = 2.0,       // (a) |v_gps − v_obd| > max(abs, rel·v_obd) подряд holdMs
     val mismatchRel: Double = 0.1,
     val mismatchHoldMs: Double = 5_000.0,
-    val distWindowMs: Double = 30_000.0,    // (b) |Σv_gps·dt − Σv_obd·dt| за окно > max(abs, rel·Σv_obd·dt)
+    val distWindowMs: Double = 30_000.0,    // (b) |Σv_gps·dt − Σv_obd·dt| за окно > max(abs, rel·Σv_obd·dt); см. armDistanceCheck
     val distAbsM: Double = 15.0,
     val distRel: Double = 0.05,
     val stillObdMps: Double = 0.3,          // (c) v_obd < stillObd и v_gps > stillGps подряд stillHoldMs
@@ -81,6 +81,10 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
     private val distWindow = ArrayDeque<DoubleArray>() // [t, v_gps·dt, v_obd·dt]
     private var lastViolationT = Double.NEGATIVE_INFINITY
 
+    /** Включено ли правило (b); см. [armDistanceCheck]. */
+    var distanceCheckArmed: Boolean = false
+        private set
+
     fun onStatus(e: GnssStatusEvent) {
         val prev = lastStatus
         if (prev != null && e.tMs - prev.tMs > config.statusStaleMs) uniformFlags.clear()
@@ -104,6 +108,15 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
      * Идёт ли накопление нарушения (a) или (c), или удерживается SPEED_MISMATCH: поправку спидометра
      * в это время не учить. У (b) отдельного «накопления» нет: окно копит сумму всегда, нарушение — её превышение.
      */
+    /**
+     * Включить правило (b) — окно расстояний. Порог (b) — 5 % пройденного пути, а начальная поправка спидометра
+     * (1/1.03) у честной машины может ошибаться сильнее (спидометр вправе завышать до ~10 %). Включённое сразу,
+     * (b) срабатывало бы на честной езде, удерживало SPEED_MISMATCH и тем самым запрещало обучение поправки —
+     * машина навсегда осталась бы UNTRUSTED. Поэтому (b) включает локализатор, когда kSlow сошлась (накоплено
+     * достаточно времени обучения) или восстановлена из сохранения. До этого работают только (a) и (c).
+     */
+    fun armDistanceCheck() { distanceCheckArmed = true }
+
     fun obdSuspicious(tMs: Double): Boolean = instantSince != null || stillSince != null || mismatchHeld(tMs)
 
     fun onAgc(e: AgcEvent) {
@@ -196,7 +209,7 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
         while (distWindow.isNotEmpty() && distWindow.first()[0] <= t - config.distWindowMs) distWindow.removeFirst()
         val gpsM = distWindow.sumOf { it[1] }
         val obdM = distWindow.sumOf { it[2] }
-        if (abs(gpsM - obdM) > max(config.distAbsM, config.distRel * obdM)) violation = true
+        if (distanceCheckArmed && abs(gpsM - obdM) > max(config.distAbsM, config.distRel * obdM)) violation = true
 
         if (violation) lastViolationT = t
     }

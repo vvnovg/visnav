@@ -38,7 +38,7 @@ class GnssMonitorObdTest {
     }
 
     @Test fun distanceWindowCatchesSlowDrift() {
-        val m = GnssMonitor()
+        val m = GnssMonitor(); m.armDistanceCheck()
         m.drive(0, 10, 16.0, 15.0) // 10 м за 10 с — меньше 15 м
         assertFalse(m.mismatch(10_100.0))
         assertFalse(m.obdSuspicious(10_100.0))
@@ -47,8 +47,19 @@ class GnssMonitorObdTest {
         assertEquals(GnssHealth.UNTRUSTED, m.assess(30_100.0).health)
     }
 
+    @Test fun distanceWindowIsOffUntilArmed() {
+        val m = GnssMonitor()
+        assertFalse(m.distanceCheckArmed)
+        m.drive(0, 60, 16.0, 15.0) // 1 м/с: только (b) поймало бы
+        assertFalse(m.mismatch(60_100.0))
+        assertFalse(m.obdSuspicious(60_100.0))
+        m.armDistanceCheck()
+        m.drive(61, 62, 16.0, 15.0) // окно уже накоплено — нарушение сразу
+        assertTrue(m.mismatch(62_100.0))
+    }
+
     @Test fun matchingSpeedsStayClean() {
-        val m = GnssMonitor(); m.drive(0, 120, 15.2, 15.0)
+        val m = GnssMonitor(); m.armDistanceCheck(); m.drive(0, 120, 15.2, 15.0)
         assertEquals(Assessment(GnssHealth.GOOD, emptySet()), m.assess(120_100.0))
         assertFalse(m.obdSuspicious(120_100.0))
     }

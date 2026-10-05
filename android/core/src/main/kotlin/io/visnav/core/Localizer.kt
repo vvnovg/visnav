@@ -39,6 +39,12 @@ data class LocalizerConfig(
  * v_gnss/v_obd вне [kMin − 0.05, kMax + 0.05] — выброс, k к нему не тянется. Медленная kSlow (τ = kSlowTauMs) учится
  * по тем же правилам — для сравнения скоростей при проверке подмены: подмена не утянет её за минуты.
  *
+ * Пока (b) не включено, kSlow учится с τ = kTauMs (прогрев), после — с kSlowTauMs.
+ * Правило (b) монитора (окно расстояний, порог 5 %) включается, когда накоплено distArmLearnedMs времени обучения
+ * (obdLearnedMs — сумма dt принятых наблюдений) либо kSlow восстановлена из сохранения (kSlowRestore): до схождения
+ * kSlow честная машина со спидометром, далёким от kInit, давала бы SPEED_MISMATCH, а он запрещает обучение.
+ * kRestore/kSlowRestore — сохранённые приложением значения (по адаптеру), начальные вместо kInit, в пределах [kMin, kMax].
+ *
  * Не учитывается: задержка ЭБУ (время события — середина запроса; возможная настройка latencyMs — после полевых
  * данных) и задний ход (скорость OBD без знака: v ≥ 0).
  */
@@ -52,6 +58,9 @@ data class ObdConfig(
     val sigmaMinMps: Double = 0.3,
     val learnMinSpeedMps: Double = 5.0,
     val learnMaxAgeMs: Long = 500,
+    val distArmLearnedMs: Long = 600_000,
+    val kRestore: Double? = null,
+    val kSlowRestore: Double? = null,
 )
 
 /**
@@ -137,8 +146,8 @@ class Localizer(
     private var roadRejects = 0
     private var roadSuspended = false
     private var lastLocT = Double.NEGATIVE_INFINITY
-    private var obdK = config.obd.kInit
-    private var obdKSlowValue = config.obd.kInit
+    private var obdK = (config.obd.kRestore ?: config.obd.kInit).coerceIn(config.obd.kMin, config.obd.kMax)
+    private var obdKSlowValue = (config.obd.kSlowRestore ?: config.obd.kInit).coerceIn(config.obd.kMin, config.obd.kMax)
     private var obdSeen = false
     private var lastObdT = Double.NaN
     private var lastObdMps = Double.NaN
@@ -147,12 +156,23 @@ class Localizer(
     private var learnFixMps = Double.NaN
     private var lastLearnT = Double.NEGATIVE_INFINITY
 
+    /** Накопленное время обучения поправки спидометра (сумма dt принятых наблюдений), мс — для сохранения. */
+    var obdLearnedMs: Double = 0.0
+        private set
+
+    init {
+        if (config.obd.kSlowRestore != null) monitor.armDistanceCheck()
+    }
+
+    /** Включено ли правило (b) монитора (окно расстояний). */
+    internal val obdDistanceArmed: Boolean get() = monitor.distanceCheckArmed
+
     val initialized: Boolean get() = ekf.initialized
     internal val headingSigmaRad: Double get() = sqrt(ekf.headingVariance())
     internal fun lateralSigmaAcross(theta: Double): Double = sqrt(ekf.lateralVariance(theta))
     val mode: NavMode get() = modes.mode
     /** Медленная поправка спидометра (τ = kSlowTauMs) для проверки подмены GNSS; null, пока не было OBD. */
-    internal val obdKSlow: Double? get() = if (obdSeen) obdKSlowValue else null
+    val obdKSlow: Double? get() = if (obdSeen) obdKSlowValue else null
 
     private fun predictTo(t: Double) {
         if (ekf.initialized && t > lastT) { ekf.predict((t - lastT) / 1000.0, lastOmega); lastT = t }
@@ -245,8 +265,13 @@ class Localizer(
         if (ratio < c.kMin - OBD_RATIO_MARGIN || ratio > c.kMax + OBD_RATIO_MARGIN) return
         val dt = min(tFix - lastLearnT, OBD_LEARN_MAX_DT_MS)
         obdK = (obdK + (1 - exp(-dt / c.kTauMs)) * (ratio - obdK)).coerceIn(c.kMin, c.kMax)
-        obdKSlowValue = (obdKSlowValue + (1 - exp(-dt / c.kSlowTauMs)) * (ratio - obdKSlowValue)).coerceIn(c.kMin, c.kMax)
+        // До включения (b) kSlow сходится с быстрой τ: с τ = kSlowTauMs за distArmLearnedMs она прошла бы лишь ~40 %
+        // пути к истинной поправке, и остаток съедал бы порог (b).
+        val slowTau = if (monitor.distanceCheckArmed) c.kSlowTauMs else c.kTauMs
+        obdKSlowValue = (obdKSlowValue + (1 - exp(-dt / slowTau)) * (ratio - obdKSlowValue)).coerceIn(c.kMin, c.kMax)
         lastLearnT = tFix
+        obdLearnedMs += dt
+        if (obdLearnedMs >= c.distArmLearnedMs) monitor.armDistanceCheck()
     }
 
     /**

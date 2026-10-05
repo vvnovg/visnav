@@ -46,17 +46,19 @@ object SyntheticSession {
      * Статус GNSS в окне [uniformFromMs, uniformToMs) (мс от начала) «как у спуфера»:
      * used = 10, cn0Std = [uniformCn0Std]; вне окна — used = 14, cn0Std = 5.
      * [obdKmh] — показание OBD 5 Гц (null — без OBD). В окне [speedFromMs, speedToMs) скорость в фиксах
-     * GNSS больше истинной на [speedBiasMps] (подмена, согласованная по доплеру).
+     * GNSS больше истинной на [speedBiasMps] (подмена, согласованная по доплеру). [durationS] — длина сессии;
+     * эталоны есть только на первые 120 с (дальше кадры несут дескриптор последнего — визуальное выключать).
      */
     fun session(
         dir: File, uniformFromMs: Long = -1, uniformToMs: Long = -1, uniformCn0Std: Float = 1f, accM: Float = 3f,
         obdKmh: Int? = null, speedFromMs: Long = -1, speedToMs: Long = -1, speedBiasMps: Float = 0f,
+        durationS: Int = N,
     ): SessionData {
         val sensors = mutableListOf<SensorEvent>()
         val frames = mutableListOf<FrameRecord>()
         val descFile = File(dir, "s.desc")
         DescriptorLogWriter(descFile, DIM).use { w ->
-            for (step in 0..12_000) {
+            for (step in 0..durationS * 100) {
                 val tMs = T0 + step * 10L
                 val t = tMs.toDouble()
                 val rel = tMs - T0
