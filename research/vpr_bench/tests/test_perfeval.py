@@ -315,7 +315,7 @@ def test_late_and_dropped_are_cumulative_counters(tmp_path):
     res = evaluate(read_perf(_write(tmp_path, recs)))
     assert (res.late_count, res.dropped_count) == (10, 3)
     assert res.late_share == pytest.approx(10 / 10_000)
-    assert "Доля опоздавших при текущем буфере: 0.10 % (цель ≤ 0.1 %)" in render(res)
+    assert "доля опоздавших (по всем источникам, в основном IMU): 0.10 % (цель ≤ 0.1 %)" in render(res)
 
 
 def test_rare_burst_is_not_300(tmp_path):
@@ -372,3 +372,34 @@ def test_cli_bad_format_returns_2(tmp_path):
     p.write_text('{"type":"perf","v":2}\n', encoding="utf-8")
     assert main(["perf-eval", "--perf", str(p), "--out", str(tmp_path / "r.md")]) == 2
     assert main(["perf-eval", "--perf", str(tmp_path / "missing.jsonl"), "--out", str(tmp_path / "r.md")]) == 2
+
+
+def test_single_16s_gap_at_99_pct_coverage_is_yes_with_note(tmp_path):
+    recs = _sys_run(61, thermal=lambda m: 1, skip=lambda m: 30 < m < 30 + 11 / 60)  # убраны 2 сэмпла: 15 с
+    i = next(k for k, r in enumerate(recs) if r["t_ms"] > T0 + 30 * MIN)
+    recs[i]["t_ms"] += 1000  # разрыв 16 с
+    res = evaluate(read_perf(_write(tmp_path, recs)))
+    assert res.gaps_ms == [16_000]
+    assert res.thermal_coverage >= 0.99
+    assert res.nfr7.startswith("да (")
+    assert "разрывов sys > 15 с: 1, самый долгий 16 с" in res.nfr7
+
+
+def test_sharp_charge_drop_falls_back_to_percent(tmp_path):
+    recs = _drain_run(30, 900_000)  # сэмплы раз в 60 с
+    recs[11]["t_ms"] = recs[10]["t_ms"] + 30_000
+    recs[11]["charge_uah"] = recs[10]["charge_uah"] - 30_000  # > 0.5 % от 4.5e6 за 30 с
+    res = evaluate(read_perf(_write(tmp_path, recs)))
+    assert res.drain.method == "pct"
+    assert "счётчик скачет" in res.drain.notes
+
+
+def test_mean_current_skips_gaps(tmp_path):
+    recs = [_sys(T0, current=-400_000), _sys(T0 + 5_000, current=-800_000), _sys(T0 + 105_000, current=0)]
+    res = evaluate(read_perf(_write(tmp_path, recs)))
+    assert res.drain.mean_current_ma == pytest.approx(400.0)
+
+
+def test_late_share_label(tmp_path):
+    res = evaluate(read_perf(_write(tmp_path, _windows(20, "frame", 100, 50, 120, 150))))
+    assert "доля опоздавших (по всем источникам, в основном IMU)" in render(res)

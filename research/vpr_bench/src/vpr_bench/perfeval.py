@@ -18,7 +18,8 @@ MAX_LATE_SHARE = 0.001  # цель: не больше 0.1 % опоздавших
 MIN_SOURCE_N = 1000  # источник с меньшим числом событий в выборе буфера не участвует
 MAX_SYS_GAP_MS = 15_000  # разрыв между сэмплами sys длиннее — выпадает из долей времени
 MIN_THERMAL_COVERAGE = 0.95
-CHARGE_JUMP_FRAC = 0.005  # рост счётчика заряда больше 0.5 % ёмкости — «счётчик скачет»
+CHARGE_JUMP_FRAC = 0.005  # рост счётчика больше 0.5 % ёмкости или такое же падение быстрее 60 с — «счётчик скачет»
+CHARGE_DROP_WINDOW_MS = 60_000
 MAX_DURATION_RATIO = 1.5
 STAGES = (("e2e", "e2e_ms"), ("pre", "pre"), ("inf", "inf"), ("search", "search"), ("fuse", "fuse_ms"),
           ("nav", "nav_ms"))
@@ -187,19 +188,25 @@ def _span(log: PerfLog) -> tuple[float, float]:
 
 
 def _mean_current_ma(sys: list[dict]) -> float | None:
-    """Модуль среднего по времени тока, мА; сэмплы на зарядке не считаются. Сэмпл действует до следующего."""
+    """Модуль среднего по времени тока, мА; сэмплы на зарядке и разрывы > 15 с не считаются."""
     num = den = 0.0
-    for a, b in zip(sys, sys[1:]):
+    for a, dt in _intervals(sys)[0]:
         cur = _num(a.get("current_ua"))
         if cur is None or a.get("plugged") is True:
             continue
-        dt = b["t_ms"] - a["t_ms"]
         num += cur * dt
         den += dt
     if den > 0:
         return abs(num / den) / 1000.0
     plain = [c for c in (_num(r.get("current_ua")) for r in sys if r.get("plugged") is not True) if c is not None]
     return abs(float(np.mean(plain))) / 1000.0 if plain else None
+
+
+def _charge_jump(a: dict, b: dict, cap_uah: float) -> bool:
+    """Соседние сэмплы: рост больше 0.5 % ёмкости или падение больше 0.5 % быстрее чем за 60 с."""
+    delta = b["charge_uah"] - a["charge_uah"]
+    limit = CHARGE_JUMP_FRAC * cap_uah
+    return delta > limit or (-delta > limit and b["t_ms"] - a["t_ms"] < CHARGE_DROP_WINDOW_MS)
 
 
 def _drain(log: PerfLog) -> DrainResult:
@@ -212,7 +219,7 @@ def _drain(log: PerfLog) -> DrainResult:
     result: tuple[float, str] | None = None
     if cap is not None and cap > 0 and len(charged) >= 2:
         cap_uah = cap * 1000.0
-        if any(b["charge_uah"] - a["charge_uah"] > CHARGE_JUMP_FRAC * cap_uah for a, b in zip(charged, charged[1:])):
+        if any(_charge_jump(a, b, cap_uah) for a, b in zip(charged, charged[1:])):
             notes.append("счётчик скачет")
         else:
             a, b = charged[0], charged[-1]
@@ -286,12 +293,13 @@ def _nfr7(duration_min: float, first3_min: float | None, coverage: float, gaps: 
         fails.append(f"thermal ≥ 3 на {first3_min:.1f} мин")
     if fails:
         return f"нет ({', '.join(fails)})"
-    partial = []
+    # вердикт — по покрытию thermal; разрывы только для сведения
+    gap_note = (f"разрывов sys > {MAX_SYS_GAP_MS / 1000:.0f} с: {len(gaps)}, самый долгий {max(gaps) / 1000:.0f} с"
+                if gaps else None)
     if coverage < MIN_THERMAL_COVERAGE:
-        partial.append(f"thermal известен {coverage * 100:.0f} % времени, нужно ≥ {MIN_THERMAL_COVERAGE * 100:.0f} %")
-    if gaps:
-        partial.append(f"разрывов sys > {MAX_SYS_GAP_MS / 1000:.0f} с: {len(gaps)}, самый долгий {max(gaps) / 1000:.0f} с")
-    return f"неполные данные ({'; '.join(partial)})" if partial else "да"
+        parts = [f"thermal известен {coverage * 100:.0f} % времени, нужно ≥ {MIN_THERMAL_COVERAGE * 100:.0f} %"]
+        return f"неполные данные ({'; '.join(parts + ([gap_note] if gap_note else []))})"
+    return f"да ({gap_note})" if gap_note else "да"
 
 
 def evaluate(full: PerfLog, baseline: PerfLog | None = None) -> PerfResult:
@@ -463,7 +471,8 @@ def render(r: PerfResult) -> str:
         f"Источники с n < {MIN_SOURCE_N} в выборе буфера не участвуют.",
         "",
         f"- Опоздавших (late): {r.late_count}, отброшенных (dropped): {r.dropped_count} — счётчики за весь прогон",
-        f"- Доля опоздавших при текущем буфере: {late_share} (цель ≤ {MAX_LATE_SHARE * 100:.1f} %)",
+        f"- При текущем буфере доля опоздавших (по всем источникам, в основном IMU): {late_share} "
+        f"(цель ≤ {MAX_LATE_SHARE * 100:.1f} %)",
         f"- Рекомендация буфера: наименьшая ступень D, при которой доля событий с опозданием > D − "
         f"{DELAY_MARGIN_MS:.0f} мс ≤ {MAX_LATE_SHARE * 100:.1f} % по каждому источнику → {rec}",
         "",
