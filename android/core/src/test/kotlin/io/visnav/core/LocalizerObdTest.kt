@@ -31,7 +31,8 @@ class LocalizerObdTest {
     private fun pack(): RefPack =
         RefPack(1, 1, doubleArrayOf(55.75), doubleArrayOf(37.60), FloatArray(1), ShortArray(1))
 
-    private class Run(val outputs: List<Pair<LocalizerOutput, Double>>) // выход и истинная координата e, м
+    /** Выходы с истинной координатой e (м) и сам локализатор (для внутреннего состояния). */
+    private class Run(val outputs: List<Pair<LocalizerOutput, Double>>, val localizer: Localizer)
 
     private fun gauss(rnd: Random): Double {
         val u1 = rnd.nextDouble(1e-12, 1.0); val u2 = rnd.nextDouble()
@@ -45,6 +46,7 @@ class LocalizerObdTest {
         config: LocalizerConfig, durationS: Double, speed: (Double) -> Double,
         gnssOn: (Double) -> Boolean = { true }, obdKmh: ((Double, Double, Random) -> Int?)? = null,
         imuStill: (Double) -> Boolean = { false }, cn0: Float = 35f, seed: Int = 3,
+        gnssSpeedFactor: (Double) -> Double = { 1.0 }, obdEverySteps: Int = 20, obdPhaseSteps: Int = 7,
     ): Run {
         val rnd = Random(seed)
         val localizer = Localizer(pack(), config.copy(visual = false))
@@ -62,15 +64,14 @@ class LocalizerObdTest {
             localizer.onSensor(GyroEvent(t, 0f, 0f, 0f))
             if (step % 100 == 0 && gnssOn(s)) {
                 val ll = enu.toLatLon(e + 3.0 * gauss(rnd), 3.0 * gauss(rnd))
-                val vg = maxOf(0.0, v + 0.2 * gauss(rnd))
-                // Статус до фикса: здоровье на момент первого фикса уже учитывает C/N0.
+                val vg = maxOf(0.0, v + 0.2 * gauss(rnd)) * gnssSpeedFactor(s)
                 localizer.onSensor(GnssStatusEvent(t, 16, 14, cn0, 5f))
                 localizer.onSensor(LocEvent(t, ll[0], ll[1], 3f, vg.toFloat(), 0.3f, if (vg >= 1.0) 90f else null, 2f))
             }
-            if (obdKmh != null && step % 20 == 7) obdKmh(s, v, rnd)?.let { localizer.onSensor(ObdSpeedEvent(t, it, 40.0)) }
+            if (obdKmh != null && step % obdEverySteps == obdPhaseSteps) obdKmh(s, v, rnd)?.let { localizer.onSensor(ObdSpeedEvent(t, it, 40.0)) }
             if (step % 50 == 0) localizer.onFrame(tMs, null)?.let { out.add(it to e) }
         }
-        return Run(out)
+        return Run(out, localizer)
     }
 
     private fun errorM(o: LocalizerOutput, eTrue: Double): Double {
@@ -120,6 +121,8 @@ class LocalizerObdTest {
     }
 
     @Test fun doesNotLearnFactorWhileGnssDegraded() {
+        // В симуляции статус подаётся до фикса: иначе первый фикс оценивается до первого C/N0, считается GOOD,
+        // и k один раз учится — тест проверял бы порядок событий, а не правило «учиться только при GOOD».
         val r = run(
             LocalizerConfig(obd = ObdConfig(kInit = 1.0)), 300.0, { 15.0 },
             obdKmh = { _, v, rnd -> speedometer(v, rnd) }, cn0 = 20f,
@@ -127,6 +130,49 @@ class LocalizerObdTest {
         assertTrue(r.outputs.drop(10).all { it.first.health == GnssHealth.DEGRADED })
         assertTrue(r.outputs.mapNotNull { it.first.obdK }.all { it == 1.0 })
         assertEquals(1.0, r.outputs.last().first.obdK)
+    }
+
+    /** k в конце 300 с на 15 м/с при здоровом GNSS; OBD 5 Гц через 70 мс после каждого фикса. */
+    private fun finalK(
+        obdKmh: (Double, Double, Random) -> Int?, gnssSpeedFactor: (Double) -> Double = { 1.0 },
+    ): Double = run(
+        LocalizerConfig(), 300.0, { 15.0 }, obdKmh = obdKmh, gnssSpeedFactor = gnssSpeedFactor,
+    ).outputs.last().first.obdK!!
+
+    @Test fun singleZeroObdNextToFixDoesNotMoveFactor() {
+        // Ноль через 70 мс после фикса 290 с: интерполяция 15 → 0 дала бы отношение ≫ 1, и k ушёл бы к 1.1.
+        val base = finalK({ _, v, rnd -> speedometer(v, rnd) })
+        val glitch = finalK({ s, v, rnd -> speedometer(v, rnd).let { if (abs(s - 290.07) < 1e-6) 0 else it } })
+        assertTrue(abs(glitch - base) < 1e-3, "k with zero glitch $glitch vs $base")
+    }
+
+    @Test fun gnssSpeedOutlierRatioIsIgnored() {
+        // Фикс 290 с со скоростью ×1.5: отношение ≈ 1.46 вне [kMin − 0.05, kMax + 0.05] — выброс.
+        val base = finalK({ _, v, rnd -> speedometer(v, rnd) })
+        val outlier = finalK({ _, v, rnd -> speedometer(v, rnd) }, gnssSpeedFactor = { if (it == 290.0) 1.5 else 1.0 })
+        assertTrue(abs(outlier - base) < 1e-3, "k with GNSS outlier $outlier vs $base")
+    }
+
+    @Test fun staleObdDoesNotTeachFactor() {
+        // Фиксы раз в 2 с (чётные секунды), OBD раз в 2 с на нечётных: до ближайшего OBD 1000 мс > 500 мс.
+        val r = run(
+            LocalizerConfig(obd = ObdConfig(kInit = 1.0)), 300.0, { 15.0 }, gnssOn = { it.roundToInt() % 2 == 0 },
+            obdKmh = { _, v, rnd -> speedometer(v, rnd) }, obdEverySteps = 200, obdPhaseSteps = 100,
+        )
+        assertEquals(GnssHealth.GOOD, r.outputs.last().first.health)
+        assertEquals(1.0, r.outputs.last().first.obdK)
+    }
+
+    @Test fun slowFactorLagsFastFactor() {
+        val kInit = 1.0
+        val r = run(
+            LocalizerConfig(obd = ObdConfig(kInit = kInit)), 300.0, { 15.0 },
+            obdKmh = { _, v, rnd -> speedometer(v, rnd) },
+        )
+        val k = r.outputs.last().first.obdK!!
+        val kSlow = assertNotNull(r.localizer.obdKSlow)
+        assertTrue(kSlow < kInit, "kSlow=$kSlow must move toward 1/1.03")
+        assertTrue(kInit - kSlow < 0.3 * (kInit - k), "kSlow=$kSlow k=$k")
     }
 
     @Test fun zeroKmhWhileMovingIsIgnored() {

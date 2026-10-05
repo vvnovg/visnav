@@ -35,7 +35,12 @@ data class LocalizerConfig(
 /**
  * Скорость OBD-II как измерение фильтра. Измерение v = k·kmh/3.6, σ = max(sigmaMinMps, 0.5/3.6 + 0.01·v) м/с.
  * Поправка спидометра k — EMA с постоянной kTauMs, ограничена [kMin, kMax]; обучается по фиксу GNSS только при
- * здоровье GOOD, скорости GNSS ≥ learnMinSpeedMps и OBD не дальше learnMaxAgeMs от фикса.
+ * здоровье GOOD, скорости GNSS ≥ learnMinSpeedMps и ненулевом OBD не дальше learnMaxAgeMs от фикса. Наблюдение
+ * v_gnss/v_obd вне [kMin − 0.05, kMax + 0.05] — выброс, k к нему не тянется. Медленная kSlow (τ = kSlowTauMs) учится
+ * по тем же правилам — для сравнения скоростей при проверке подмены: подмена не утянет её за минуты.
+ *
+ * Не учитывается: задержка ЭБУ (время события — середина запроса; возможная настройка latencyMs — после полевых
+ * данных) и задний ход (скорость OBD без знака: v ≥ 0).
  */
 data class ObdConfig(
     val enabled: Boolean = true,
@@ -43,6 +48,7 @@ data class ObdConfig(
     val kMin: Double = 0.9,
     val kMax: Double = 1.1,
     val kTauMs: Long = 60_000,
+    val kSlowTauMs: Long = 1_200_000,
     val sigmaMinMps: Double = 0.3,
     val learnMinSpeedMps: Double = 5.0,
     val learnMaxAgeMs: Long = 500,
@@ -86,6 +92,8 @@ private val ESCAPE_BLOCKERS = setOf(GnssReason.UNIFORM_CN0, GnssReason.JUMP, Gns
 private const val ZUPT_SIGMA_MPS = 0.05
 /** Шаг EMA поправки спидометра не длиннее интервала фиксов: после долгого перерыва одно наблюдение не заменяет k. */
 private const val OBD_LEARN_MAX_DT_MS = 1_000.0
+/** Запас за [kMin, kMax], за которым наблюдение поправки — выброс (ноль OBD, скачок скорости GNSS). */
+private const val OBD_RATIO_MARGIN = 0.05
 
 /**
  * Общий конвейер локализации (фильтр M2a + монитор GNSS + режимы FR-15). Время — мс настенных часов.
@@ -130,6 +138,7 @@ class Localizer(
     private var roadSuspended = false
     private var lastLocT = Double.NEGATIVE_INFINITY
     private var obdK = config.obd.kInit
+    private var obdKSlowValue = config.obd.kInit
     private var obdSeen = false
     private var lastObdT = Double.NaN
     private var lastObdMps = Double.NaN
@@ -142,6 +151,8 @@ class Localizer(
     internal val headingSigmaRad: Double get() = sqrt(ekf.headingVariance())
     internal fun lateralSigmaAcross(theta: Double): Double = sqrt(ekf.lateralVariance(theta))
     val mode: NavMode get() = modes.mode
+    /** Медленная поправка спидометра (τ = kSlowTauMs) для проверки подмены GNSS; null, пока не было OBD. */
+    internal val obdKSlow: Double? get() = if (obdSeen) obdKSlowValue else null
 
     private fun predictTo(t: Double) {
         if (ekf.initialized && t > lastT) { ekf.predict((t - lastT) / 1000.0, lastOmega); lastT = t }
@@ -205,11 +216,12 @@ class Localizer(
     /**
      * Скорость OBD (без k) на момент фикса tFix по последнему событию (до фикса) и новому (t ≥ tFix):
      * оба не дальше learnMaxAgeMs — линейная интерполяция, иначе ближайшее из подходящих, иначе null.
+     * Нулевое событие не считается свежим: ноль рядом с фиксом в движении — сбой, а не скорость.
      */
     private fun obdSpeedAt(tFix: Double, t: Double, raw: Double): Double? {
         val maxAge = config.obd.learnMaxAgeMs.toDouble()
-        val prevOk = !lastObdT.isNaN() && lastObdT <= tFix && tFix - lastObdT <= maxAge
-        val curOk = t - tFix <= maxAge
+        val prevOk = !lastObdT.isNaN() && lastObdMps > 0.0 && lastObdT <= tFix && tFix - lastObdT <= maxAge
+        val curOk = raw > 0.0 && t - tFix <= maxAge
         return when {
             prevOk && curOk -> if (t == lastObdT) raw else lastObdMps + (raw - lastObdMps) * (tFix - lastObdT) / (t - lastObdT)
             curOk -> raw
@@ -218,13 +230,18 @@ class Localizer(
         }
     }
 
-    /** EMA k по наблюдению vGnss/vObd с alpha = 1 − exp(−dt/τ), dt — от прошлого обучения (не больше 1 с). */
+    /**
+     * EMA k и kSlow по наблюдению vGnss/vObd с alpha = 1 − exp(−dt/τ), dt — от прошлого обучения (не больше 1 с).
+     * Наблюдение вне [kMin − 0.05, kMax + 0.05] — выброс и отбрасывается.
+     */
     private fun learnK(tFix: Double, vGnss: Double, vObd: Double?) {
         if (vObd == null || vObd <= 0.0 || tFix <= lastLearnT) return
         val c = config.obd
+        val ratio = vGnss / vObd
+        if (ratio < c.kMin - OBD_RATIO_MARGIN || ratio > c.kMax + OBD_RATIO_MARGIN) return
         val dt = min(tFix - lastLearnT, OBD_LEARN_MAX_DT_MS)
-        val alpha = 1 - exp(-dt / c.kTauMs)
-        obdK = (obdK + alpha * (vGnss / vObd - obdK)).coerceIn(c.kMin, c.kMax)
+        obdK = (obdK + (1 - exp(-dt / c.kTauMs)) * (ratio - obdK)).coerceIn(c.kMin, c.kMax)
+        obdKSlowValue = (obdKSlowValue + (1 - exp(-dt / c.kSlowTauMs)) * (ratio - obdKSlowValue)).coerceIn(c.kMin, c.kMax)
         lastLearnT = tFix
     }
 
@@ -236,7 +253,7 @@ class Localizer(
         val c = config.obd
         if (!c.enabled) return
         if (!learnFixT.isNaN()) {
-            val fresh = !lastObdT.isNaN() && abs(learnFixT - lastObdT) <= c.learnMaxAgeMs
+            val fresh = !lastObdT.isNaN() && lastObdMps > 0.0 && abs(learnFixT - lastObdT) <= c.learnMaxAgeMs
             learnK(learnFixT, learnFixMps, if (fresh) lastObdMps else null)
             learnFixT = Double.NaN
         }
