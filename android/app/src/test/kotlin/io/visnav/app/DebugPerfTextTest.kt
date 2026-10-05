@@ -35,4 +35,11 @@ class DebugPerfTextTest {
         assertEquals("без ограничения", durationLabel(0))
         assertEquals("30 мин", durationLabel(30))
     }
+
+    @Test fun perfConfigLineShowsMeasuredSetup() {
+        assertEquals("Буфер 1500 мс · CPU · 60 мин · Полная", perfConfigLine(PerfSettings(durationMin = 60)))
+        assertEquals("Буфер 500 мс · XNNPACK · без ограничения · База (без камеры)",
+            perfConfigLine(PerfSettings(reorderDelayMs = 500, ort = PerfSettings.ORT_XNNPACK,
+                profile = PerfSettings.PROFILE_BASELINE)))
+    }
 }

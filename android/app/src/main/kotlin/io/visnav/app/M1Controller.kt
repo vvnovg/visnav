@@ -373,13 +373,16 @@ class M1Controller(private val context: Context) {
     fun start() {
         // CAS, не значение StateFlow: два быстрых нажатия/повторный вызов с разных потоков не
         // должны создать вторую сессию записи и второй SessionLogger поверх первого.
+        // running ещё true, а runningFlag уже false — задача остановки прежней сессии не завершилась: не стартуем,
+        // иначе её итоговое running = false затрёт новую сессию.
+        if (_state.value.running) return
         if (!runningFlag.compareAndSet(false, true)) return
         try {
             val (b, frameAnalyzer) = synchronized(swapLock) { bundle to analyzer.get() }
             // Поставлена перезагрузка (смена ORT или поездки) — не стартуем на прежней базе.
             if (b == null || frameAnalyzer == null || _state.value.loading) {
                 runningFlag.set(false)
-                if (_state.value.loading) _state.update { it.copy(status = "Загрузка базы — подождите") }
+                if (_state.value.loading) _state.update { it.copy(status = it.status + " · Загрузка базы — подождите") }
                 return
             }
             val mode = _state.value.mode

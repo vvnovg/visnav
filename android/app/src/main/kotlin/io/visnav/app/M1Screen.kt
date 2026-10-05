@@ -97,6 +97,7 @@ fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
             ) { Text(if (s.running) "Стоп" else "Старт") }
             if (s.running) {
                 Text(perfLine(s.perf))
+                Text(perfConfigLine(s.settings))
             } else {
                 PerfSettingsControls(controller, s.settings, loading = s.loading)
             }
@@ -104,18 +105,21 @@ fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
     }
 }
 
-/** Блок «Замер»: по нажатию — следующий вариант; виден только вне записи (модель — ещё и не во время загрузки базы). */
+/** Блок «Замер»: по нажатию — следующий вариант; виден только вне записи, недоступен во время загрузки базы. */
 @Composable
 private fun PerfSettingsControls(controller: M1Controller, st: PerfSettings, loading: Boolean) {
     Text("Замер", style = MaterialTheme.typography.titleMedium)
     OutlinedButton(
         onClick = { controller.setProfile(PerfSettings.next(PerfSettings.PROFILES, st.profile)) },
+        enabled = !loading,
     ) { Text("Профиль: ${profileLabel(st.profile)}") }
     OutlinedButton(
         onClick = { controller.setDuration(PerfSettings.next(PerfSettings.DURATIONS_MIN, st.durationMin)) },
+        enabled = !loading,
     ) { Text("Длительность: ${durationLabel(st.durationMin)}") }
     OutlinedButton(
         onClick = { controller.setReorderDelay(PerfSettings.next(PerfSettings.REORDER_DELAYS_MS, st.reorderDelayMs)) },
+        enabled = !loading,
     ) { Text("Буфер: ${st.reorderDelayMs} мс") }
     OutlinedButton(
         onClick = { controller.setOrt(PerfSettings.next(PerfSettings.ORTS, st.ort)) },
@@ -134,6 +138,10 @@ private val THERMAL_LABELS = listOf("нет", "слабый", "умеренны�
 
 /** Подпись уровня нагрева PowerManager (THERMAL_STATUS_NONE..SHUTDOWN); неизвестный или нет данных — «—». */
 internal fun thermalLabel(status: Int?): String = status?.let { THERMAL_LABELS.getOrNull(it) } ?: "—"
+
+/** Настройки замера текущей записи: «Буфер 1500 мс · CPU · 60 мин · Полная». */
+internal fun perfConfigLine(st: PerfSettings): String =
+    "Буфер ${st.reorderDelayMs} мс · ${ortLabel(st.ort)} · ${durationLabel(st.durationMin)} · ${profileLabel(st.profile)}"
 
 /** Строка показателей во время записи; до первого замера — прочерки. */
 internal fun perfLine(p: PerfUi?): String =
