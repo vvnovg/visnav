@@ -139,6 +139,7 @@ class Localizer(
             is LocEvent -> onLoc(e)
             is GnssStatusEvent -> monitor.onStatus(e)
             is AgcEvent -> monitor.onAgc(e)
+            is ObdSpeedEvent -> Unit
             else -> Unit
         }
     }

@@ -171,4 +171,13 @@ class SensorLogTest {
         assertEquals(e, SensorLogFormat.parse(SensorLogFormat.line(e)))
         assertFalse(SensorLogFormat.isWritable(AgcEvent(7.0, Float.NaN, 1)))
     }
+
+    @Test fun obdSpeedLineAndRoundTrip() {
+        val e = ObdSpeedEvent(1000.5, 72, 85.0)
+        assertEquals("{\"t\":1000.5,\"k\":\"obd\",\"kmh\":72,\"rtt_ms\":85.0}", SensorLogFormat.line(e))
+        assertEquals(e, SensorLogFormat.parse(SensorLogFormat.line(e)))
+        assertEquals(true, SensorLogFormat.isWritable(e))
+        assertFalse(SensorLogFormat.isWritable(ObdSpeedEvent(1000.5, 72, Double.NaN)))
+        assertNull(SensorLogFormat.parse("{\"t\":1.0,\"k\":\"zz\"}"))
+    }
 }

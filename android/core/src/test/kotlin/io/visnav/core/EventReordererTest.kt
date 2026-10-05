@@ -97,6 +97,7 @@ class EventReordererTest {
         r.push(ReorderItem.Sensor(GyroUncalEvent(1.0, 0f, 0f, 0f, 0f, 0f, 0f)), 51)
         r.push(ReorderItem.Sensor(AgcEvent(1.0, 1f, 1)), 61)
         r.push(ReorderItem.Sensor(ClockEvent(1.0, 1, 1, 1)), 71)
+        r.push(ReorderItem.Sensor(ObdSpeedEvent(1.0, 50, 80.0)), 81)
         val s = r.latenessSnapshotAndReset()
         assertEquals(10.0, s.getValue("frame").max)
         assertEquals(20.0, s.getValue("gnss_fix").max)
@@ -104,6 +105,7 @@ class EventReordererTest {
         assertEquals(LatenessStats(2, 40.0, 50.0, 50.0), s.getValue("imu"))
         assertEquals(60.0, s.getValue("agc").max)
         assertEquals(70.0, s.getValue("other").max)
+        assertEquals(80.0, s.getValue("obd").max)
     }
 
     @Test fun delayIsPublic() {
@@ -126,16 +128,18 @@ class EventReordererTest {
     @Test fun snapshotSourceOrderIsFixed() {
         val r = EventReorderer(0)
         r.push(ReorderItem.Sensor(FrameCaptureEvent(1.0, 1L, 5L)), 2)
+        r.push(ReorderItem.Sensor(ObdSpeedEvent(1.0, 50, 80.0)), 2)
         r.push(ReorderItem.Sensor(AgcEvent(1.0, 1f, 1)), 2)
         r.push(ev(1.0), 2)
         r.push(ReorderItem.Sensor(LocEvent(1.0, 55.0, 37.0, 3f, null, null, null, null)), 2)
         r.push(ReorderItem.Frame(1, null), 2)
         val s = r.latenessSnapshotAndReset()
-        assertEquals(listOf("frame", "gnss_fix", "imu", "agc", "other"), s.keys.toList())
+        assertEquals(listOf("frame", "gnss_fix", "imu", "agc", "obd", "other"), s.keys.toList())
         val line = PerfLog.late(1L, s, 0, 0, emptyMap())
         assertTrue(line.indexOf("\"frame\"") < line.indexOf("\"gnss_fix\"") &&
             line.indexOf("\"gnss_fix\"") < line.indexOf("\"imu\"") &&
-            line.indexOf("\"imu\"") < line.indexOf("\"agc\"") && line.indexOf("\"agc\"") < line.indexOf("\"other\""))
+            line.indexOf("\"imu\"") < line.indexOf("\"agc\"") && line.indexOf("\"agc\"") < line.indexOf("\"obd\"") &&
+            line.indexOf("\"obd\"") < line.indexOf("\"other\""))
     }
 
     @Test fun lateBySourceCountsLateItemsCumulativelyInFixedOrder() {
