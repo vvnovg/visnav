@@ -173,4 +173,5 @@ internal fun reasonLabel(r: GnssReason): String = when (r) {
     GnssReason.INNOVATION -> "расхождение с фильтром"
     GnssReason.UNIFORM_CN0 -> "признак подмены"
     GnssReason.FIX_GAP -> "перерыв фиксов"
+    GnssReason.SPEED_MISMATCH -> "скорость GPS ≠ машина"
 }

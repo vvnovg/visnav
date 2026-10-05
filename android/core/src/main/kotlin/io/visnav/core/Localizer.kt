@@ -198,11 +198,13 @@ class Localizer(
         val t = e.tMs
         val raw = e.kmh / 3.6
         if (!learnFixT.isNaN() && t >= learnFixT) {
-            learnK(learnFixT, learnFixMps, obdSpeedAt(learnFixT, t, raw))
+            learnK(t, learnFixT, learnFixMps, obdSpeedAt(learnFixT, t, raw))
             learnFixT = Double.NaN
         }
         obdSeen = true
         lastObdT = t; lastObdMps = raw
+        // Монитору — с медленной kSlow: подмена не успевает утянуть сравнение за собой.
+        monitor.onObd(t, obdKSlowValue * raw)
         if (!ekf.initialized) return
         if (e.kmh == 0) {
             if (stationary.isStationary(t)) { predictTo(t); ekf.updateSpeed(0.0, ZUPT_SIGMA_MPS) }
@@ -232,10 +234,12 @@ class Localizer(
 
     /**
      * EMA k и kSlow по наблюдению vGnss/vObd с alpha = 1 − exp(−dt/τ), dt — от прошлого обучения (не больше 1 с).
-     * Наблюдение вне [kMin − 0.05, kMax + 0.05] — выброс и отбрасывается.
+     * Наблюдение вне [kMin − 0.05, kMax + 0.05] — выброс и отбрасывается. Пока монитор подозревает
+     * расхождение скорости GNSS и OBD (копит нарушение или держит SPEED_MISMATCH), k и kSlow не учатся.
      */
-    private fun learnK(tFix: Double, vGnss: Double, vObd: Double?) {
+    private fun learnK(tNow: Double, tFix: Double, vGnss: Double, vObd: Double?) {
         if (vObd == null || vObd <= 0.0 || tFix <= lastLearnT) return
+        if (monitor.obdSuspicious(tNow)) return // идёт сверка с подозрением на подмену
         val c = config.obd
         val ratio = vGnss / vObd
         if (ratio < c.kMin - OBD_RATIO_MARGIN || ratio > c.kMax + OBD_RATIO_MARGIN) return
@@ -254,7 +258,7 @@ class Localizer(
         if (!c.enabled) return
         if (!learnFixT.isNaN()) {
             val fresh = !lastObdT.isNaN() && lastObdMps > 0.0 && abs(learnFixT - lastObdT) <= c.learnMaxAgeMs
-            learnK(learnFixT, learnFixMps, if (fresh) lastObdMps else null)
+            learnK(ev.tMs, learnFixT, learnFixMps, if (fresh) lastObdMps else null)
             learnFixT = Double.NaN
         }
         val spd = ev.speedMps ?: return

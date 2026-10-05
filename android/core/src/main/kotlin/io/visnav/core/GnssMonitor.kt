@@ -5,7 +5,7 @@ import kotlin.math.exp
 import kotlin.math.max
 
 enum class GnssHealth { GOOD, DEGRADED, UNTRUSTED }
-enum class GnssReason { FIX_GAP, NO_FIX, FEW_SATS, LOW_CN0, AGC_DROP, POOR_ACCURACY, JUMP, INNOVATION, UNIFORM_CN0 }
+enum class GnssReason { FIX_GAP, NO_FIX, FEW_SATS, LOW_CN0, AGC_DROP, POOR_ACCURACY, JUMP, INNOVATION, UNIFORM_CN0, SPEED_MISMATCH }
 data class Assessment(val health: GnssHealth, val reasons: Set<GnssReason>)
 
 data class MonitorConfig(
@@ -33,9 +33,22 @@ data class MonitorConfig(
     val agcTauMs: Double = 20_000.0,
     val agcFreezeDb: Float = 1f,
     val agcRelearnMs: Double = 300_000.0,
+    val obdFreshMs: Double = 1_000.0,       // OBD старше — проверки скорости не идут
+    val mismatchAbsMps: Double = 2.0,       // (a) |v_gps − v_obd| > max(abs, rel·v_obd) подряд holdMs
+    val mismatchRel: Double = 0.1,
+    val mismatchHoldMs: Double = 5_000.0,
+    val distWindowMs: Double = 30_000.0,    // (b) |Σv_gps·dt − Σv_obd·dt| за окно > max(abs, rel·Σv_obd·dt)
+    val distAbsM: Double = 15.0,
+    val distRel: Double = 0.05,
+    val stillObdMps: Double = 0.3,          // (c) v_obd < stillObd и v_gps > stillGps подряд stillHoldMs
+    val stillGpsMps: Double = 1.5,
+    val stillHoldMs: Double = 3_000.0,
+    val mismatchLatchMs: Double = 10_000.0, // SPEED_MISMATCH держится после последнего нарушения
 )
 
-private val UNTRUSTED_REASONS = setOf(GnssReason.NO_FIX, GnssReason.JUMP, GnssReason.INNOVATION, GnssReason.UNIFORM_CN0)
+private val UNTRUSTED_REASONS = setOf(GnssReason.NO_FIX, GnssReason.JUMP, GnssReason.INNOVATION, GnssReason.UNIFORM_CN0,
+    GnssReason.SPEED_MISMATCH,
+)
 
 /**
  * Детектор деградации, глушения и подмены GNSS (FR-14). Время — мс настенных часов телефона.
@@ -60,6 +73,13 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
     private var okSince: Double? = null
     private var okNeededVisual = false
     private var reinit = false
+    private var lastObdT = Double.NaN
+    private var lastObdMps = Double.NaN
+    private var speedCheckT = Double.NaN
+    private var instantSince: Double? = null
+    private var stillSince: Double? = null
+    private val distWindow = ArrayDeque<DoubleArray>() // [t, v_gps·dt, v_obd·dt]
+    private var lastViolationT = Double.NEGATIVE_INFINITY
 
     fun onStatus(e: GnssStatusEvent) {
         val prev = lastStatus
@@ -73,6 +93,18 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
     fun onVisualFix(tMs: Double, lat: Double, lon: Double, sigmaM: Double) {
         lastVisual = VisualFix(tMs, lat, lon, sigmaM)
     }
+
+    /** Скорость машины по OBD, уже умноженная на поправку спидометра. */
+    fun onObd(tMs: Double, vObdMps: Double) {
+        if (!vObdMps.isFinite()) return
+        lastObdT = tMs; lastObdMps = vObdMps
+    }
+
+    /**
+     * Идёт ли накопление нарушения (a) или (c), или удерживается SPEED_MISMATCH: поправку спидометра
+     * в это время не учить. У (b) отдельного «накопления» нет: окно копит сумму всегда, нарушение — её превышение.
+     */
+    fun obdSuspicious(tMs: Double): Boolean = instantSince != null || stillSince != null || mismatchHeld(tMs)
 
     fun onAgc(e: AgcEvent) {
         lastAgc = e
@@ -110,6 +142,7 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
             }
         }
         lastFix = e
+        checkSpeed(e)
         if (!latched) {
             if (innovationD2 == null) { badInnovations = 0; return }
             val bad = innovationD2 > config.innovationGate &&
@@ -134,6 +167,45 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
             okNeededVisual = false
         }
     }
+
+    /** Сверка скорости GNSS с OBD (правила (a), (b), (c)); без свежего OBD — сброс накоплений. */
+    private fun checkSpeed(e: LocEvent) {
+        val vGps = e.speedMps?.toDouble()
+        val t = e.tMs
+        if (vGps == null || !vGps.isFinite() || lastObdT.isNaN() || abs(t - lastObdT) > config.obdFreshMs) {
+            resetSpeedCheck(); return
+        }
+        val vObd = lastObdMps
+        val prevT = speedCheckT
+        if (!prevT.isNaN() && t - prevT > config.fixGapMs) resetSpeedCheck()
+        val dt = if (speedCheckT.isNaN()) 0.0 else (t - speedCheckT) / 1000.0
+        speedCheckT = t
+        var violation = false
+
+        if (abs(vGps - vObd) > max(config.mismatchAbsMps, config.mismatchRel * vObd)) {
+            val since = instantSince ?: t.also { instantSince = it }
+            if (t - since >= config.mismatchHoldMs) violation = true
+        } else instantSince = null
+
+        if (vObd < config.stillObdMps && vGps > config.stillGpsMps) {
+            val since = stillSince ?: t.also { stillSince = it }
+            if (t - since >= config.stillHoldMs) violation = true
+        } else stillSince = null
+
+        if (dt > 0) distWindow.addLast(doubleArrayOf(t, vGps * dt, vObd * dt))
+        while (distWindow.isNotEmpty() && distWindow.first()[0] <= t - config.distWindowMs) distWindow.removeFirst()
+        val gpsM = distWindow.sumOf { it[1] }
+        val obdM = distWindow.sumOf { it[2] }
+        if (abs(gpsM - obdM) > max(config.distAbsM, config.distRel * obdM)) violation = true
+
+        if (violation) lastViolationT = t
+    }
+
+    private fun resetSpeedCheck() {
+        speedCheckT = Double.NaN; instantSince = null; stillSince = null; distWindow.clear()
+    }
+
+    private fun mismatchHeld(tMs: Double) = tMs - lastViolationT <= config.mismatchLatchMs
 
     /** Есть ли отложенная переинициализация (не сбрасывает её). */
     fun hasPendingReinit(): Boolean = reinit
@@ -164,6 +236,7 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
         r += statusReasons(tMs)
         if (tMs < jumpUntil) r += GnssReason.JUMP
         if (latched) r += GnssReason.INNOVATION
+        if (mismatchHeld(tMs)) r += GnssReason.SPEED_MISMATCH
         return r
     }
 

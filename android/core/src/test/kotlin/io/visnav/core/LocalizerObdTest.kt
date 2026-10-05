@@ -153,6 +153,21 @@ class LocalizerObdTest {
         assertTrue(abs(outlier - base) < 1e-3, "k with GNSS outlier $outlier vs $base")
     }
 
+    @Test fun factorDoesNotLearnWhileMonitorAccumulatesSpeedMismatch() {
+        // С 100 с каждые 30 с — 4 с скорости GNSS ×1.16 (≈ +2.4 м/с): правило (a) копит, но до 5 с не доходит,
+        // окно (b) остаётся ниже порога, причины нет и здоровье GOOD. Отношение ≈ 1.13 — в пределах выброса,
+        // так что без запрета k потянулся бы к нему.
+        val bursts = { s: Double -> if (s >= 100.0 && (s.toInt() - 100) % 30 < 4) 1.16 else 1.0 }
+        val r = run(
+            LocalizerConfig(), 300.0, { 15.0 }, obdKmh = { _, v, rnd -> speedometer(v, rnd) }, gnssSpeedFactor = bursts,
+        )
+        assertTrue(r.outputs.none { GnssReason.SPEED_MISMATCH in it.first.reasons })
+        assertTrue(r.outputs.filter { it.first.tMs >= t0 + 10_000 }.all { it.first.health == GnssHealth.GOOD })
+        val base = finalK({ _, v, rnd -> speedometer(v, rnd) })
+        val k = r.outputs.last().first.obdK!!
+        assertTrue(abs(k - base) < 2e-3, "k with suspicious bursts $k vs $base")
+    }
+
     @Test fun staleObdDoesNotTeachFactor() {
         // Фиксы раз в 2 с (чётные секунды), OBD раз в 2 с на нечётных: до ближайшего OBD 1000 мс > 500 мс.
         val r = run(
