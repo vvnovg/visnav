@@ -1,7 +1,10 @@
 package io.visnav.core
 
+import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sqrt
 
 data class LocalizerConfig(
@@ -26,6 +29,23 @@ data class LocalizerConfig(
      */
     val roadEscapeMaxM: Double = 50.0,
     val matchConfig: MatchConfig = MatchConfig(),
+    val obd: ObdConfig = ObdConfig(),
+)
+
+/**
+ * Скорость OBD-II как измерение фильтра. Измерение v = k·kmh/3.6, σ = max(sigmaMinMps, 0.5/3.6 + 0.01·v) м/с.
+ * Поправка спидометра k — EMA с постоянной kTauMs, ограничена [kMin, kMax]; обучается по фиксу GNSS только при
+ * здоровье GOOD, скорости GNSS ≥ learnMinSpeedMps и OBD не дальше learnMaxAgeMs от фикса.
+ */
+data class ObdConfig(
+    val enabled: Boolean = true,
+    val kInit: Double = 1 / 1.03,
+    val kMin: Double = 0.9,
+    val kMax: Double = 1.1,
+    val kTauMs: Long = 60_000,
+    val sigmaMinMps: Double = 0.3,
+    val learnMinSpeedMps: Double = 5.0,
+    val learnMaxAgeMs: Long = 500,
 )
 
 /**
@@ -41,6 +61,8 @@ data class LocalizerOutput(
     val mode: NavMode, val health: GnssHealth, val reasons: Set<GnssReason>,
     val road: RoadInfo? = null,
     val psiRad: Double = Double.NaN, val speedMps: Double = Double.NaN,
+    /** Текущая поправка спидометра k; null, пока не было ни одного события OBD (или OBD выключено). */
+    val obdK: Double? = null,
 )
 
 private const val MIN_POS_SIGMA_M = 3.0
@@ -61,6 +83,9 @@ private fun sigma(v: Float?, default: Double, floor: Double): Double =
 private const val ROAD_HOLD_MS = 5_000.0
 private const val ROAD_REJECTS_TO_SUSPEND = 2
 private val ESCAPE_BLOCKERS = setOf(GnssReason.UNIFORM_CN0, GnssReason.JUMP, GnssReason.AGC_DROP)
+private const val ZUPT_SIGMA_MPS = 0.05
+/** Шаг EMA поправки спидометра не длиннее интервала фиксов: после долгого перерыва одно наблюдение не заменяет k. */
+private const val OBD_LEARN_MAX_DT_MS = 1_000.0
 
 /**
  * Общий конвейер локализации (фильтр M2a + монитор GNSS + режимы FR-15). Время — мс настенных часов.
@@ -104,6 +129,14 @@ class Localizer(
     private var roadRejects = 0
     private var roadSuspended = false
     private var lastLocT = Double.NEGATIVE_INFINITY
+    private var obdK = config.obd.kInit
+    private var obdSeen = false
+    private var lastObdT = Double.NaN
+    private var lastObdMps = Double.NaN
+    /** Фикс, пригодный для обучения k (GOOD, скорость ≥ порога): ждёт события OBD после себя. */
+    private var learnFixT = Double.NaN
+    private var learnFixMps = Double.NaN
+    private var lastLearnT = Double.NEGATIVE_INFINITY
 
     val initialized: Boolean get() = ekf.initialized
     internal val headingSigmaRad: Double get() = sqrt(ekf.headingVariance())
@@ -133,15 +166,83 @@ class Localizer(
                 yaw.onAccel(e.x, e.y, e.z)
                 stationary.onAccel(t, e.x, e.y, e.z)
                 if (ekf.initialized && t - lastZupt >= 100.0 && stationary.isStationary(t)) {
-                    predictTo(t); ekf.updateSpeed(0.0, 0.05); lastZupt = t
+                    predictTo(t); ekf.updateSpeed(0.0, ZUPT_SIGMA_MPS); lastZupt = t
                 }
             }
             is LocEvent -> onLoc(e)
             is GnssStatusEvent -> monitor.onStatus(e)
             is AgcEvent -> monitor.onAgc(e)
-            is ObdSpeedEvent -> Unit
+            is ObdSpeedEvent -> onObd(e)
             else -> Unit
         }
+    }
+
+    /**
+     * Скорость OBD: сначала — обучение k по ждущему фиксу, затем измерение v = k·kmh/3.6 в фильтр.
+     * kmh = 0: на стоянке (IMU в покое) — как ZUPT, в движении — не применяется (ELM327 отдаёт 0 при сбоях).
+     */
+    private fun onObd(e: ObdSpeedEvent) {
+        val c = config.obd
+        if (!c.enabled) return
+        val t = e.tMs
+        val raw = e.kmh / 3.6
+        if (!learnFixT.isNaN() && t >= learnFixT) {
+            learnK(learnFixT, learnFixMps, obdSpeedAt(learnFixT, t, raw))
+            learnFixT = Double.NaN
+        }
+        obdSeen = true
+        lastObdT = t; lastObdMps = raw
+        if (!ekf.initialized) return
+        if (e.kmh == 0) {
+            if (stationary.isStationary(t)) { predictTo(t); ekf.updateSpeed(0.0, ZUPT_SIGMA_MPS) }
+            return
+        }
+        val v = obdK * raw
+        predictTo(t)
+        ekf.updateSpeed(v, max(c.sigmaMinMps, 0.5 / 3.6 + 0.01 * v))
+    }
+
+    /**
+     * Скорость OBD (без k) на момент фикса tFix по последнему событию (до фикса) и новому (t ≥ tFix):
+     * оба не дальше learnMaxAgeMs — линейная интерполяция, иначе ближайшее из подходящих, иначе null.
+     */
+    private fun obdSpeedAt(tFix: Double, t: Double, raw: Double): Double? {
+        val maxAge = config.obd.learnMaxAgeMs.toDouble()
+        val prevOk = !lastObdT.isNaN() && lastObdT <= tFix && tFix - lastObdT <= maxAge
+        val curOk = t - tFix <= maxAge
+        return when {
+            prevOk && curOk -> if (t == lastObdT) raw else lastObdMps + (raw - lastObdMps) * (tFix - lastObdT) / (t - lastObdT)
+            curOk -> raw
+            prevOk -> lastObdMps
+            else -> null
+        }
+    }
+
+    /** EMA k по наблюдению vGnss/vObd с alpha = 1 − exp(−dt/τ), dt — от прошлого обучения (не больше 1 с). */
+    private fun learnK(tFix: Double, vGnss: Double, vObd: Double?) {
+        if (vObd == null || vObd <= 0.0 || tFix <= lastLearnT) return
+        val c = config.obd
+        val dt = min(tFix - lastLearnT, OBD_LEARN_MAX_DT_MS)
+        val alpha = 1 - exp(-dt / c.kTauMs)
+        obdK = (obdK + alpha * (vGnss / vObd - obdK)).coerceIn(c.kMin, c.kMax)
+        lastLearnT = tFix
+    }
+
+    /**
+     * Фикс для обучения k: здоровье GOOD по оценке монитора на момент фикса и скорость ≥ learnMinSpeedMps.
+     * Прежний фикс, после которого OBD так и не пришло, учится по последнему OBD до него.
+     */
+    private fun noteFixForObd(ev: LocEvent) {
+        val c = config.obd
+        if (!c.enabled) return
+        if (!learnFixT.isNaN()) {
+            val fresh = !lastObdT.isNaN() && abs(learnFixT - lastObdT) <= c.learnMaxAgeMs
+            learnK(learnFixT, learnFixMps, if (fresh) lastObdMps else null)
+            learnFixT = Double.NaN
+        }
+        val spd = ev.speedMps ?: return
+        if (spd < c.learnMinSpeedMps || monitor.assess(ev.tMs).health != GnssHealth.GOOD) return
+        learnFixT = ev.tMs; learnFixMps = spd.toDouble()
     }
 
     private fun onLoc(ev: LocEvent) {
@@ -160,6 +261,7 @@ class Localizer(
                 matcher = roads?.let { MapMatcher(RoadIndex(it, enu!!), config.matchConfig) }
                 lastGnssFusedT = t
                 monitor.onFix(ev, null, null, null) // первый фикс — тоже «последний фикс» для монитора
+                noteFixForObd(ev)
             }
             return
         }
@@ -175,6 +277,7 @@ class Localizer(
         } else {
             monitor.onFix(ev, null, null, null)
         }
+        noteFixForObd(ev)
         if (roadHeld) checkRoadEscape(t, d2, dist)
         // Переинициализируем только когда нет других причин UNTRUSTED (например UNIFORM_CN0 или JUMP):
         // иначе запрос остаётся отложенным до их снятия.
@@ -274,7 +377,7 @@ class Localizer(
         val ll = enu!!.toLatLon(ekf.x[0], ekf.x[1])
         return LocalizerOutput(
             tMs, ll[0], ll[1], ekf.posSigma(), visSim, visOk, visState, stationary.isStationary(t),
-            modes.mode, lastHealth, lastReasons, road, ekf.x[2], ekf.x[3],
+            modes.mode, lastHealth, lastReasons, road, ekf.x[2], ekf.x[3], if (obdSeen) obdK else null,
         )
     }
 
