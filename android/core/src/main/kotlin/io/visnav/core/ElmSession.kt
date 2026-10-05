@@ -18,6 +18,11 @@ interface ElmChannel {
         repeat(5) { readUntilPrompt(timeoutMs) ?: return }
     }
 
+    /** Без ожидания отбрасывает уже пришедший вывод (перед каждой командой опроса); каналы могут сделать дешевле. */
+    fun clearInput() {
+        repeat(5) { readUntilPrompt(0) ?: return }
+    }
+
     fun close()
 }
 
@@ -28,7 +33,9 @@ enum class ElmState { CONNECTING, INIT, SEARCHING, POLLING, NO_DATA, ERROR, RECO
  * Ошибка, таймаут, неразобранный ответ или сброс адаптера при опросе — счётчик; 5 подряд — закрытие
  * канала и пауза 2/5/10/10… с; счётчик и паузу сбрасывает только удачный ответ.
  * Исключения из [open] и канала — причина переподключения. Исключения из [onSpeed]/[onState] ошибкой
- * связи не считаются: канал закрывается, выдаётся STOPPED, и исключение выходит из [run] как есть.
+ * связи не считаются: канал закрывается, выдаётся STOPPED, и исключение выходит из [run] как есть
+ * (исключение из onState(STOPPED) добавляется к нему как suppressed). InterruptedException из колбэка
+ * после stop() — обычное завершение run().
  */
 class ElmSession(
     private val open: () -> ElmChannel,
@@ -52,6 +59,7 @@ class ElmSession(
     /** Блокирующий цикл до stop(): подключение, INIT, опрос, переподключение. */
     fun run() {
         synchronized(lock) { runner = Thread.currentThread() }
+        var failure: Throwable? = null
         try {
             while (running) {
                 val reason = try {
@@ -78,7 +86,11 @@ class ElmSession(
             }
         } catch (e: CallbackFailure) {
             running = false
-            throw e.cause!!
+            failure = e.cause!!
+            throw failure
+        } catch (t: Throwable) {
+            failure = t
+            throw t
         } finally {
             closeChannel()
             synchronized(lock) {
@@ -86,7 +98,15 @@ class ElmSession(
                 if (stopRequested) Thread.interrupted() // снимает прерывание, выставленное stop()
             }
             state = ElmState.STOPPED
-            onState(ElmState.STOPPED, null)
+            try {
+                onState(ElmState.STOPPED, null)
+            } catch (t: Exception) {
+                when {
+                    failure != null -> failure.addSuppressed(t)
+                    t is InterruptedException && !running -> Unit
+                    else -> throw t
+                }
+            }
         }
     }
 
@@ -112,6 +132,7 @@ class ElmSession(
         setState(ElmState.POLLING, null)
         var errors = 0
         while (running) {
+            ch.clearInput()
             val t0 = nowMs()
             ch.write(Elm327.SPEED)
             val r = ch.readUntilPrompt(RESPONSE_TIMEOUT_MS)
@@ -126,6 +147,7 @@ class ElmSession(
                 continue
             }
             val kmh = r?.let { if (Elm327.isError(it)) null else Elm327.parseSpeed(it) }
+            if (kmh == null && r != null) ch.drain() // хвосты прерванной команды (STOPPED, ?) не должны сдвинуть ответы
             if (kmh != null) {
                 errors = 0
                 backoffIdx = 0
@@ -141,7 +163,9 @@ class ElmSession(
 
     /**
      * Сброс буфера, INIT и поиск протокола; возвращает причину неудачи или null (готово либо остановлено).
-     * ATZ ждёт баннер ELM327, остальные AT-команды — OK; без него — drain и один повтор.
+     * Каждая AT-команда ждёт свой ответ: ATZ — баннер ELM327, остальные — строку с OK; иначе drain и один повтор.
+     * На повторе ATZ принимает любой ответ; ATE0/ATL0/ATS0/ATH0 тоже (клоны отвечают «?»; пишется в сообщение
+     * состояния INIT). Переподключение — нет ответа дважды или ATSP0 без OK дважды.
      */
     private fun initialize(ch: ElmChannel): String? {
         setState(ElmState.INIT, null)
@@ -153,7 +177,13 @@ class ElmSession(
                 ch.write(cmd)
                 val r = ch.readUntilPrompt(timeoutFor(cmd))
                 if (r != null && (if (cmd == "ATZ") hasBanner(r) else hasOk(r))) break
-                if (++attempt >= 2) return "bad reply to $cmd: ${r?.let(::clean) ?: "timeout"}"
+                if (++attempt >= 2) {
+                    if (r != null && cmd in LENIENT) {
+                        if (cmd != "ATZ") setState(ElmState.INIT, "$cmd: ${clean(r)}", force = true)
+                        break
+                    }
+                    return "bad reply to $cmd: ${r?.let(::clean) ?: "timeout"}"
+                }
                 ch.drain()
             }
         }
@@ -182,16 +212,20 @@ class ElmSession(
     private fun emitSpeed(e: ObdSpeedEvent) {
         try {
             onSpeed(e)
+        } catch (t: InterruptedException) {
+            throw t // как прерывание паузы: после stop() — обычное завершение
         } catch (t: Exception) {
             throw CallbackFailure(t)
         }
     }
 
-    private fun setState(s: ElmState, msg: String?) {
-        if (s == state) return
+    private fun setState(s: ElmState, msg: String?, force: Boolean = false) {
+        if (s == state && !force) return
         state = s
         try {
             onState(s, msg)
+        } catch (t: InterruptedException) {
+            throw t
         } catch (t: Exception) {
             throw CallbackFailure(t)
         }
@@ -203,6 +237,9 @@ class ElmSession(
         const val NO_DATA_RETRY_MS = 5000L
         const val MAX_ERRORS = 5
 
+        /** Команды, у которых на повторе принимается любой ответ. */
+        val LENIENT = setOf("ATZ", "ATE0", "ATL0", "ATS0", "ATH0")
+
         fun timeoutFor(cmd: String): Long = when (cmd) {
             "ATZ" -> 3000L
             "0100" -> 10_000L
@@ -213,7 +250,7 @@ class ElmSession(
 
         fun hasBanner(r: String) = lines(r).any { it.contains("ELM327") }
 
-        fun hasOk(r: String) = lines(r).any { it == "OK" }
+        fun hasOk(r: String) = lines(r).any { it.contains("OK") }
 
         /** Ответ на 0100: строка с `4100` (возможно после SEARCHING...). */
         fun hasPids(r: String) = lines(r).any { it.replace(" ", "").contains("4100") }

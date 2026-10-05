@@ -11,11 +11,16 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class ElmSessionTest {
-    /** Кусок вывода адаптера; late — первое чтение не успевает (таймаут), кусок приходит к следующему. */
-    private class Chunk(val text: String, var late: Boolean = false)
+    /** Кусок вывода адаптера, появляется через delayMs после записи команды. */
+    private class Chunk(val text: String, val delayMs: Double = 0.0) {
+        var availableAt = 0.0
+    }
 
     private fun r(vararg texts: String): List<Chunk> = texts.map { Chunk(it) }
-    private fun late(text: String): List<Chunk> = listOf(Chunk(text, late = true))
+    private fun delayed(delayMs: Double, vararg texts: String): List<Chunk> = texts.map { Chunk(it, delayMs) }
+
+    /** Приходит после таймаута чтения (1000 мс), но в окне drain (300 мс). */
+    private fun late(text: String): List<Chunk> = delayed(1100.0, text)
     private val silent: List<Chunk> = emptyList()
 
     private val ok = "OK\r\r>"
@@ -26,7 +31,8 @@ class ElmSessionTest {
 
     /**
      * Поддельный адаптер: каждая запись выкладывает в буфер вывода очередной шаг сценария, чтение берёт из буфера.
-     * Пустой буфер — таймаут (часы сдвигаются на timeoutMs). Сценарий кончился при записи или открытии — stop().
+     * Кусок, не появившийся до конца таймаута, — null (часы сдвигаются на timeoutMs); иначе часы идут до его появления
+     * плюс latencyMs. Сценарий кончился при записи или открытии — stop().
      */
     private class Rig(private val latencyMs: Double = 40.0) {
         var now = 1000.0
@@ -35,6 +41,7 @@ class ElmSessionTest {
         val states = mutableListOf<Pair<ElmState, String?>>()
         val opens = ArrayDeque<Any>()  // FakeChannel или Throwable
         var onSpeedHook: (ObdSpeedEvent) -> Unit = {}
+        var onStateHook: (ElmState) -> Unit = {}
         lateinit var session: ElmSession
 
         inner class FakeChannel(steps: List<List<Chunk>>) : ElmChannel {
@@ -49,19 +56,18 @@ class ElmSessionTest {
                 writes += cmd
                 writeTimes += now
                 val step = script.removeFirstOrNull()
-                if (step == null) session.stop() else output.addAll(step)
+                if (step == null) session.stop() else step.forEach { it.availableAt = now + it.delayMs; output += it }
             }
 
             override fun readUntilPrompt(timeoutMs: Long): String? {
                 timeouts += timeoutMs
                 val c = output.firstOrNull()
-                if (c == null || c.late) {
-                    c?.late = false
+                if (c == null || c.availableAt > now + timeoutMs) {
                     now += timeoutMs
                     return null
                 }
                 output.removeFirst()
-                now += latencyMs
+                now = maxOf(now, c.availableAt) + latencyMs
                 return c.text
             }
 
@@ -84,7 +90,7 @@ class ElmSessionTest {
                 nowMs = { now },
                 sleep = { ms -> sleeps += ms; now += ms },
                 onSpeed = { events += it; onSpeedHook(it) },
-                onState = { s, msg -> states += s to msg },
+                onState = { s, msg -> states += s to msg; onStateHook(s) },
             )
             session.run()
             return this
@@ -100,8 +106,8 @@ class ElmSessionTest {
         rig.run()
 
         assertEquals(Elm327.INIT + List(4) { Elm327.SPEED }, ch.writes)
-        // drain перед ATZ (300), затем таймауты INIT и опросов
-        assertEquals(listOf(300L, 3000, 1000, 1000, 1000, 1000, 1000, 10_000) + List(4) { 1000L }, ch.timeouts)
+        // drain перед ATZ (300), таймауты INIT, затем перед каждым опросом clearInput (0) и ответ (1000)
+        assertEquals(listOf(300L, 3000, 1000, 1000, 1000, 1000, 1000, 10_000) + List(4) { listOf(0L, 1000L) }.flatten(), ch.timeouts)
         assertEquals(3, rig.events.size)
         assertTrue(rig.events.all { it.kmh == 60 && it.rttMs == 40.0 })
         // t0 опросов: 1000 + 300 (drain) + 7·40 = 1580, далее шаг minIntervalMs = 200
@@ -199,6 +205,32 @@ class ElmSessionTest {
         assertEquals(Elm327.INIT + List(4) { Elm327.SPEED }, ch.writes)
     }
 
+    @Test fun interruptedSearchTailBeyondDrainWindowDoesNotLagEvents() {
+        val rig = Rig()
+        // 010D №1: адаптер ищет протокол дольше таймаута и drain; 010D №2 прерывает поиск —
+        // «STOPPED» (за №1) и «?» (за №2) отдельными кусками, два приглашения на одну запись
+        val ch = rig.channel(
+            initOk + listOf(silent, delayed(100.0, "STOPPED\r>", "?\r>"), speed(61), speed(62), speed(63)),
+        )
+        rig.run()
+
+        assertEquals(listOf(61, 62, 63), rig.events.map { it.kmh })
+        val pollT0 = ch.writeTimes.drop(Elm327.INIT.size)
+        // каждое событие — ответ на свою запись (№3, №4, №5)
+        assertEquals(pollT0.subList(2, 5), rig.events.map { it.tMs - it.rttMs / 2 })
+        assertTrue(rig.events.all { it.rttMs == 40.0 })
+    }
+
+    @Test fun strayOutputBetweenPollsIsClearedBeforeNextCommand() {
+        val rig = Rig()
+        // после ответа №1 приходит лишнее «?» — до следующей записи, но уже после чтения
+        val ch = rig.channel(initOk + listOf(r("41 0D 3C\r\r>") + delayed(100.0, "?\r>"), speed(61), speed(62)))
+        rig.run()
+
+        assertEquals(listOf(60, 61, 62), rig.events.map { it.kmh })
+        assertEquals(Elm327.INIT + List(4) { Elm327.SPEED }, ch.writes)
+    }
+
     @Test fun adapterResetWhilePollingReinitsOnSameChannel() {
         for (reset in listOf("\r\rELM327 v1.5\r\r>", "LV RESET\r\r>", "\u0000ÿELM327 v1.5\r>")) {
             val rig = Rig()
@@ -247,10 +279,9 @@ class ElmSessionTest {
         assertTrue(ElmState.RECONNECT_WAIT !in rig.stateSeq())
     }
 
-    @Test fun atCommandFailingTwiceReconnects() {
+    @Test fun noReplyToAtCommandTwiceReconnects() {
         val rig = Rig()
-        val q = r("?\r\r>")
-        val ch1 = rig.channel(listOf(r(banner), q, q))
+        val ch1 = rig.channel(listOf(r(banner), silent, silent))
         val ch2 = rig.channel(initOk + listOf(speed(60)))
         rig.run()
 
@@ -258,6 +289,48 @@ class ElmSessionTest {
         assertEquals(listOf("ATZ", "ATE0", "ATE0"), ch1.writes)
         assertEquals(listOf(2000L), rig.longSleeps())
         assertEquals(Elm327.INIT + List(2) { Elm327.SPEED }, ch2.writes)
+    }
+
+    @Test fun questionMarkToAtl0TwiceStillStartsPolling() {
+        val rig = Rig()
+        val q = r("?\r\r>")
+        val ch = rig.channel(listOf(r(banner), r(ok), q, q) + initOk.drop(3) + listOf(speed(60)))
+        rig.run()
+
+        assertEquals(listOf("ATZ", "ATE0", "ATL0", "ATL0") + Elm327.INIT.drop(3) + List(2) { Elm327.SPEED }, ch.writes)
+        assertEquals(1, rig.events.size)
+        assertTrue(rig.states.any { it.first == ElmState.INIT && it.second?.contains("ATL0") == true })
+        assertTrue(ElmState.RECONNECT_WAIT !in rig.stateSeq())
+    }
+
+    @Test fun okWithJunkIsAccepted() {
+        val rig = Rig()
+        val ch = rig.channel(listOf(r(banner), r("\u0000OK\r\r>")) + initOk.drop(2) + listOf(speed(60)))
+        rig.run()
+
+        assertEquals(Elm327.INIT + List(2) { Elm327.SPEED }, ch.writes)
+        assertEquals(1, rig.events.size)
+    }
+
+    @Test fun atSp0WithoutOkTwiceReconnects() {
+        val rig = Rig()
+        val q = r("?\r\r>")
+        val ch1 = rig.channel(initOk.take(5) + listOf(q, q))
+        rig.channel(initOk)
+        rig.run()
+
+        assertTrue(ch1.closed)
+        assertEquals(Elm327.INIT.take(6) + "ATSP0", ch1.writes)
+        assertEquals(listOf(2000L), rig.longSleeps())
+    }
+
+    @Test fun atzNonBannerReplyAcceptedOnSecondAttempt() {
+        val rig = Rig()
+        val ch = rig.channel(listOf(r("?\r\r>"), r("OK\r\r>")) + initOk.drop(1) + listOf(speed(60)))
+        rig.run()
+
+        assertEquals(listOf("ATZ") + Elm327.INIT + List(2) { Elm327.SPEED }, ch.writes)
+        assertEquals(1, rig.events.size)
     }
 
     @Test fun atzWithoutBannerIsRetriedOnce() {
@@ -291,6 +364,27 @@ class ElmSessionTest {
         assertEquals(1, rig.opens.size)  // второй канал не открывался
         assertTrue(rig.longSleeps().isEmpty())
         assertEquals(ElmState.STOPPED, rig.stateSeq().last())
+    }
+
+    @Test fun stoppedSessionSwallowsCallbackInterruptedException() {
+        val rig = Rig()
+        rig.channel(initOk + listOf(speed(60), speed(60)))
+        rig.onSpeedHook = { rig.session.stop(); throw InterruptedException("queue put") }
+        rig.run()  // возвращается нормально
+
+        assertEquals(1, rig.events.size)
+        assertEquals(ElmState.STOPPED, rig.stateSeq().last())
+    }
+
+    @Test fun stoppedCallbackFailureIsSuppressedIntoOriginal() {
+        val rig = Rig()
+        rig.channel(initOk + listOf(speed(60)))
+        rig.onSpeedHook = { throw IllegalArgumentException("ui bug") }
+        rig.onStateHook = { if (it == ElmState.STOPPED) throw IllegalStateException("stopped bug") }
+
+        val e = assertFailsWith<IllegalArgumentException> { rig.run() }
+        assertEquals("ui bug", e.message)
+        assertEquals(listOf("stopped bug"), e.suppressed.map { it.message })
     }
 
     @Test fun stopFromAnotherThreadEndsRunWithinOneTimeoutAndClearsInterrupt() {
