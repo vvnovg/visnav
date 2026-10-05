@@ -6,6 +6,7 @@ object Elm327 {
     const val SPEED = "010D"
 
     private val HEX = Regex("[0-9A-F]+")
+    private val ISO_TARGETS = setOf("6B", "F1")
     private val ERR_CODE = Regex("ERR[0-9A-F]{2}")
     private val ERRORS = listOf(
         "NO DATA", "UNABLE TO CONNECT", "CAN ERROR", "BUS ERROR", "STOPPED", "ERROR",
@@ -15,8 +16,11 @@ object Elm327 {
     /**
      * Скорость, км/ч, из ответа на 010D; null — нет данных или ошибка. Каждая строка разбирается
      * отдельно (пробелы и табуляции убираются, строка должна быть шестнадцатеричной): `41 0D xx` —
-     * в начале строки, после заголовка CAN 11 бит (`7E8 03`) или 29 бит (`18DAF110 03`) с PCI 03,
-     * либо после заголовка ISO/KWP из трёх байтов (`48 6B 10`, допускается байт контрольной суммы).
+     * в начале строки, после заголовка CAN 11 бит (`7E8 03`) или 29 бит (`18DAF110 03`) с PCI 03
+     * (допускается до 4 байтов заполнения кадра — ATH1 у части клонов печатает все 8 байтов),
+     * либо после заголовка ISO/KWP из трёх байтов со вторым байтом 6B (J1850/ISO 9141: `48 6B 10`)
+     * или F1 (KWP: `83 F1 11`), допускается байт контрольной суммы. KWP с отдельным байтом длины
+     * (`80 F1 11 03 …`) не распознаётся — редкость, при ATH0 заголовков нет.
      * Если отвечают несколько ЭБУ с разными значениями — берётся первое.
      */
     fun parseSpeed(response: String): Int? {
@@ -26,7 +30,7 @@ object Elm327 {
             val v = speedAt(s, 0, 0)
                 ?: canSpeed(s, 3)
                 ?: canSpeed(s, 8)
-                ?: speedAt(s, 6, 1)
+                ?: isoSpeed(s)
             if (v != null) return v
         }
         return null
@@ -44,9 +48,13 @@ object Elm327 {
     private fun lines(response: String): List<String> =
         response.replace(">", "").split('\r', '\n').map { it.trim().uppercase() }.filter { it.isNotEmpty() }
 
-    /** Заголовок CAN длиной [headerLen] символов, затем PCI 03 и `410Dxx` без лишних байтов. */
+    /** Заголовок CAN длиной [headerLen] символов, затем PCI 03 и `410Dxx`, после — до 4 байтов заполнения. */
     private fun canSpeed(s: String, headerLen: Int): Int? =
-        if (s.startsWith("03", headerLen)) speedAt(s, headerLen + 2, 0) else null
+        if (s.startsWith("03", headerLen)) speedAt(s, headerLen + 2, 4) else null
+
+    /** Заголовок ISO/KWP из трёх байтов со вторым байтом 6B или F1, затем `410Dxx` и не больше байта контрольной суммы. */
+    private fun isoSpeed(s: String): Int? =
+        if (s.length >= 6 && s.substring(2, 4) in ISO_TARGETS) speedAt(s, 6, 1) else null
 
     /** `410Dxx` с позиции [off], после значения — не больше [maxExtraBytes] байтов. */
     private fun speedAt(s: String, off: Int, maxExtraBytes: Int): Int? {

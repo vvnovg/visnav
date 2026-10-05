@@ -84,4 +84,21 @@ class Elm327Test {
         assertFalse(Elm327.isReset("NO DATA\r>"))
         assertFalse(Elm327.isReset("OK\r>"))
     }
+
+    @Test fun canFramesWithPaddingAreParsed() {
+        for (pad in listOf("00", "AA", "55")) {
+            assertEquals(60, Elm327.parseSpeed("7E8 03 41 0D 3C $pad $pad $pad $pad\r>"), pad)
+            assertEquals(60, Elm327.parseSpeed("18 DA F1 10 03 41 0D 3C $pad $pad $pad $pad\r>"), pad)
+            assertEquals(60, Elm327.parseSpeed("7E803410D3C$pad$pad$pad$pad\r>"), pad)
+        }
+    }
+
+    @Test fun isoHeaderRequires6BOrF1() {
+        assertNull(Elm327.parseSpeed("41 00 BE 41 0D 3C\r>"))
+        assertNull(Elm327.parseSpeed("4100BE410D3C\r>"))
+        assertNull(Elm327.parseSpeed("41 01 00 41 0D 3C 00\r>"))
+        assertEquals(60, Elm327.parseSpeed("41 6B 10 41 0D 3C 7F\r>"))
+        assertEquals(60, Elm327.parseSpeed("83 F1 11 41 0D 3C 0A\r>"))
+        assertEquals(60, Elm327.parseSpeed("486B10410D3CA2\r>"))
+    }
 }
