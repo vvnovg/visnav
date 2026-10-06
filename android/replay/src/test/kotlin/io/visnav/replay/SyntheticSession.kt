@@ -12,6 +12,7 @@ import io.visnav.core.GyroEvent
 import io.visnav.core.Half
 import io.visnav.core.LatencyJson
 import io.visnav.core.LocEvent
+import io.visnav.core.ObdSpeedEvent
 import io.visnav.core.RefPack
 import io.visnav.core.SensorEvent
 import io.visnav.core.SessionHeader
@@ -44,15 +45,20 @@ object SyntheticSession {
     /**
      * Статус GNSS в окне [uniformFromMs, uniformToMs) (мс от начала) «как у спуфера»:
      * used = 10, cn0Std = [uniformCn0Std]; вне окна — used = 14, cn0Std = 5.
+     * [obdKmh] — показание OBD 5 Гц (null — без OBD). В окне [speedFromMs, speedToMs) скорость в фиксах
+     * GNSS больше истинной на [speedBiasMps] (подмена, согласованная по доплеру). [durationS] — длина сессии;
+     * эталоны есть только на первые 120 с (дальше кадры несут дескриптор последнего — визуальное выключать).
      */
     fun session(
         dir: File, uniformFromMs: Long = -1, uniformToMs: Long = -1, uniformCn0Std: Float = 1f, accM: Float = 3f,
+        obdKmh: Int? = null, speedFromMs: Long = -1, speedToMs: Long = -1, speedBiasMps: Float = 0f,
+        durationS: Int = N,
     ): SessionData {
         val sensors = mutableListOf<SensorEvent>()
         val frames = mutableListOf<FrameRecord>()
         val descFile = File(dir, "s.desc")
         DescriptorLogWriter(descFile, DIM).use { w ->
-            for (step in 0..12_000) {
+            for (step in 0..durationS * 100) {
                 val tMs = T0 + step * 10L
                 val t = tMs.toDouble()
                 val rel = tMs - T0
@@ -61,12 +67,14 @@ object SyntheticSession {
                 val eMeters = step * 0.1
                 if (step % 100 == 0) {
                     val ll = enu.toLatLon(eMeters, 0.0)
-                    sensors += LocEvent(t, ll[0], ll[1], accM, 10f, 0.3f, 90f, 2f)
+                    val bias = if (rel >= speedFromMs && rel < speedToMs) speedBiasMps else 0f
+                    sensors += LocEvent(t, ll[0], ll[1], accM, 10f + bias, 0.3f, 90f, 2f)
                     val uniform = rel >= uniformFromMs && rel < uniformToMs
                     sensors += if (uniform) GnssStatusEvent(t, 16, 10, 35f, uniformCn0Std)
                     else GnssStatusEvent(t, 16, 14, 35f, 5f)
                     sensors += AgcEvent(t, 40f, 10)
                 }
+                if (obdKmh != null && step % 20 == 7) sensors += ObdSpeedEvent(t, obdKmh, 40.0)
                 if (step % 50 == 0) {
                     frames += FrameRecord(tMs = tMs, mode = "gps", gps = null, prior = null, top = emptyList(),
                         fix = null, latMs = LatencyJson(0.0, 0.0, 0.0))

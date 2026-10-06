@@ -10,10 +10,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -26,13 +28,16 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import io.visnav.app.obd.ObdSettings
+import io.visnav.app.obd.obdKindLabel
+import io.visnav.app.obd.obdLine
 import io.visnav.core.GnssReason
 import io.visnav.core.NavMode
 import io.visnav.core.PriorMode
 import kotlin.math.roundToInt
 
 @Composable
-fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
+fun M1Screen(controller: M1Controller, permissionsGranted: Boolean, requestObdPermissions: (String) -> Unit) {
     val s by controller.state.collectAsState()
     val lifecycleOwner = LocalLifecycleOwner.current
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
@@ -98,8 +103,10 @@ fun M1Screen(controller: M1Controller, permissionsGranted: Boolean) {
             if (s.running) {
                 Text(perfLine(s.perf))
                 Text(perfConfigLine(s.settings))
+                if (s.obdSettings.enabled) Text(obdLine(s.obd))
             } else {
                 PerfSettingsControls(controller, s.settings, loading = s.loading)
+                ObdControls(controller, s, requestObdPermissions)
             }
         }
     }
@@ -125,6 +132,47 @@ private fun PerfSettingsControls(controller: M1Controller, st: PerfSettings, loa
         onClick = { controller.setOrt(PerfSettings.next(PerfSettings.ORTS, st.ort)) },
         enabled = !loading,
     ) { Text("Модель: ${ortLabel(st.ort)}") }
+}
+
+/** Блок «OBD» (вне записи): вид подключения и выбор адаптера. Включение OBD запрашивает разрешения Bluetooth. */
+@Composable
+private fun ObdControls(controller: M1Controller, s: UiState, requestObdPermissions: (String) -> Unit) {
+    val obd = s.obdSettings
+    Text("OBD", style = MaterialTheme.typography.titleMedium)
+    OutlinedButton(onClick = {
+        val next = ObdSettings.next(obd.kind)
+        controller.setObdKind(next)
+        if (next != ObdSettings.OFF && !controller.obdPermitted(next)) requestObdPermissions(next)
+    }) { Text("OBD: ${obdKindLabel(obd.kind)}") }
+    if (obd.enabled) {
+        OutlinedButton(onClick = {
+            if (!controller.obdPermitted(obd.kind)) requestObdPermissions(obd.kind)
+            controller.openObdDevices()
+        }) { Text("Устройство: ${obd.name ?: "не выбрано"}") }
+        OutlinedButton(onClick = { controller.resetObdFactors() }, enabled = obd.addr != null) {
+            Text("Сбросить поправку спидометра")
+        }
+    }
+    if (s.obdPicking) {
+        val close = { controller.closeObdDevices() }
+        AlertDialog(
+            onDismissRequest = close,
+            title = { Text(if (obd.kind == ObdSettings.BLE) "Адаптер BLE" else "Сопряжённый адаптер") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    if (s.obdScanning) Text("Поиск…")
+                    s.obdDevicesNote?.let { Text(it) }
+                    for (d in s.obdDevices) {
+                        TextButton(onClick = { controller.setObdDevice(d) }) { Text("${d.name} (${d.addr})") }
+                    }
+                }
+            },
+            confirmButton = {
+                if (obd.kind == ObdSettings.BLE && !s.obdScanning) TextButton(onClick = { controller.loadObdDevices() }) { Text("Искать снова") }
+            },
+            dismissButton = { TextButton(onClick = close) { Text("Закрыть") } },
+        )
+    }
 }
 
 internal fun profileLabel(profile: String) =
@@ -173,4 +221,6 @@ internal fun reasonLabel(r: GnssReason): String = when (r) {
     GnssReason.INNOVATION -> "расхождение с фильтром"
     GnssReason.UNIFORM_CN0 -> "признак подмены"
     GnssReason.FIX_GAP -> "перерыв фиксов"
+    GnssReason.SPEED_MISMATCH -> "скорость GPS ≠ машина"
+    GnssReason.SPEED_FACTOR_CHANGED -> "поправка спидометра изменилась"
 }

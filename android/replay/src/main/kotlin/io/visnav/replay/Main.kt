@@ -18,7 +18,7 @@ import kotlin.system.exitProcess
 
 private const val USAGE =
     "usage: replay --session <prefix> --refpack <dir> --out <file> [--outage START_S:LEN_S]... [--jam START_S:LEN_S]... " +
-        "[--spoof START_S:LEN_S:EAST_M:NORTH_M[:RAMP_S]]... [--no-visual] [--no-monitor] [--roads DIR] [--no-road-constraint] [--dest LAT,LON --nav-out FILE]\n" +
+        "[--spoof START_S:LEN_S:EAST_M:NORTH_M[:RAMP_S]]... [--no-visual] [--no-monitor] [--no-obd] [--roads DIR] [--no-road-constraint] [--dest LAT,LON --nav-out FILE]\n" +
         "       replay trip-plan --roads DIR --from LAT,LON --to LAT,LON [--via LAT,LON]... --out FILE.gpx"
 private const val FIRST_SENSOR_TIME_TOLERANCE_MS = 5_000.0
 private const val CLOCK_DRIFT_WARN_MS = 1_000L
@@ -28,6 +28,7 @@ fun main(args: Array<String>) {
     var session: String? = null; var refpack: String? = null; var out: String? = null
     var visual = true
     var monitor = true
+    var obd = true
     var roadsDir: String? = null; var roadConstraint = true
     var destSpec: String? = null; var navOut: String? = null
     val jamSpecs = mutableListOf<String>()
@@ -44,6 +45,7 @@ fun main(args: Array<String>) {
             "--spoof" -> spoofSpecs += args.getOrNull(++i) ?: fail("--spoof needs START_S:LEN_S:EAST_M:NORTH_M[:RAMP_S]")
             "--no-visual" -> visual = false
             "--no-monitor" -> monitor = false
+            "--no-obd" -> obd = false
             "--roads" -> roadsDir = args.getOrNull(++i) ?: fail("--roads needs DIR")
             "--no-road-constraint" -> roadConstraint = false
             "--dest" -> destSpec = args.getOrNull(++i) ?: fail("--dest needs LAT,LON")
@@ -104,7 +106,7 @@ fun main(args: Array<String>) {
     val roads = roadsDir?.let { dir ->
         try { loadRoads(File(dir)) } catch (e: IllegalArgumentException) { fail(e.message ?: "bad roadpack in $dir") }
     }
-    val config = ReplayConfig(visual = visual, monitor = monitor, roadConstraint = roadConstraint)
+    val config = ReplayConfig(visual = visual, monitor = monitor, roadConstraint = roadConstraint, obd = obd)
     val points = Replayer(pack, config, roads?.first).run(data, outages, jams, spoofs)
     if (visual && allFramesLackDescriptor(points)) {
         fail("visual mode: no frame had a descriptor (all vis_state=no_desc) — session/refpack mismatch?")

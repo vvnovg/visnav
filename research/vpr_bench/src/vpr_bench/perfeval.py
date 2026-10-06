@@ -25,7 +25,7 @@ CHARGE_DROP_WINDOW_MS = 60_000
 MAX_DURATION_RATIO = 1.5
 STAGES = (("e2e", "e2e_ms"), ("pre", "pre"), ("inf", "inf"), ("search", "search"), ("fuse", "fuse_ms"),
           ("nav", "nav_ms"))
-LATE_SOURCES = ("frame", "gnss_fix", "gnss_status", "imu", "agc", "other")
+LATE_SOURCES = ("frame", "gnss_fix", "gnss_status", "imu", "agc", "obd", "other")
 
 
 @dataclass(frozen=True)

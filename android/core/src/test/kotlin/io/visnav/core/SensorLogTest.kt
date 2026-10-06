@@ -6,6 +6,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class SensorLogTest {
     @Test fun exactLineFormat() {
@@ -52,7 +53,7 @@ class SensorLogTest {
             FrameCaptureEvent(4_500.0, 4_500L, 987_654_000L),
         )
         for (e in events) {
-            assertEquals(true, SensorLogFormat.isWritable(e))
+            assertTrue(SensorLogFormat.isWritable(e))
             assertEquals(e, SensorLogFormat.parse(SensorLogFormat.line(e)))
         }
     }
@@ -170,5 +171,14 @@ class SensorLogTest {
         assertEquals("{\"t\":7.0,\"k\":\"agc\",\"agc_db\":-2.5,\"n\":12}", SensorLogFormat.line(e))
         assertEquals(e, SensorLogFormat.parse(SensorLogFormat.line(e)))
         assertFalse(SensorLogFormat.isWritable(AgcEvent(7.0, Float.NaN, 1)))
+    }
+
+    @Test fun obdSpeedLineAndRoundTrip() {
+        val e = ObdSpeedEvent(1000.5, 72, 85.0)
+        assertEquals("{\"t\":1000.5,\"k\":\"obd\",\"kmh\":72,\"rtt_ms\":85.0}", SensorLogFormat.line(e))
+        assertEquals(e, SensorLogFormat.parse(SensorLogFormat.line(e)))
+        assertTrue(SensorLogFormat.isWritable(e))
+        assertFalse(SensorLogFormat.isWritable(ObdSpeedEvent(1000.5, 72, Double.NaN)))
+        assertNull(SensorLogFormat.parse("{\"t\":1.0,\"k\":\"zz\"}"))
     }
 }

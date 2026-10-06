@@ -3,7 +3,7 @@ import json
 import pytest
 
 from vpr_bench.m4cli import main
-from vpr_bench.perfeval import evaluate, read_perf, render
+from vpr_bench.perfeval import LATE_SOURCES, evaluate, read_perf, render
 
 T0 = 1_700_000_000_000
 MIN = 60_000
@@ -453,3 +453,7 @@ def test_nfr7_59_7_min_is_yes(tmp_path):
     res = evaluate(read_perf(_write(tmp_path, recs)))
     assert res.duration_min == pytest.approx(59.75, abs=0.1)
     assert res.nfr7 == "да"
+
+
+def test_late_sources_order_includes_obd_after_agc():
+    assert LATE_SOURCES == ("frame", "gnss_fix", "gnss_status", "imu", "agc", "obd", "other")

@@ -19,7 +19,7 @@ sealed interface ReorderItem {
  * (как стабильная сортировка `sensors + frames` в Replayer). push и drain потокобезопасны; sink вызывается вне замка.
  *
  * Опоздание элемента (`arrivalMs − tMs`) копится по источникам (frame, gnss_fix, gnss_status, imu,
- * agc, other) в окне до [LATENESS_WINDOW] значений; [latenessSnapshotAndReset] отдаёт статистику и
+ * agc, obd, other) в окне до [LATENESS_WINDOW] значений; [latenessSnapshotAndReset] отдаёт статистику и
  * очищает окна.
  */
 class EventReorderer(val delayMs: Long = 1500, private val maxQueued: Int = 20_000) {
@@ -112,7 +112,7 @@ class EventReorderer(val delayMs: Long = 1500, private val maxQueued: Int = 20_0
 
     private companion object {
         const val LATENESS_WINDOW = 5000
-        val SOURCES = listOf("frame", "gnss_fix", "gnss_status", "imu", "agc", "other")
+        val SOURCES = listOf("frame", "gnss_fix", "gnss_status", "imu", "agc", "obd", "other")
 
         fun sourceOf(item: ReorderItem): String = when (item) {
             is ReorderItem.Frame -> "frame"
@@ -121,6 +121,7 @@ class EventReorderer(val delayMs: Long = 1500, private val maxQueued: Int = 20_0
                 is GnssStatusEvent -> "gnss_status"
                 is GyroEvent, is AccelEvent, is GyroUncalEvent -> "imu"
                 is AgcEvent -> "agc"
+                is ObdSpeedEvent -> "obd"
                 is ClockEvent, is FrameCaptureEvent -> "other"
             }
         }

@@ -198,7 +198,7 @@ class ReplayerTest {
         TrajectoryWriter.write(out, s, ReplayConfig(), listOf(Outage(10, 20)),
             listOf(TrajPoint(5, 55.75, 37.6, 4.0, false, null, null, "no_desc", false, NavMode.GNSS, GnssHealth.GOOD, emptySet())))
         val lines = out.readLines()
-        assertEquals("{\"type\":\"replay\",\"visual\":true,\"outages\":[[10,20]],\"monitor\":true,\"jams\":[],\"spoofs\":[],\"roads\":null,\"road_constraint\":true,\"session_started_ms\":1,\"refpack_created_at\":\"c\"}", lines[0])
+        assertEquals("{\"type\":\"replay\",\"visual\":true,\"outages\":[[10,20]],\"monitor\":true,\"jams\":[],\"spoofs\":[],\"roads\":null,\"road_constraint\":true,\"obd\":false,\"session_started_ms\":1,\"refpack_created_at\":\"c\"}", lines[0])
         assertEquals(
             "{\"t_ms\":5,\"lat\":55.75,\"lon\":37.6,\"sigma_m\":4.0,\"outage\":false,\"vis_sim\":null,\"vis_ok\":null," +
                 "\"vis_state\":\"no_desc\",\"stationary\":false,\"mode\":\"gnss\",\"health\":\"good\",\"reasons\":[],\"injected\":null,\"way_id\":null,\"road_lat\":null,\"road_lon\":null,\"road_conf\":null,\"road_used\":null}",
@@ -297,6 +297,29 @@ class ReplayerTest {
 
         val drPoints = Replayer(pack(), ReplayConfig(visual = false)).run(s, emptyList())
         assertTrue(drPoints.all { it.visState == "off" })
+    }
+
+    @Test fun noObdReplaysAsIfTheSessionHadNoObd() {
+        val withObd = SyntheticSession.session(createTempDir(), obdKmh = 30)
+        val without = SyntheticSession.session(createTempDir())
+        val config = ReplayConfig(visual = false)
+        val off = Replayer(SyntheticSession.pack(), config.copy(obd = false)).run(withObd, emptyList())
+        assertEquals(Replayer(SyntheticSession.pack(), config).run(without, emptyList()), off)
+        // 30 км/ч против 36 по GPS: с OBD прогон другой — фильтр действительно получает OBD.
+        assertTrue(Replayer(SyntheticSession.pack(), config).run(withObd, emptyList()) != off)
+    }
+
+    @Test fun headerObdIsTrueOnlyWhenObdEventsWereReplayed() {
+        fun header(s: SessionData, config: ReplayConfig): String {
+            val f = File(createTempDir(), "t.jsonl")
+            TrajectoryWriter.write(f, s, config, emptyList(), emptyList())
+            return f.readLines()[0]
+        }
+        val withObd = SyntheticSession.session(createTempDir(), obdKmh = 37, durationS = 2)
+        val without = SyntheticSession.session(createTempDir(), durationS = 2)
+        assertTrue(header(withObd, ReplayConfig()).contains("\"road_constraint\":true,\"obd\":true,"))
+        assertTrue(header(withObd, ReplayConfig(obd = false)).contains("\"obd\":false,"))
+        assertTrue(header(without, ReplayConfig()).contains("\"obd\":false,"))
     }
 
     private fun createTempDir(): File = kotlin.io.path.createTempDirectory("replay").toFile()

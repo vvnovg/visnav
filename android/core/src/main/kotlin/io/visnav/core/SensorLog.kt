@@ -56,6 +56,9 @@ data class GyroUncalEvent(
  */
 data class FrameCaptureEvent(override val tMs: Double, val frameTMs: Long, val capNs: Long) : SensorEvent
 
+/** Скорость автомобиля по OBD-II (PID 0D), км/ч; `t` — отправка запроса + RTT/2, [rttMs] — время запрос-ответ. */
+data class ObdSpeedEvent(override val tMs: Double, val kmh: Int, val rttMs: Double) : SensorEvent
+
 object SensorLogFormat {
     fun header(startedMs: Long): String = "{\"v\":1,\"type\":\"sensors\",\"started_ms\":$startedMs}"
 
@@ -71,6 +74,7 @@ object SensorLogFormat {
             is GyroUncalEvent -> e.x.isFinite() && e.y.isFinite() && e.z.isFinite() &&
                 e.bx.isFinite() && e.by.isFinite() && e.bz.isFinite()
             is FrameCaptureEvent -> true
+            is ObdSpeedEvent -> e.rttMs.isFinite()
         }
     }
 
@@ -97,6 +101,7 @@ object SensorLogFormat {
         is GyroUncalEvent -> "{\"t\":${e.tMs},\"k\":\"gu\",\"x\":${e.x},\"y\":${e.y},\"z\":${e.z}," +
             "\"bx\":${e.bx},\"by\":${e.by},\"bz\":${e.bz}}"
         is FrameCaptureEvent -> "{\"t\":${e.tMs},\"k\":\"frame\",\"frame_t_ms\":${e.frameTMs},\"cap_ns\":${e.capNs}}"
+        is ObdSpeedEvent -> "{\"t\":${e.tMs},\"k\":\"obd\",\"kmh\":${e.kmh},\"rtt_ms\":${e.rttMs}}"
     }
 
     fun parse(line: String): SensorEvent? {
@@ -119,6 +124,7 @@ object SensorLogFormat {
             "clk" -> ClockEvent(t, l("wall_ms"), l("elapsed_ns"), l("mono_ns"))
             "gu" -> GyroUncalEvent(t, f("x"), f("y"), f("z"), f("bx"), f("by"), f("bz"))
             "frame" -> FrameCaptureEvent(t, l("frame_t_ms"), l("cap_ns"))
+            "obd" -> ObdSpeedEvent(t, o.getValue("kmh").jsonPrimitive.int, o.getValue("rtt_ms").jsonPrimitive.double)
             // Контракт .sensors.jsonl v1: расширяется аддитивно, читатели игнорируют неизвестные виды событий.
             else -> null
         }

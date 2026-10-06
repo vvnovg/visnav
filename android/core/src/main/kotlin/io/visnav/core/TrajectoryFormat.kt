@@ -2,7 +2,7 @@ package io.visnav.core
 
 import kotlinx.serialization.json.JsonPrimitive
 
-/** Строка траектории: поля M2a без изменений, в конце — mode, health, reasons, injected. */
+/** Строка траектории: поля M2a без изменений, в конце — mode, health, reasons, injected; obd_k — только если было OBD. */
 object TrajectoryFormat {
     fun modeName(m: NavMode): String = when (m) {
         NavMode.GNSS -> "gnss"
@@ -28,7 +28,8 @@ object TrajectoryFormat {
             "\"mode\":\"${modeName(o.mode)}\",\"health\":\"${o.health.name.lowercase()}\"," +
             "\"reasons\":[$reasons],\"injected\":${str(injected)}," +
             "\"way_id\":${r?.wayId ?: "null"},\"road_lat\":${num(r?.lat)},\"road_lon\":${num(r?.lon)}," +
-            "\"road_conf\":${num(r?.confidence)},\"road_used\":${r?.used ?: "null"}}"
+            "\"road_conf\":${num(r?.confidence)},\"road_used\":${r?.used ?: "null"}" +
+            (if (o.obdK != null) ",\"obd_k\":${num(o.obdK)}}" else "}")
     }
 
     /** JSON has no NaN/Infinity literal; a non-finite value is written as `null` to keep every line valid JSON. */
