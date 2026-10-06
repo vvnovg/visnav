@@ -28,6 +28,20 @@ import io.visnav.core.GnssReason
 import io.visnav.core.Localizer
 import io.visnav.core.LocalizerConfig
 import io.visnav.core.NavMode
+import io.visnav.core.ObdConfig
+import io.visnav.app.obd.ObdClient
+import io.visnav.app.obd.ObdDevice
+import io.visnav.app.obd.ObdScanner
+import io.visnav.app.obd.ObdSettings
+import io.visnav.app.obd.ObdUi
+import io.visnav.app.obd.BleChannel
+import io.visnav.app.obd.SppChannel
+import io.visnav.app.obd.bondedObdDevices
+import io.visnav.app.obd.factorsToSave
+import io.visnav.app.obd.obdKKey
+import io.visnav.app.obd.obdKSlowKey
+import io.visnav.app.obd.obdPermissions
+import io.visnav.app.obd.restoredFactor
 import io.visnav.core.ReorderItem
 import io.visnav.core.SensorEvent
 import io.visnav.core.TrajectoryFormat
@@ -83,6 +97,16 @@ data class UiState(
     val settings: PerfSettings = PerfSettings(),
     /** Замеры для вкладки «Отладка»; обновляются раз в 5 с во время записи. */
     val perf: PerfUi? = null,
+    /** Настройки OBD (меняются только вне записи). */
+    val obdSettings: ObdSettings = ObdSettings(),
+    /** Состояние OBD текущей записи; null — OBD в записи не участвует. */
+    val obd: ObdUi? = null,
+    /** Список выбора адаптера: сопряжённые (Bluetooth) или найденные поиском BLE. */
+    val obdDevices: List<ObdDevice> = emptyList(),
+    /** Идёт поиск BLE (10 с). */
+    val obdScanning: Boolean = false,
+    /** Пояснение к списку адаптеров (нет разрешения, ошибка поиска); null — нет. */
+    val obdDevicesNote: String? = null,
 )
 
 /**
@@ -162,9 +186,12 @@ class M1Controller(private val context: Context) {
     @Volatile private var perfTask: java.util.concurrent.ScheduledFuture<*>? = null
     /** Пустые кадры профиля baseline (на том же таймере). */
     @Volatile private var baselineTask: java.util.concurrent.ScheduledFuture<*>? = null
+    /** Сессия OBD текущей записи; null — OBD выключено или не запущено. */
+    @Volatile private var obdClient: ObdClient? = null
+    private val obdScanner by lazy { ObdScanner(context) }
 
     init {
-        _state.update { it.copy(settings = readSettings()) }
+        _state.update { it.copy(settings = readSettings(), obdSettings = readObdSettings()) }
         executor.execute { loadBundle(prefs.getString("trip", null)) }
     }
 
@@ -187,6 +214,96 @@ class M1Controller(private val context: Context) {
             .apply()
         _state.update { it.copy(settings = n) }
         return true
+    }
+
+    private fun readObdSettings() = ObdSettings.parse(
+        prefs.getString(PREF_OBD_KIND, null), prefs.getString(PREF_OBD_ADDR, null), prefs.getString(PREF_OBD_NAME, null),
+    )
+
+    private fun saveObdSettings(n: ObdSettings) {
+        prefs.edit().putString(PREF_OBD_KIND, n.kind).putString(PREF_OBD_ADDR, n.addr).putString(PREF_OBD_NAME, n.name).apply()
+        _state.update { it.copy(obdSettings = n) }
+    }
+
+    /** Вид OBD: off/spp/ble; смена вида сбрасывает выбранный адаптер. Во время записи не действует. */
+    fun setObdKind(kind: String) {
+        if (runningFlag.get() || _state.value.running) return
+        val old = _state.value.obdSettings
+        val k = ObdSettings.kind(kind)
+        if (k == old.kind) return
+        obdScanner.stop()
+        _state.update { it.copy(obdDevices = emptyList(), obdScanning = false, obdDevicesNote = null) }
+        saveObdSettings(ObdSettings(k))
+    }
+
+    /** Выбранный адаптер (адрес и имя). Во время записи не действует. */
+    fun setObdDevice(device: ObdDevice) {
+        if (runningFlag.get() || _state.value.running) return
+        obdScanner.stop()
+        _state.update { it.copy(obdScanning = false) }
+        saveObdSettings(_state.value.obdSettings.copy(addr = device.addr, name = device.name))
+    }
+
+    /** Есть ли все разрешения времени выполнения для вида OBD. */
+    fun obdPermitted(kind: String): Boolean = obdPermissions(kind, Build.VERSION.SDK_INT).all {
+        ContextCompat.checkSelfPermission(context, it) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    /** Список для выбора адаптера: сопряжённые (Bluetooth) или поиск BLE на 10 с. Только с главного потока. */
+    fun loadObdDevices() {
+        val kind = _state.value.obdSettings.kind
+        if (_state.value.running || kind == ObdSettings.OFF) return
+        if (!obdPermitted(kind)) {
+            _state.update { it.copy(obdDevices = emptyList(), obdScanning = false, obdDevicesNote = "нет разрешения Bluetooth") }
+            return
+        }
+        if (kind == ObdSettings.SPP) {
+            val list = bondedObdDevices(context)
+            _state.update { it.copy(obdDevices = list, obdScanning = false,
+                obdDevicesNote = if (list.isEmpty()) "нет сопряжённых устройств (Bluetooth включён?)" else null) }
+            return
+        }
+        _state.update { it.copy(obdDevices = emptyList(), obdScanning = true, obdDevicesNote = null) }
+        obdScanner.start(
+            onFound = { d -> _state.update { it.copy(obdDevices = it.obdDevices + d) } },
+            onDone = { err ->
+                _state.update { it.copy(obdScanning = false,
+                    obdDevicesNote = err ?: if (it.obdDevices.isEmpty()) "адаптеры не найдены" else null) }
+            },
+        )
+    }
+
+    /** Закрытие диалога выбора адаптера: останавливает поиск BLE. */
+    fun stopObdScan() {
+        obdScanner.stop()
+        _state.update { it.copy(obdScanning = false) }
+    }
+
+    /**
+     * Сохраняет поправки спидометра адаптера [addr], если в этой сессии обучение шло не меньше 10 мин.
+     * Только на executor (там же, где Localizer).
+     */
+    private fun saveObdFactors(addr: String?, localizer: Localizer, k: Double?) {
+        if (addr == null) return
+        val (fast, slow) = factorsToSave(localizer.obdLearnedMs, k, localizer.obdKSlow) ?: return
+        prefs.edit().putFloat(obdKKey(addr), fast.toFloat()).putFloat(obdKSlowKey(addr), slow.toFloat()).apply()
+    }
+
+    /** Сохранённая поправка или null. */
+    private fun restoredObdFactor(key: String): Double? =
+        if (prefs.contains(key)) restoredFactor(runCatching { prefs.getFloat(key, Float.NaN) }.getOrNull()) else null
+
+    /**
+     * Останавливает сессию OBD и ждёт её поток до 2 с. Вызывать до закрытия журнала датчиков: после stop()
+     * события не передаются, join дожидается последнего.
+     */
+    private fun stopObd() {
+        val c = obdClient ?: return
+        obdClient = null
+        c.stop()
+        if (!c.join(OBD_JOIN_MS)) {
+            _state.update { it.copy(status = it.status + " · OBD не остановился за 2 с") }
+        }
     }
 
     /** Задержка буфера переупорядочения: 300/500/800/1500 мс. */
@@ -443,7 +560,13 @@ class M1Controller(private val context: Context) {
                 }
             } else null
             navSession = nav
-            val localizer = Localizer(b.pack, LocalizerConfig(), b.roads)
+            val obdSettings = _state.value.obdSettings
+            val obdAddr = obdSettings.addr?.takeIf { obdSettings.enabled }
+            // Поправки спидометра этого адаптера из прошлых поездок: с ними правило (b) SPEED_MISMATCH включено сразу.
+            val obdConfig = if (obdAddr != null) {
+                ObdConfig(kRestore = restoredObdFactor(obdKKey(obdAddr)), kSlowRestore = restoredObdFactor(obdKSlowKey(obdAddr)))
+            } else ObdConfig()
+            val localizer = Localizer(b.pack, LocalizerConfig(obd = obdConfig), b.roads)
             val reorderer = EventReorderer(delayMs = settings.reorderDelayMs)
             // Замеры кадра — только на executor (onFrame и sink): pre/inf/search по t_ms кадра, e2e за окно 5 с.
             val latencies = boundedMap<Long, LatencyJson>(64)
@@ -516,6 +639,7 @@ class M1Controller(private val context: Context) {
             }
             flush = {
                 reorderer.drainAll(sink)
+                saveObdFactors(obdAddr, localizer, lastOut?.obdK)
                 // Финальные строки late и sys перед закрытием perf-журнала (хвост после последнего тика).
                 try {
                     val now = System.currentTimeMillis()
@@ -528,7 +652,12 @@ class M1Controller(private val context: Context) {
                 Pair(reorderer.late, reorderer.dropped)
             }
             // Раз в 5 с на executor: батарея и нагрев, опоздания событий, регулятор частоты кадров.
+            var perfTicks = 0
             val perfTick: () -> Unit = {
+                // Раз в минуту — поправки спидометра (на случай, если запись оборвётся без stop()).
+                if (++perfTicks % OBD_SAVE_TICKS == 0) {
+                    try { saveObdFactors(obdAddr, localizer, lastOut?.obdK) } catch (_: Exception) { }
+                }
                 val e2eP50 = p50(e2eWindow)
                 e2eWindow.clear()
                 try {
@@ -608,6 +737,7 @@ class M1Controller(private val context: Context) {
             if (!sensorsStarted) {
                 _state.update { it.copy(status = it.status + " · нет гироскопа/акселерометра — датчики не пишутся") }
             }
+            startObd(obdSettings, sensorsStarted, feed)
             if (baseline) {
                 // Кадров камеры не будет (сессия ORT загружена, но простаивает): заголовок журнала кадров
                 // пишется сразу, чтобы .jsonl не остался пустым.
@@ -676,6 +806,7 @@ class M1Controller(private val context: Context) {
             // Любой сбой после CAS (например, база выгружена или диск недоступен) не должен
             // оставить контроллер в состоянии "running=true" без реально работающей записи.
             runningFlag.set(false)
+            stopObd()
             flush = null
             stopDrainTimer()
             cancelDurationStop()
@@ -722,9 +853,39 @@ class M1Controller(private val context: Context) {
         }
     }
 
+    /**
+     * Подключает OBD при obd_kind != off. Время событий — шкала датчиков (offsetMs SensorRecorder + монотонные часы);
+     * если датчики не запустились, смещение считается здесь так же. Без разрешения или адаптера запись идёт без OBD.
+     */
+    private fun startObd(settings: ObdSettings, sensorsStarted: Boolean, feed: (SensorEvent) -> Unit) {
+        if (!settings.enabled) { _state.update { it.copy(obd = null) }; return }
+        val addr = settings.addr
+        val problem = when {
+            !obdPermitted(settings.kind) -> "нет разрешения Bluetooth"
+            addr == null -> "адаптер не выбран"
+            else -> null
+        }
+        if (problem != null || addr == null) {
+            _state.update { it.copy(obd = ObdUi(problem ?: ""), status = it.status + " · OBD: $problem") }
+            return
+        }
+        val offsetMs = if (sensorsStarted) sensors.offsetMs else System.currentTimeMillis() - SystemClock.elapsedRealtimeNanos() / 1e6
+        val ble = settings.kind == ObdSettings.BLE
+        val client = ObdClient(
+            deviceName = settings.name,
+            open = { cancel -> if (ble) BleChannel.connect(context, addr, cancel) else SppChannel.connect(context, addr, cancel) },
+            nowMs = { offsetMs + SystemClock.elapsedRealtimeNanos() / 1e6 },
+            onSpeed = feed,
+            onUi = { change -> _state.update { it.copy(obd = change(it.obd)) } },
+        )
+        obdClient = client
+        client.start()
+    }
+
     fun stop() {
         if (!runningFlag.compareAndSet(true, false)) return
         cancelDurationStop()
+        obdClient?.stop()
         analyzer.get()?.onFrame = null
         analyzer.get()?.onError = null
         sensors.stop()
@@ -754,6 +915,8 @@ class M1Controller(private val context: Context) {
         // executor) не была затёрта более ранним присваиванием статуса с потока вызывающего stop().
         executor.execute {
             val closeErrors = mutableListOf<String>()
+            // Поток OBD — до выпуска очереди и закрытия журнала датчиков.
+            stopObd()
             // Выпускаем остаток очереди до закрытия журнала фильтра.
             val (late, dropped) = try { flushFn?.invoke() ?: Pair(0, 0) } catch (e: Exception) {
                 closeErrors.add("ошибка завершения фильтра: ${e.message}"); Pair(0, 0)
@@ -797,6 +960,7 @@ class M1Controller(private val context: Context) {
     private fun failSession(frameAnalyzer: FrameAnalyzer, log: SessionLogger, message: String) {
         if (!runningFlag.compareAndSet(true, false)) return
         cancelDurationStop()
+        stopObd()
         frameAnalyzer.onFrame = null
         frameAnalyzer.onError = null
         sensors.stop()
@@ -843,6 +1007,7 @@ class M1Controller(private val context: Context) {
     /** Освобождает камеру/GPS/логгер/модель. Вызывать один раз при уничтожении владельца. */
     fun close() {
         if (runningFlag.get()) stop()
+        obdScanner.stop()
         cancelDurationStop()
         stopDrainTimer()
         sensors.stop()
@@ -975,6 +1140,13 @@ class M1Controller(private val context: Context) {
         const val PREF_ORT = "ort"
         const val PREF_PROFILE = "profile"
         const val PREF_DURATION = "duration_min"
+        const val PREF_OBD_KIND = "obd_kind"
+        const val PREF_OBD_ADDR = "obd_addr"
+        const val PREF_OBD_NAME = "obd_name"
+        /** Ожидание потока OBD при остановке. */
+        const val OBD_JOIN_MS = 2_000L
+        /** Сохранение поправок спидометра — каждые 12 тиков замеров (раз в минуту). */
+        const val OBD_SAVE_TICKS = 12
         const val PERF_TICK_MS = 5_000L
         const val DRAIN_TICK_MS = 50L
         /** Повтор пустого кадра baseline после ошибки push. */

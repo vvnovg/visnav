@@ -2,6 +2,7 @@ package io.visnav.app
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -26,6 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import io.visnav.app.obd.obdPermissions
 import org.maplibre.android.MapLibre
 
 class MainActivity : ComponentActivity() {
@@ -38,6 +40,17 @@ class MainActivity : ComponentActivity() {
     private val request = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
         granted.value = result[Manifest.permission.CAMERA] == true &&
             result[Manifest.permission.ACCESS_FINE_LOCATION] == true
+    }
+
+    /** Разрешения Bluetooth запрашиваются при включении OBD; итог проверяет M1Controller при старте записи. */
+    private val obdRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+
+    /** Запрашивает недостающие разрешения для вида OBD (spp/ble); на Android < 12 для spp — ничего. */
+    private fun requestObdPermissions(kind: String) {
+        val missing = obdPermissions(kind, Build.VERSION.SDK_INT).filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isNotEmpty()) obdRequest.launch(missing.toTypedArray())
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -67,7 +80,7 @@ class MainActivity : ComponentActivity() {
                         Box(Modifier.weight(1f)) {
                             when (tab) {
                                 0 -> NavScreen(viewModel.controller, granted.value)
-                                else -> M1Screen(viewModel.controller, granted.value)
+                                else -> M1Screen(viewModel.controller, granted.value, ::requestObdPermissions)
                             }
                         }
                     }
