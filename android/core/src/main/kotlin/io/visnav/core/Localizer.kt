@@ -50,6 +50,13 @@ data class LocalizerConfig(
  * kRestore/kSlowRestore — сохранённые приложением значения (по адаптеру), в пределах [kMin, kMax]; kRestore —
  * начальная k вместо kInit.
  *
+ * Неопределённость k входит в σ измерения: σ = sqrt(max(sigmaMinMps, 0.5/3.6 + 0.01·v)² + (σ_k·v)²),
+ * σ_k = (σ_k0 − sigmaKFloor)·exp(−t_k/sigmaKTauMs) + sigmaKFloor, t_k — время принятых наблюдений k, σ_k0 —
+ * sigmaKInit (0.05) или sigmaKRestored (0.01) при kRestore; отвергнутое сохранение возвращает σ_k0 = sigmaKInit
+ * и t_k = 0. Зачем: спидометр может завышать до ~10 %, и пока k не выучена, OBD с σ = 0.3 м/с перетягивал бы
+ * скорость GNSS — позиция фильтра уходила бы от фиксов, монитор фиксировал INNOVATION (UNTRUSTED), а при нём
+ * k не учится, и машина оставалась бы в UNTRUSTED навсегда. Без GNSS OBD всё равно принимается с этим σ.
+ *
  * Не учитывается: задержка ЭБУ (время события — середина запроса; возможная настройка latencyMs — после полевых
  * данных) и задний ход (скорость OBD без знака: v ≥ 0).
  */
@@ -65,6 +72,10 @@ data class ObdConfig(
     val learnMaxAgeMs: Long = 500,
     val distArmLearnedMs: Long = 600_000,
     val restoreCheckMs: Long = 120_000,
+    val sigmaKInit: Double = 0.05,
+    val sigmaKRestored: Double = 0.01,
+    val sigmaKFloor: Double = 0.005,
+    val sigmaKTauMs: Long = 120_000,
     val kRestore: Double? = null,
     val kSlowRestore: Double? = null,
 )
@@ -168,6 +179,9 @@ class Localizer(
 
     /** Идёт проверка восстановленной kSlow (kSlowRestore задана, решение ещё не принято). */
     private var restoreChecking = config.obd.kSlowRestore != null
+    /** σ_k: начальное значение и время обучения, от которого оно спадает (см. [ObdConfig]). */
+    private var sigmaK0 = if (config.obd.kRestore != null) config.obd.sigmaKRestored else config.obd.sigmaKInit
+    private var sigmaKLearnedMs = 0.0
 
     /**
      * Включено ли правило (b) монитора (окно расстояний), т. е. kSlow сошлась или подтверждено её сохранение.
@@ -247,7 +261,8 @@ class Localizer(
         }
         val v = obdK * raw
         predictTo(t)
-        ekf.updateSpeed(v, max(c.sigmaMinMps, 0.5 / 3.6 + 0.01 * v))
+        val sigmaK = (sigmaK0 - c.sigmaKFloor) * exp(-sigmaKLearnedMs / c.sigmaKTauMs) + c.sigmaKFloor
+        ekf.updateSpeed(v, hypot(max(c.sigmaMinMps, 0.5 / 3.6 + 0.01 * v), sigmaK * v))
     }
 
     /**
@@ -286,12 +301,14 @@ class Localizer(
         }
         lastLearnT = tFix
         obdLearnedMs += dt
+        sigmaKLearnedMs += dt
         if (monitor.distanceCheckArmed) return
         if (restoreChecking) {
             if (obdLearnedMs < c.restoreCheckMs) return
             restoreChecking = false
             if (abs(obdK - obdKSlowValue) < config.monitorConfig.distRel / 2) { monitor.armDistanceCheck(); return }
             obdKSlowValue = obdK // сохранение не подтвердилось — обычный прогрев
+            sigmaK0 = c.sigmaKInit; sigmaKLearnedMs = 0.0
         }
         if (obdLearnedMs >= c.distArmLearnedMs) { obdKSlowValue = obdK; monitor.armDistanceCheck() }
     }

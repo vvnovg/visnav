@@ -220,6 +220,19 @@ class LocalizerObdTest {
         assertFalse(r.localizer.obdDistanceArmed)
     }
 
+    @Test fun strongOverreadingDoesNotLatchInnovationBeforeFactorConverges() {
+        // +10 % и +12 % от kInit = 1/1.03: без σ_k OBD (σ = 0.3 м/с) уводил фильтр от фиксов, INNOVATION
+        // фиксировался раньше схождения k, а при нём k не учится. 1/1.12 < kMin — k упирается в 0.9.
+        for (f in listOf(1.10, 1.12)) {
+            val a = runArm(LocalizerConfig(), 900.0, f)
+            assertTrue(a.run.outputs.none { GnssReason.INNOVATION in it.first.reasons }, "INNOVATION at +${f - 1}")
+            assertTrue(a.run.outputs.none { GnssReason.SPEED_MISMATCH in it.first.reasons }, "SPEED_MISMATCH at +${f - 1}")
+            val armed = assertNotNull(a.armedAtS, "never armed at +${f - 1}")
+            assertTrue(armed >= 600.0)
+            assertEquals(maxOf(0.9, 1 / f), a.run.outputs.last().first.obdK!!, 0.01 / f, "k at +${f - 1}")
+        }
+    }
+
     @Test fun confirmedRestoreArmsAfterCheckPeriod() {
         val a = runArm(LocalizerConfig(obd = ObdConfig(kSlowRestore = 1 / 1.03)), 300.0, 1.03)
         val armed = assertNotNull(a.armedAtS, "distance check never armed")
@@ -229,14 +242,14 @@ class LocalizerObdTest {
     }
 
     @Test fun wrongRestoreIsDiscardedAndCarIsNotLockedUntrusted() {
-        // Сохранено 1/1.03, а спидометр теперь +9 % (другие шины): за 120 с k уходит дальше 2.5 % — сохранение
-        // отбрасывается, (b) включается после обычного прогрева. (+10 % здесь не берём: при k на 7 % от истины
-        // фильтр уводит позицию и фиксирует INNOVATION раньше, чем k сойдётся, — это отдельная проблема фильтра.)
-        val a = runArm(LocalizerConfig(obd = ObdConfig(kSlowRestore = 1 / 1.03)), 900.0, 1.09)
+        // Сохранено 1/1.03, а спидометр теперь +10 % (другие шины): за 120 с k уходит дальше 2.5 % — сохранение
+        // отбрасывается, (b) включается после обычного прогрева.
+        val a = runArm(LocalizerConfig(obd = ObdConfig(kSlowRestore = 1 / 1.03)), 900.0, 1.10)
         assertTrue(a.run.outputs.none { GnssReason.SPEED_MISMATCH in it.first.reasons })
         val armed = assertNotNull(a.armedAtS, "distance check never armed")
         assertTrue(armed >= 600.0, "armed at $armed s")
-        assertEquals(1 / 1.09, a.kSlowAtArm, 0.01 / 1.09)
+        assertEquals(1 / 1.10, a.kSlowAtArm, 0.01 / 1.10)
+        assertTrue(a.run.outputs.none { GnssReason.INNOVATION in it.first.reasons })
         assertTrue(a.run.outputs.filter { it.first.tMs >= t0 + 840_000 }.all { it.first.health == GnssHealth.GOOD })
     }
 
