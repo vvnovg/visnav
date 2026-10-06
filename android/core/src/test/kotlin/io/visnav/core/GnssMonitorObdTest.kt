@@ -6,16 +6,17 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class GnssMonitorObdTest {
-    private fun fix(t: Double, speed: Double) = LocEvent(t, 55.75, 37.6, 4f, speed.toFloat(), 0.3f, 90f, 2f)
+    private fun fix(t: Double, speed: Double, speedAcc: Float? = 0.3f) =
+        LocEvent(t, 55.75, 37.6, 4f, speed.toFloat(), speedAcc, 90f, 2f)
     private fun status(t: Double) = GnssStatusEvent(t, 30, 14, 35f, 5f, 44f, 6, 4, 3, 1)
 
     /** Фиксы раз в секунду на fromS..toS (включительно), OBD — за 100 мс до каждого фикса. */
-    private fun GnssMonitor.drive(fromS: Int, toS: Int, vGps: Double, vObd: Double?) {
+    private fun GnssMonitor.drive(fromS: Int, toS: Int, vGps: Double, vObd: Double?, speedAcc: Float? = 0.3f) {
         for (s in fromS..toS) {
             val t = s * 1_000.0
             if (vObd != null) onObd(t - 100.0, vObd)
             onStatus(status(t))
-            onFix(fix(t, vGps), 1.0, 2.0, 4.0)
+            onFix(fix(t, vGps, speedAcc), 1.0, 2.0, 4.0)
         }
     }
 
@@ -126,5 +127,63 @@ class GnssMonitorObdTest {
         held.drive(0, 5, 15.0, 12.0); held.drive(6, 10, 12.0, 12.0)
         assertTrue(held.obdSuspicious(10_100.0)) // причина удерживается
         assertFalse(held.obdSuspicious(15_100.0))
+    }
+
+    @Test fun distanceWindowCatchesGpsSlowerThanObd() {
+        val m = GnssMonitor(); m.armDistanceCheck()
+        m.drive(0, 30, 14.0, 15.0)
+        assertTrue(m.mismatch(30_100.0))
+    }
+
+    @Test fun distanceWindowRelativeThresholdAtHighSpeed() {
+        // 1.4 м/с за 30 с = 42 м: больше 15 м, но меньше 5 % от 900 м; (a): 1.4 < 3.
+        val m = GnssMonitor(); m.armDistanceCheck()
+        m.drive(0, 60, 31.4, 30.0)
+        assertFalse(m.mismatch(60_100.0))
+    }
+
+    @Test fun fixGapResetsAccumulation() {
+        val a = GnssMonitor(onlyInstant)
+        a.drive(0, 3, 15.0, 12.0) // (a) копит 3 с
+        a.drive(8, 9, 15.0, 12.0) // перерыв 5 с > fixGapMs: счёт заново
+        assertFalse(a.mismatch(9_100.0))
+        val b = GnssMonitor(); b.armDistanceCheck()
+        b.drive(0, 12, 16.0, 15.0) // 12 м в окне
+        b.drive(17, 26, 16.0, 15.0) // после перерыва окно пустое: 9 м
+        assertFalse(b.mismatch(26_100.0))
+    }
+
+    @Test fun staleObdResetsAccumulation() {
+        val m = GnssMonitor(onlyInstant)
+        m.drive(0, 3, 15.0, 12.0) // (a) копит
+        m.onStatus(status(4_000.0)); m.onFix(fix(4_000.0, 15.0), 1.0, 2.0, 4.0) // OBD 3.9 с назад — несвеж
+        assertFalse(m.obdSuspicious(4_100.0))
+        m.drive(5, 8, 15.0, 12.0)
+        assertFalse(m.mismatch(8_100.0))
+    }
+
+    @Test fun isolatedObdZerosWhileDrivingAreIgnored() {
+        val m = GnssMonitor(); m.armDistanceCheck()
+        for (s in 0..40) {
+            val t = s * 1_000.0
+            m.onObd(t - 100.0, if (s == 10 || s == 25) 0.0 else 15.0)
+            m.onStatus(status(t)); m.onFix(fix(t, 15.0), 1.0, 2.0, 4.0)
+        }
+        assertEquals(Assessment(GnssHealth.GOOD, emptySet()), m.assess(40_100.0))
+    }
+
+    @Test fun standstillWithGpsJitterIsClean() {
+        val m = GnssMonitor(); m.armDistanceCheck()
+        m.drive(0, 60, 0.6, 0.0)
+        assertEquals(Assessment(GnssHealth.GOOD, emptySet()), m.assess(60_100.0))
+    }
+
+    @Test fun impreciseGpsSpeedSkipsInstantAndStandstillRules() {
+        val a = GnssMonitor(onlyInstant); a.drive(0, 6, 15.0, 12.0, speedAcc = 2f)
+        assertFalse(a.mismatch(6_100.0))
+        val c = GnssMonitor(); c.drive(0, 5, 2.0, 0.0, speedAcc = 2f)
+        assertFalse(c.mismatch(5_100.0))
+        val noAcc = GnssMonitor(onlyInstant); noAcc.drive(0, 5, 15.0, 12.0, speedAcc = null) // нет оценки — как раньше
+        assertTrue(noAcc.mismatch(5_100.0))
     }
 }

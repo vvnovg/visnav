@@ -171,52 +171,90 @@ class LocalizerObdTest {
         assertTrue(abs(k - base) < 2e-3, "k with suspicious bursts $k vs $base")
     }
 
-    /** Спидометр +8 %: дальше от kInit = 1/1.03, чем порог (b) в 5 %. */
-    private fun speedometer8(v: Double, rnd: Random): Int = (1.08 * v * 3.6 + rnd.nextDouble(-1.0, 1.0)).roundToInt()
+    /** Спидометр с ошибкой [f] (1.08 = +8 %), шум ±1 км/ч, целое. */
+    private fun speedometerF(f: Double): (Double, Double, Random) -> Int? =
+        { _, v, rnd -> (f * v * 3.6 + rnd.nextDouble(-1.0, 1.0)).roundToInt() }
 
-    @Test fun overreadingSpeedometerLearnsBeforeDistanceCheckArms() {
+    /** Прогон с записью момента включения (b) и kSlow в этот момент. */
+    private class ArmRun(val run: Run, val armedAtS: Double?, val kSlowAtArm: Double)
+
+    private fun runArm(config: LocalizerConfig, durationS: Double, f: Double): ArmRun {
         var armedAtS: Double? = null
         var kSlowAtArm = Double.NaN
-        val r = run(
-            LocalizerConfig(), 900.0, { 15.0 }, obdKmh = { _, v, rnd -> speedometer8(v, rnd) },
-            onSecond = { s, loc ->
-                if (armedAtS == null && loc.obdDistanceArmed) { armedAtS = s; kSlowAtArm = loc.obdKSlow!! }
-            },
-        )
-        assertTrue(r.outputs.none { GnssReason.SPEED_MISMATCH in it.first.reasons })
-        val armed = assertNotNull(armedAtS, "distance check never armed")
+        val r = run(config, durationS, { 15.0 }, obdKmh = speedometerF(f), onSecond = { s, loc ->
+            if (armedAtS == null && loc.obdDistanceArmed) { armedAtS = s; kSlowAtArm = loc.obdKSlow!! }
+        })
+        return ArmRun(r, armedAtS, kSlowAtArm)
+    }
+
+    @Test fun overreadingSpeedometerLearnsBeforeDistanceCheckArms() {
+        // +8 %: дальше от kInit = 1/1.03, чем порог (b) в 5 %. В момент включения kSlow := k.
+        val a = runArm(LocalizerConfig(), 900.0, 1.08)
+        assertTrue(a.run.outputs.none { GnssReason.SPEED_MISMATCH in it.first.reasons })
+        val armed = assertNotNull(a.armedAtS, "distance check never armed")
         assertTrue(armed >= 600.0, "armed at $armed s")
-        assertTrue(r.localizer.obdLearnedMs >= 600_000.0)
-        System.err.println("MEASURE: +8 % speedometer: (b) armed at $armed s, kSlow=$kSlowAtArm " +
-            "(1/1.08=${1 / 1.08}), k=${r.outputs.last().first.obdK}")
-        assertEquals(1 / 1.08, kSlowAtArm, 0.01 / 1.08)
+        assertTrue(a.run.localizer.obdLearnedMs >= 600_000.0)
+        assertEquals(1 / 1.08, a.kSlowAtArm, 0.01 / 1.08)
     }
 
     @Test fun overreadingSpeedometerStillCatchesDriftSpoofAfterArming() {
         val from = 720.0
         val r = run(
-            LocalizerConfig(), 900.0, { 15.0 }, obdKmh = { _, v, rnd -> speedometer8(v, rnd) },
+            LocalizerConfig(), 900.0, { 15.0 }, obdKmh = speedometerF(1.08),
             gnssEastOffset = { if (it >= from) it - from else 0.0 }, gnssSpeedOffset = { if (it >= from) 1.0 else 0.0 },
         )
         assertTrue(r.outputs.none { it.first.tMs < t0 + from * 1000 && GnssReason.SPEED_MISMATCH in it.first.reasons })
         val first = r.outputs.firstOrNull { it.first.tMs >= t0 + from * 1000 && GnssReason.SPEED_MISMATCH in it.first.reasons }
         assertNotNull(first, "SPEED_MISMATCH never raised")
-        System.err.println("MEASURE: +8 % speedometer, drift 1 m/s from 720 s: SPEED_MISMATCH after " +
-            "${(first.first.tMs - t0) / 1000.0 - from} s")
-        assertTrue(first.first.tMs - (t0 + from * 1000) <= 40_000)
+        assertTrue(first.first.tMs - (t0 + from * 1000) <= 40_000, "after ${first.first.tMs - t0 - from * 1000} ms")
     }
 
-    @Test fun restoredFactorsAreInitialAndArmDistanceCheck() {
+    @Test fun restoredFactorsAreInitialButDoNotArmImmediately() {
         val loc = Localizer(pack(), LocalizerConfig(obd = ObdConfig(kRestore = 0.93, kSlowRestore = 1.5)))
-        assertTrue(loc.obdDistanceArmed)
+        assertFalse(loc.obdDistanceArmed) // сначала проверка сохранения
         loc.onSensor(ObdSpeedEvent(t0.toDouble(), 50, 40.0))
         assertEquals(1.1, loc.obdKSlow) // в пределах [kMin, kMax]
         assertEquals(0.0, loc.obdLearnedMs)
-        val fresh = Localizer(pack(), LocalizerConfig())
-        assertFalse(fresh.obdDistanceArmed)
         val r = run(LocalizerConfig(obd = ObdConfig(kRestore = 0.93)), 1.0, { 15.0 }, obdKmh = { _, v, rnd -> speedometer(v, rnd) })
         assertEquals(0.93, r.outputs.last().first.obdK!!, 3e-3) // не больше пары шагов обучения
-        assertFalse(r.localizer.obdDistanceArmed) // восстановлена только k — (b) ждёт схождения kSlow
+        assertFalse(r.localizer.obdDistanceArmed)
+    }
+
+    @Test fun confirmedRestoreArmsAfterCheckPeriod() {
+        val a = runArm(LocalizerConfig(obd = ObdConfig(kSlowRestore = 1 / 1.03)), 300.0, 1.03)
+        val armed = assertNotNull(a.armedAtS, "distance check never armed")
+        assertTrue(armed >= 120.0 && armed <= 125.0, "armed at $armed s")
+        assertEquals(1 / 1.03, a.kSlowAtArm, 1e-12) // восстановленная kSlow сохраняется
+        assertTrue(a.run.outputs.none { GnssReason.SPEED_MISMATCH in it.first.reasons })
+    }
+
+    @Test fun wrongRestoreIsDiscardedAndCarIsNotLockedUntrusted() {
+        // Сохранено 1/1.03, а спидометр теперь +9 % (другие шины): за 120 с k уходит дальше 2.5 % — сохранение
+        // отбрасывается, (b) включается после обычного прогрева. (+10 % здесь не берём: при k на 7 % от истины
+        // фильтр уводит позицию и фиксирует INNOVATION раньше, чем k сойдётся, — это отдельная проблема фильтра.)
+        val a = runArm(LocalizerConfig(obd = ObdConfig(kSlowRestore = 1 / 1.03)), 900.0, 1.09)
+        assertTrue(a.run.outputs.none { GnssReason.SPEED_MISMATCH in it.first.reasons })
+        val armed = assertNotNull(a.armedAtS, "distance check never armed")
+        assertTrue(armed >= 600.0, "armed at $armed s")
+        assertEquals(1 / 1.09, a.kSlowAtArm, 0.01 / 1.09)
+        assertTrue(a.run.outputs.filter { it.first.tMs >= t0 + 840_000 }.all { it.first.health == GnssHealth.GOOD })
+    }
+
+    @Test fun monitorUsesFastFactorBeforeArmingAndSlowFactorAfter() {
+        val before = Localizer(pack(), LocalizerConfig(obd = ObdConfig(kRestore = 0.95, kSlowRestore = 1.05)))
+        before.onSensor(ObdSpeedEvent(t0.toDouble(), 54, 40.0))
+        assertEquals(0.95 * 15.0, before.monitorObdMps, 1e-9)
+        // Сохранено kSlow = k = 1.0, спидометр +2 %: проверка проходит (|k − 1| ≈ 1.7 % < 2.5 %), дальше k → 0.98,
+        // а kSlow почти стоит на 1.0.
+        val r = run(
+            LocalizerConfig(obd = ObdConfig(kRestore = 1.0, kSlowRestore = 1.0)), 300.0, { 15.0 }, obdKmh = speedometerF(1.02),
+        )
+        assertTrue(r.localizer.obdDistanceArmed)
+        r.localizer.onSensor(ObdSpeedEvent(t0 + 300_500.0, 54, 40.0))
+        val kSlow = r.localizer.obdKSlow!!
+        val k = r.outputs.last().first.obdK!!
+        assertTrue(kSlow - k > 0.01, "kSlow=$kSlow k=$k")
+        assertEquals(kSlow * 15.0, r.localizer.monitorObdMps, 1e-9)
     }
 
     @Test fun staleObdDoesNotTeachFactor() {
@@ -230,25 +268,27 @@ class LocalizerObdTest {
     }
 
     @Test fun slowFactorLagsFastFactor() {
-        // kSlow восстановлена = 1.0: (b) включено сразу, kSlow учится с медленной τ (без прогрева).
-        val kInit = 1.0
+        // Сохранено kSlow = 0.985 при kInit = 1.0: проверка проходит (k ≈ 0.975 к 120 с), дальше kSlow учится медленно.
+        val kSlow0 = 0.985
         val r = run(
-            LocalizerConfig(obd = ObdConfig(kInit = kInit, kSlowRestore = kInit)), 300.0, { 15.0 },
+            LocalizerConfig(obd = ObdConfig(kInit = 1.0, kSlowRestore = kSlow0)), 300.0, { 15.0 },
             obdKmh = { _, v, rnd -> speedometer(v, rnd) },
         )
+        assertTrue(r.localizer.obdDistanceArmed)
         val k = r.outputs.last().first.obdK!!
         val kSlow = assertNotNull(r.localizer.obdKSlow)
-        assertTrue(kSlow < kInit, "kSlow=$kSlow must move toward 1/1.03")
-        assertTrue(kInit - kSlow < 0.3 * (kInit - k), "kSlow=$kSlow k=$k")
+        assertTrue(kSlow < kSlow0, "kSlow=$kSlow must move toward 1/1.03")
+        assertTrue(kSlow0 - kSlow < 0.3 * (kSlow0 - k), "kSlow=$kSlow k=$k")
     }
 
-    @Test fun slowFactorWarmsUpWithFastTauBeforeArming() {
+    @Test fun slowFactorDoesNotLearnBeforeArming() {
         val r = run(
             LocalizerConfig(obd = ObdConfig(kInit = 1.0)), 300.0, { 15.0 },
             obdKmh = { _, v, rnd -> speedometer(v, rnd) },
         )
         assertFalse(r.localizer.obdDistanceArmed)
-        assertEquals(r.outputs.last().first.obdK!!, r.localizer.obdKSlow!!, 1e-9)
+        assertEquals(1.0, r.localizer.obdKSlow) // kSlow := k только в момент включения (b)
+        assertTrue(r.outputs.last().first.obdK!! < 0.98)
     }
 
     @Test fun zeroKmhWhileMovingIsIgnored() {

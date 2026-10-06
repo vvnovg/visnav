@@ -35,7 +35,6 @@ class SpeedMismatchReplayTest {
         val first = points.firstOrNull { it.tMs >= start && GnssReason.SPEED_MISMATCH in it.reasons }
         assertNotNull(first, "SPEED_MISMATCH never raised")
         val after = first.tMs - start
-        System.err.println("MEASURE: drift 1 m/s along path with OBD: SPEED_MISMATCH after ${after / 1000.0} s")
         assertTrue(after <= 40_000, "SPEED_MISMATCH after $after ms")
         assertEquals(GnssHealth.UNTRUSTED, first.health)
         assertTrue(points.none { it.tMs < start && GnssReason.SPEED_MISMATCH in it.reasons })

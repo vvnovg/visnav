@@ -39,11 +39,16 @@ data class LocalizerConfig(
  * v_gnss/v_obd вне [kMin − 0.05, kMax + 0.05] — выброс, k к нему не тянется. Медленная kSlow (τ = kSlowTauMs) учится
  * по тем же правилам — для сравнения скоростей при проверке подмены: подмена не утянет её за минуты.
  *
- * Пока (b) не включено, kSlow учится с τ = kTauMs (прогрев), после — с kSlowTauMs.
- * Правило (b) монитора (окно расстояний, порог 5 %) включается, когда накоплено distArmLearnedMs времени обучения
- * (obdLearnedMs — сумма dt принятых наблюдений) либо kSlow восстановлена из сохранения (kSlowRestore): до схождения
- * kSlow честная машина со спидометром, далёким от kInit, давала бы SPEED_MISMATCH, а он запрещает обучение.
- * kRestore/kSlowRestore — сохранённые приложением значения (по адаптеру), начальные вместо kInit, в пределах [kMin, kMax].
+ * Правило (b) монитора (окно расстояний, порог 5 %) включается только после схождения поправки: до него честная
+ * машина со спидометром, далёким от kInit, давала бы SPEED_MISMATCH, а он запрещает обучение — навсегда UNTRUSTED.
+ * - Без сохранения: (b) включается, когда obdLearnedMs (сумма dt принятых наблюдений) ≥ distArmLearnedMs; в этот
+ *   момент kSlow := k. До включения kSlow не учится, монитор сравнивает с быстрой k.
+ * - С сохранением (kSlowRestore): kSlow = восстановленное значение, но (b) сразу не включается — сначала проверка
+ *   restoreCheckMs обучения k (быстрая τ). Если затем |k − kSlow| < distRel/2, (b) включается с восстановленной kSlow;
+ *   иначе сохранение отбрасывается (kSlow := k) и действует обычный прогрев до distArmLearnedMs. Так неверное
+ *   сохранение (другие шины, другая машина) не запирает честную машину в UNTRUSTED.
+ * kRestore/kSlowRestore — сохранённые приложением значения (по адаптеру), в пределах [kMin, kMax]; kRestore —
+ * начальная k вместо kInit.
  *
  * Не учитывается: задержка ЭБУ (время события — середина запроса; возможная настройка latencyMs — после полевых
  * данных) и задний ход (скорость OBD без знака: v ≥ 0).
@@ -59,6 +64,7 @@ data class ObdConfig(
     val learnMinSpeedMps: Double = 5.0,
     val learnMaxAgeMs: Long = 500,
     val distArmLearnedMs: Long = 600_000,
+    val restoreCheckMs: Long = 120_000,
     val kRestore: Double? = null,
     val kSlowRestore: Double? = null,
 )
@@ -160,18 +166,26 @@ class Localizer(
     var obdLearnedMs: Double = 0.0
         private set
 
-    init {
-        if (config.obd.kSlowRestore != null) monitor.armDistanceCheck()
-    }
+    /** Идёт проверка восстановленной kSlow (kSlowRestore задана, решение ещё не принято). */
+    private var restoreChecking = config.obd.kSlowRestore != null
 
-    /** Включено ли правило (b) монитора (окно расстояний). */
-    internal val obdDistanceArmed: Boolean get() = monitor.distanceCheckArmed
+    /**
+     * Включено ли правило (b) монитора (окно расстояний), т. е. kSlow сошлась или подтверждено её сохранение.
+     * Приложению сохранять kSlow (и k) только при true: иначе сохранится несошедшееся значение.
+     */
+    val obdDistanceArmed: Boolean get() = monitor.distanceCheckArmed
+
+    /** Скорость OBD, которую последней получил монитор (для тестов). */
+    internal val monitorObdMps: Double get() = monitor.obdSpeedMps
 
     val initialized: Boolean get() = ekf.initialized
     internal val headingSigmaRad: Double get() = sqrt(ekf.headingVariance())
     internal fun lateralSigmaAcross(theta: Double): Double = sqrt(ekf.lateralVariance(theta))
     val mode: NavMode get() = modes.mode
-    /** Медленная поправка спидометра (τ = kSlowTauMs) для проверки подмены GNSS; null, пока не было OBD. */
+    /**
+     * Медленная поправка спидометра (τ = kSlowTauMs) для проверки подмены GNSS; null, пока не было OBD.
+     * До [obdDistanceArmed] — начальное или восстановленное значение, ещё не подтверждённое.
+     */
     val obdKSlow: Double? get() = if (obdSeen) obdKSlowValue else null
 
     private fun predictTo(t: Double) {
@@ -223,8 +237,9 @@ class Localizer(
         }
         obdSeen = true
         lastObdT = t; lastObdMps = raw
-        // Монитору — с медленной kSlow: подмена не успевает утянуть сравнение за собой.
-        monitor.onObd(t, obdKSlowValue * raw)
+        // Монитору — с медленной kSlow (после включения (b)): подмена не успевает утянуть сравнение за собой.
+        // До включения kSlow не подтверждена, сравнение — с быстрой k (работают только (a) и (c)).
+        monitor.onObd(t, (if (monitor.distanceCheckArmed) obdKSlowValue else obdK) * raw)
         if (!ekf.initialized) return
         if (e.kmh == 0) {
             if (stationary.isStationary(t)) { predictTo(t); ekf.updateSpeed(0.0, ZUPT_SIGMA_MPS) }
@@ -253,7 +268,8 @@ class Localizer(
     }
 
     /**
-     * EMA k и kSlow по наблюдению vGnss/vObd с alpha = 1 − exp(−dt/τ), dt — от прошлого обучения (не больше 1 с).
+     * EMA k (и kSlow — после включения (b)) по наблюдению vGnss/vObd с alpha = 1 − exp(−dt/τ), dt — от прошлого
+     * обучения (не больше 1 с); затем — проверка сохранения и включение (b), см. [ObdConfig].
      * Наблюдение вне [kMin − 0.05, kMax + 0.05] — выброс и отбрасывается. Пока монитор подозревает
      * расхождение скорости GNSS и OBD (копит нарушение или держит SPEED_MISMATCH), k и kSlow не учатся.
      */
@@ -265,13 +281,19 @@ class Localizer(
         if (ratio < c.kMin - OBD_RATIO_MARGIN || ratio > c.kMax + OBD_RATIO_MARGIN) return
         val dt = min(tFix - lastLearnT, OBD_LEARN_MAX_DT_MS)
         obdK = (obdK + (1 - exp(-dt / c.kTauMs)) * (ratio - obdK)).coerceIn(c.kMin, c.kMax)
-        // До включения (b) kSlow сходится с быстрой τ: с τ = kSlowTauMs за distArmLearnedMs она прошла бы лишь ~40 %
-        // пути к истинной поправке, и остаток съедал бы порог (b).
-        val slowTau = if (monitor.distanceCheckArmed) c.kSlowTauMs else c.kTauMs
-        obdKSlowValue = (obdKSlowValue + (1 - exp(-dt / slowTau)) * (ratio - obdKSlowValue)).coerceIn(c.kMin, c.kMax)
+        if (monitor.distanceCheckArmed) {
+            obdKSlowValue = (obdKSlowValue + (1 - exp(-dt / c.kSlowTauMs)) * (ratio - obdKSlowValue)).coerceIn(c.kMin, c.kMax)
+        }
         lastLearnT = tFix
         obdLearnedMs += dt
-        if (obdLearnedMs >= c.distArmLearnedMs) monitor.armDistanceCheck()
+        if (monitor.distanceCheckArmed) return
+        if (restoreChecking) {
+            if (obdLearnedMs < c.restoreCheckMs) return
+            restoreChecking = false
+            if (abs(obdK - obdKSlowValue) < config.monitorConfig.distRel / 2) { monitor.armDistanceCheck(); return }
+            obdKSlowValue = obdK // сохранение не подтвердилось — обычный прогрев
+        }
+        if (obdLearnedMs >= c.distArmLearnedMs) { obdKSlowValue = obdK; monitor.armDistanceCheck() }
     }
 
     /**

@@ -43,6 +43,7 @@ data class MonitorConfig(
     val stillObdMps: Double = 0.3,          // (c) v_obd < stillObd и v_gps > stillGps подряд stillHoldMs
     val stillGpsMps: Double = 1.5,
     val stillHoldMs: Double = 3_000.0,
+    val maxSpeedAccMps: Float = 1.5f,       // фикс с более неточной скоростью не проверяется по (a) и (c)
     val mismatchLatchMs: Double = 10_000.0, // SPEED_MISMATCH держится после последнего нарушения
 )
 
@@ -104,19 +105,22 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
         lastObdT = tMs; lastObdMps = vObdMps
     }
 
-    /**
-     * Идёт ли накопление нарушения (a) или (c), или удерживается SPEED_MISMATCH: поправку спидометра
-     * в это время не учить. У (b) отдельного «накопления» нет: окно копит сумму всегда, нарушение — её превышение.
-     */
+    /** Последняя скорость OBD, полученная монитором (с поправкой), м/с. */
+    internal val obdSpeedMps: Double get() = lastObdMps
+
     /**
      * Включить правило (b) — окно расстояний. Порог (b) — 5 % пройденного пути, а начальная поправка спидометра
      * (1/1.03) у честной машины может ошибаться сильнее (спидометр вправе завышать до ~10 %). Включённое сразу,
      * (b) срабатывало бы на честной езде, удерживало SPEED_MISMATCH и тем самым запрещало обучение поправки —
      * машина навсегда осталась бы UNTRUSTED. Поэтому (b) включает локализатор, когда kSlow сошлась (накоплено
-     * достаточно времени обучения) или восстановлена из сохранения. До этого работают только (a) и (c).
+     * достаточно времени обучения) или её сохранение подтверждено проверкой. До этого работают только (a) и (c).
      */
     fun armDistanceCheck() { distanceCheckArmed = true }
 
+    /**
+     * Идёт ли накопление нарушения (a) или (c), или удерживается SPEED_MISMATCH: поправку спидометра
+     * в это время не учить. У (b) отдельного «накопления» нет: окно копит сумму всегда, нарушение — её превышение.
+     */
     fun obdSuspicious(tMs: Double): Boolean = instantSince != null || stillSince != null || mismatchHeld(tMs)
 
     fun onAgc(e: AgcEvent) {
@@ -181,7 +185,11 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
         }
     }
 
-    /** Сверка скорости GNSS с OBD (правила (a), (b), (c)); без свежего OBD — сброс накоплений. */
+    /**
+     * Сверка скорости GNSS с OBD (правила (a), (b), (c)); без свежего OBD или после перерыва фиксов — сброс накоплений.
+     * v_obd < stillObdMps (в т. ч. сбойный ноль ELM327 в движении) проверяет только (c): (a) сбрасывается, в окно (b)
+     * отсчёт не идёт. Фикс с неточной скоростью (speedAccMps > maxSpeedAccMps) не проверяется по (a) и (c).
+     */
     private fun checkSpeed(e: LocEvent) {
         val vGps = e.speedMps?.toDouble()
         val t = e.tMs
@@ -195,17 +203,21 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
         speedCheckT = t
         var violation = false
 
-        if (abs(vGps - vObd) > max(config.mismatchAbsMps, config.mismatchRel * vObd)) {
+        val still = vObd < config.stillObdMps
+        val acc = e.speedAccMps
+        val speedPrecise = acc == null || acc <= config.maxSpeedAccMps
+
+        if (speedPrecise && !still && abs(vGps - vObd) > max(config.mismatchAbsMps, config.mismatchRel * vObd)) {
             val since = instantSince ?: t.also { instantSince = it }
             if (t - since >= config.mismatchHoldMs) violation = true
         } else instantSince = null
 
-        if (vObd < config.stillObdMps && vGps > config.stillGpsMps) {
+        if (speedPrecise && still && vGps > config.stillGpsMps) {
             val since = stillSince ?: t.also { stillSince = it }
             if (t - since >= config.stillHoldMs) violation = true
         } else stillSince = null
 
-        if (dt > 0) distWindow.addLast(doubleArrayOf(t, vGps * dt, vObd * dt))
+        if (dt > 0 && !still) distWindow.addLast(doubleArrayOf(t, vGps * dt, vObd * dt))
         while (distWindow.isNotEmpty() && distWindow.first()[0] <= t - config.distWindowMs) distWindow.removeFirst()
         val gpsM = distWindow.sumOf { it[1] }
         val obdM = distWindow.sumOf { it[2] }
