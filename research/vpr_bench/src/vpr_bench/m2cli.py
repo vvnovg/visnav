@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from vpr_bench.fieldlog import gps_track, read_log
+from vpr_bench.obdeval import evaluate_obd, read_sensors, render_obd_report
 from vpr_bench.monitoreval import evaluate_monitor, render_monitor_report
 from vpr_bench.replayeval import evaluate_replay, read_trajectory, render_replay_report
 from vpr_bench.roadeval import evaluate_roads, render_road_report
@@ -38,6 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     rd.add_argument("--log", required=True, type=Path, help="журнал кадров сессии (.jsonl) — источник GPS")
     rd.add_argument("--roads", required=True, type=Path, help="каталог roadpack")
     rd.add_argument("--out", required=True, type=Path)
+    ob = sub.add_parser("obd-eval", help="оценить запись OBD: частота, RTT, поправка спидометра")
+    ob.add_argument("--sensors", required=True, type=Path, help="запись сессии (.sensors.jsonl)")
+    ob.add_argument("--out", required=True, type=Path)
     return parser
 
 
@@ -93,6 +97,14 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "pack-roads":
         return _pack_roads(args)
+    if args.command == "obd-eval":
+        _, locs, obds = read_sensors(args.sensors)
+        res = evaluate_obd(locs, obds)
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(render_obd_report(res))
+        print(f"k={res.k:.3f} n_obd={res.n_obd} -> {args.out}" if res.k is not None
+              else f"нет данных OBD -> {args.out}")
+        return 0
     is_monitor = args.command == "monitor-eval"
     is_road = args.command == "road-eval"
     header, rows = read_trajectory(args.traj, keep_null_pos=is_monitor, allow_fusion=is_monitor or is_road)

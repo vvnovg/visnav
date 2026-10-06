@@ -1,6 +1,7 @@
 package io.visnav.replay
 
 import io.visnav.core.LocalizerOutput
+import io.visnav.core.ObdSpeedEvent
 import io.visnav.core.TrajectoryFormat
 import java.io.File
 import kotlinx.serialization.json.JsonPrimitive
@@ -19,6 +20,7 @@ object TrajectoryWriter {
                 "\"monitor\":${config.monitor},\"jams\":[$jamJson],\"spoofs\":[$spoofJson]," +
                 "\"roads\":${roadsCreatedAt?.let { JsonPrimitive(it).toString() } ?: "null"}," +
                 "\"road_constraint\":${config.roadConstraint}," +
+                "\"obd\":${config.obd && session.sensors.any { it is ObdSpeedEvent }}," +
                 "\"session_started_ms\":${session.header.startedMs}," +
                 "\"refpack_created_at\":${JsonPrimitive(session.header.refpackCreatedAt)}}")
             w.newLine()

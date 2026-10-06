@@ -11,6 +11,7 @@ import io.visnav.core.LocEvent
 import io.visnav.core.Localizer
 import io.visnav.core.LocalizerConfig
 import io.visnav.core.NavMode
+import io.visnav.core.ObdSpeedEvent
 import io.visnav.core.RefPack
 import io.visnav.core.RoadInfo
 import io.visnav.core.RoadPack
@@ -47,6 +48,7 @@ data class ReplayConfig(
     val filter: FilterConfig = FilterConfig(),
     val monitor: Boolean = true,
     val roadConstraint: Boolean = true,
+    val obd: Boolean = true, // false (--no-obd): события ObdSpeedEvent не подаются в Localizer
 )
 
 /** Состояние визуальной фиксации на кадре: "off" (визуальный режим выключен), "no_desc" (нет
@@ -111,6 +113,7 @@ class Replayer(private val pack: RefPack, private val config: ReplayConfig, priv
                     localizer.onSensor(if (jams.any { it.contains(t) }) jammed(ev) else ev)
                 is AgcEvent ->
                     localizer.onSensor(if (jams.any { it.contains(t) }) ev.copy(agcDb = ev.agcDb - AGC_JAM_DROP_DB) else ev)
+                is ObdSpeedEvent -> if (config.obd) localizer.onSensor(ev)
                 is SensorEvent -> localizer.onSensor(ev)
             }
         }
