@@ -143,7 +143,7 @@ class LocalizerObdTest {
     ).outputs.last().first.obdK!!
 
     @Test fun singleZeroObdNextToFixDoesNotMoveFactor() {
-        // Ноль через 70 мс после фикса 290 с: интерполяция 15 → 0 дала бы отношение ≫ 1, и k ушёл бы к 1.1.
+        // Ноль через 70 мс после фикса 290 с: интерполяция 15 → 0 дала бы отношение ≫ 1, и k ушёл бы к kMax.
         val base = finalK({ _, v, rnd -> speedometer(v, rnd) })
         val glitch = finalK({ s, v, rnd -> speedometer(v, rnd).let { if (abs(s - 290.07) < 1e-6) 0 else it } })
         assertTrue(abs(glitch - base) < 1e-3, "k with zero glitch $glitch vs $base")
@@ -157,10 +157,11 @@ class LocalizerObdTest {
     }
 
     @Test fun factorDoesNotLearnWhileMonitorAccumulatesSpeedMismatch() {
-        // С 100 с каждые 30 с — 4 с скорости GNSS ×1.18 (≈ +2.7 м/с): правило (a) копит, но до 5 с не доходит,
-        // окно (b) остаётся ниже порога, причины нет и здоровье GOOD. Отношение ≈ 1.15 — в пределах выброса,
+        // С 100 с каждые 30 с — 4 с скорости GNSS ×0.83 (≈ −2.55 м/с): правило (a) копит, но до 5 с не доходит,
+        // окно (b) не включено, причины нет и здоровье GOOD. Отношение ≈ 0.81 — внутри окна выброса [0.80, 1.07]
+        // (завышение GNSS на > 2 м/с дало бы отношение > 1.07 — выброс, и запрет не проверялся бы),
         // так что без запрета k потянулся бы к нему.
-        val bursts = { s: Double -> if (s >= 100.0 && (s.toInt() - 100) % 30 < 4) 1.18 else 1.0 }
+        val bursts = { s: Double -> if (s >= 100.0 && (s.toInt() - 100) % 30 < 4) 0.83 else 1.0 }
         val r = run(
             LocalizerConfig(), 300.0, { 15.0 }, obdKmh = { _, v, rnd -> speedometer(v, rnd) }, gnssSpeedFactor = bursts,
         )
@@ -213,7 +214,7 @@ class LocalizerObdTest {
         val loc = Localizer(pack(), LocalizerConfig(obd = ObdConfig(kRestore = 0.93, kSlowRestore = 1.5)))
         assertFalse(loc.obdDistanceArmed) // сначала проверка сохранения
         loc.onSensor(ObdSpeedEvent(t0.toDouble(), 50, 40.0))
-        assertEquals(1.1, loc.obdKSlow) // в пределах [kMin, kMax]
+        assertEquals(1.02, loc.obdKSlow) // в пределах [kMin, kMax]
         assertEquals(0.0, loc.obdLearnedMs)
         val r = run(LocalizerConfig(obd = ObdConfig(kRestore = 0.93)), 1.0, { 15.0 }, obdKmh = { _, v, rnd -> speedometer(v, rnd) })
         assertEquals(0.93, r.outputs.last().first.obdK!!, 3e-3) // не больше пары шагов обучения
@@ -222,15 +223,21 @@ class LocalizerObdTest {
 
     @Test fun strongOverreadingDoesNotLatchInnovationBeforeFactorConverges() {
         // +10 % и +12 % от kInit = 1/1.03: без σ_k OBD (σ = 0.3 м/с) уводил фильтр от фиксов, INNOVATION
-        // фиксировался раньше схождения k, а при нём k не учится. 1/1.12 < kMin — k упирается в 0.9.
+        // фиксировался раньше схождения k, а при нём k не учится.
         for (f in listOf(1.10, 1.12)) {
             val a = runArm(LocalizerConfig(), 900.0, f)
             assertTrue(a.run.outputs.none { GnssReason.INNOVATION in it.first.reasons }, "INNOVATION at +${f - 1}")
             assertTrue(a.run.outputs.none { GnssReason.SPEED_MISMATCH in it.first.reasons }, "SPEED_MISMATCH at +${f - 1}")
             val armed = assertNotNull(a.armedAtS, "never armed at +${f - 1}")
             assertTrue(armed >= 600.0)
-            assertEquals(maxOf(0.9, 1 / f), a.run.outputs.last().first.obdK!!, 0.01 / f, "k at +${f - 1}")
+            assertEquals(1 / f, a.run.outputs.last().first.obdK!!, 0.01 / f, "k at +${f - 1}")
         }
+    }
+
+    @Test fun underreadingSpeedometerIsClampedAtKMax() {
+        // −5 % (k было бы 1.053): по ECE R39 так не бывает, k упирается в kMax = 1.02.
+        val r = run(LocalizerConfig(), 300.0, { 15.0 }, obdKmh = speedometerF(0.95))
+        assertEquals(1.02, r.outputs.last().first.obdK!!, 1e-9)
     }
 
     @Test fun confirmedRestoreArmsAfterCheckPeriod() {

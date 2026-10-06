@@ -63,8 +63,8 @@ data class LocalizerConfig(
 data class ObdConfig(
     val enabled: Boolean = true,
     val kInit: Double = 1 / 1.03,
-    val kMin: Double = 0.9,
-    val kMax: Double = 1.1,
+    val kMin: Double = 0.85,  // ECE R39: спидометр не занижает (k ≤ 1), завышает до +10 % + 4 км/ч; плюс шины и износ
+    val kMax: Double = 1.02,
     val kTauMs: Long = 60_000,
     val kSlowTauMs: Long = 1_200_000,
     val sigmaMinMps: Double = 0.3,
