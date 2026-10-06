@@ -4,10 +4,21 @@ import io.visnav.core.ElmState
 
 /**
  * Настройки OBD (SharedPreferences "visnav"): obd_kind — off/spp/ble, obd_addr и obd_name — выбранный адаптер
- * (null — не выбран). Меняются только вне записи.
+ * (null — не выбран), obd_addr_kind — вид (spp/ble), для которого он выбран. Меняются только вне записи.
  */
-data class ObdSettings(val kind: String = OFF, val addr: String? = null, val name: String? = null) {
+data class ObdSettings(
+    val kind: String = OFF,
+    val addr: String? = null,
+    val name: String? = null,
+    val addrKind: String? = null,
+) {
     val enabled: Boolean get() = kind != OFF
+
+    /** Смена вида: при выключении адаптер сохраняется; при включении — только если он выбран для этого же вида. */
+    fun withKind(k: String): ObdSettings {
+        val nk = kind(k)
+        return if (nk == OFF || nk == addrKind) copy(kind = nk) else ObdSettings(nk)
+    }
 
     companion object {
         const val OFF = "off"
@@ -17,9 +28,12 @@ data class ObdSettings(val kind: String = OFF, val addr: String? = null, val nam
 
         fun kind(v: String?): String = if (v in KINDS) v!! else OFF
 
-        fun parse(kind: String?, addr: String?, name: String?): ObdSettings {
-            val a = addr?.takeIf { it.isNotEmpty() }
-            return ObdSettings(kind(kind), a, if (a != null) name else null)
+        /** [addrKind] нет (настройки до obd_addr_kind) — адаптер относится к текущему виду. */
+        fun parse(kind: String?, addr: String?, name: String?, addrKind: String? = null): ObdSettings {
+            val k = kind(kind)
+            val a = addr?.takeIf { it.isNotEmpty() } ?: return ObdSettings(k)
+            val ak = kind(addrKind).takeIf { it != OFF } ?: k.takeIf { it != OFF }
+            return ObdSettings(k, a, name, ak)
         }
 
         /** Следующий вид по кругу: выкл → Bluetooth → BLE → выкл. */

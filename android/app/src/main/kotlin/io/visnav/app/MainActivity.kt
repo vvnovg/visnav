@@ -26,6 +26,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.visnav.app.obd.obdPermissions
 import org.maplibre.android.MapLibre
@@ -43,7 +44,10 @@ class MainActivity : ComponentActivity() {
     }
 
     /** Разрешения Bluetooth запрашиваются при включении OBD; итог проверяет M1Controller при старте записи. */
-    private val obdRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+    private val obdRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        // Диалог выбора адаптера открыт — список перечитывается уже с разрешением.
+        ViewModelProvider(this)[M1ViewModel::class.java].controller.onObdPermissionsResult()
+    }
 
     /** Запрашивает недостающие разрешения для вида OBD (spp/ble); на Android < 12 для spp — ничего. */
     private fun requestObdPermissions(kind: String) {

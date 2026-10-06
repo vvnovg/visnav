@@ -47,12 +47,7 @@ class ObdClient(
         open = { open(cancel) },
         nowMs = nowMs,
         sleep = { Thread.sleep(it) },
-        onSpeed = { e ->
-            if (!stopped) {
-                onSpeed(e)
-                onUi { (it ?: ObdUi("опрос", deviceName = deviceName)).copy(lastKmh = e.kmh, rttMs = e.rttMs) }
-            }
-        },
+        onSpeed = ::deliverSpeed,
         onState = { s, msg -> onUi { (it ?: ObdUi("", deviceName = deviceName)).copy(state = obdStateLabel(s, msg)) } },
     )
     private val thread = Thread({
@@ -62,6 +57,13 @@ class ObdClient(
             onUi { (it ?: ObdUi("", deviceName = deviceName)).copy(state = "ошибка приложения: ${t.message ?: t.javaClass.simpleName}") }
         }
     }, "obd").apply { isDaemon = true }
+
+    /** Скорость от сессии: в журнал и на экран; после stop() отбрасывается. */
+    internal fun deliverSpeed(e: ObdSpeedEvent) {
+        if (stopped) return
+        onSpeed(e)
+        onUi { (it ?: ObdUi("опрос", deviceName = deviceName)).copy(lastKmh = e.kmh, rttMs = e.rttMs) }
+    }
 
     fun start() {
         onUi { ObdUi("подключение", deviceName = deviceName) }

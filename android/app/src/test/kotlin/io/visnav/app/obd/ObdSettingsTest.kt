@@ -18,11 +18,23 @@ class ObdSettingsTest {
 
     @Test fun parseSettings() {
         assertEquals(ObdSettings(), ObdSettings.parse(null, null, null))
-        assertEquals(ObdSettings("spp", "AA:BB", "OBDII"), ObdSettings.parse("spp", "AA:BB", "OBDII"))
+        assertEquals(ObdSettings("spp", "AA:BB", "OBDII", "spp"), ObdSettings.parse("spp", "AA:BB", "OBDII"))
         // Пустой адрес — устройство не выбрано.
         assertEquals(ObdSettings("ble", null, null), ObdSettings.parse("ble", "", "x"))
         assertFalse(ObdSettings().enabled)
         assertTrue(ObdSettings("ble").enabled)
+    }
+
+    @Test fun withKindKeepsAdapterOnOffAndDropsItOnTransportChange() {
+        val spp = ObdSettings("spp", "AA:BB", "OBDII", addrKind = "spp")
+        val off = spp.withKind("off")
+        assertEquals(ObdSettings("off", "AA:BB", "OBDII", addrKind = "spp"), off)
+        assertEquals(spp, off.withKind("spp"))
+        assertEquals(ObdSettings("ble"), spp.withKind("ble"))
+        assertEquals(ObdSettings("ble"), off.withKind("ble"))
+        // Старые настройки без obd_addr_kind: адаптер относится к текущему виду.
+        assertEquals("spp", ObdSettings.parse("spp", "AA:BB", "x").addrKind)
+        assertEquals("ble", ObdSettings.parse("off", "AA:BB", "x", "ble").addrKind)
     }
 
     @Test fun kindCyclesAndLabels() {

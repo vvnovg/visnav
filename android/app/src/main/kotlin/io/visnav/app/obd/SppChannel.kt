@@ -96,23 +96,38 @@ class SppChannel private constructor(private val socket: BluetoothSocket) : ElmC
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || hasPermission(context, Manifest.permission.BLUETOOTH_SCAN)) {
                     adapter.cancelDiscovery()
                 }
-                val socket = try {
-                    open(device, cancel, secure = true)
-                } catch (e: IOException) {
-                    if (cancel.cancelled) throw e
-                    open(device, cancel, secure = false)
+                // Защищённый сокет, затем незащищённый, затем канал 1 напрямую (клоны без записи SDP).
+                val attempts = listOf<() -> BluetoothSocket>(
+                    { device.createRfcommSocketToServiceRecord(SPP_UUID) },
+                    { device.createInsecureRfcommSocketToServiceRecord(SPP_UUID) },
+                    { rfcommChannel1(device) },
+                )
+                var failure: Exception? = null
+                for (create in attempts) {
+                    try {
+                        return SppChannel(open(cancel, create))
+                    } catch (e: IOException) {
+                        if (cancel.cancelled) throw e
+                        failure = failure?.apply { addSuppressed(e) } ?: e
+                    } catch (e: ReflectiveOperationException) { // createRfcommSocket недоступен
+                        failure = failure?.apply { addSuppressed(e) } ?: e
+                    }
                 }
-                return SppChannel(socket)
+                throw failure as? IOException ?: IOException("SPP: подключение не удалось", failure)
             } catch (e: SecurityException) {
                 throw IOException("нет разрешения Bluetooth: ${e.message}", e)
             }
         }
 
+        /** Скрытый BluetoothDevice.createRfcommSocket(1) — запасной путь для адаптеров без SPP в SDP. */
+        @SuppressLint("DiscouragedPrivateApi")
+        private fun rfcommChannel1(device: BluetoothDevice): BluetoothSocket =
+            device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType).invoke(device, 1) as BluetoothSocket
+
         // Разрешение проверено в connect() (canConnect); SecurityException там перехвачен.
         @SuppressLint("MissingPermission")
-        private fun open(device: BluetoothDevice, cancel: ObdCancel, secure: Boolean): BluetoothSocket {
-            val s = if (secure) device.createRfcommSocketToServiceRecord(SPP_UUID)
-                else device.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
+        private fun open(cancel: ObdCancel, create: () -> BluetoothSocket): BluetoothSocket {
+            val s = create()
             cancel.register(s)
             try {
                 s.connect()

@@ -138,7 +138,6 @@ private fun PerfSettingsControls(controller: M1Controller, st: PerfSettings, loa
 @Composable
 private fun ObdControls(controller: M1Controller, s: UiState, requestObdPermissions: (String) -> Unit) {
     val obd = s.obdSettings
-    var picking by remember { mutableStateOf(false) }
     Text("OBD", style = MaterialTheme.typography.titleMedium)
     OutlinedButton(onClick = {
         val next = ObdSettings.next(obd.kind)
@@ -148,15 +147,14 @@ private fun ObdControls(controller: M1Controller, s: UiState, requestObdPermissi
     if (obd.enabled) {
         OutlinedButton(onClick = {
             if (!controller.obdPermitted(obd.kind)) requestObdPermissions(obd.kind)
-            controller.loadObdDevices()
-            picking = true
+            controller.openObdDevices()
         }) { Text("Устройство: ${obd.name ?: "не выбрано"}") }
         OutlinedButton(onClick = { controller.resetObdFactors() }, enabled = obd.addr != null) {
             Text("Сбросить поправку спидометра")
         }
     }
-    if (picking) {
-        val close = { controller.stopObdScan(); picking = false }
+    if (s.obdPicking) {
+        val close = { controller.closeObdDevices() }
         AlertDialog(
             onDismissRequest = close,
             title = { Text(if (obd.kind == ObdSettings.BLE) "Адаптер BLE" else "Сопряжённый адаптер") },
@@ -165,7 +163,7 @@ private fun ObdControls(controller: M1Controller, s: UiState, requestObdPermissi
                     if (s.obdScanning) Text("Поиск…")
                     s.obdDevicesNote?.let { Text(it) }
                     for (d in s.obdDevices) {
-                        TextButton(onClick = { controller.setObdDevice(d); picking = false }) { Text("${d.name} (${d.addr})") }
+                        TextButton(onClick = { controller.setObdDevice(d) }) { Text("${d.name} (${d.addr})") }
                     }
                 }
             },

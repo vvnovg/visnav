@@ -105,6 +105,8 @@ data class UiState(
     val obdDevices: List<ObdDevice> = emptyList(),
     /** Идёт поиск BLE (10 с). */
     val obdScanning: Boolean = false,
+    /** Открыт диалог выбора адаптера. */
+    val obdPicking: Boolean = false,
     /** Пояснение к списку адаптеров (нет разрешения, ошибка поиска); null — нет. */
     val obdDevicesNote: String? = null,
 )
@@ -218,30 +220,40 @@ class M1Controller(private val context: Context) {
 
     private fun readObdSettings() = ObdSettings.parse(
         prefs.getString(PREF_OBD_KIND, null), prefs.getString(PREF_OBD_ADDR, null), prefs.getString(PREF_OBD_NAME, null),
+        prefs.getString(PREF_OBD_ADDR_KIND, null),
     )
 
     private fun saveObdSettings(n: ObdSettings) {
-        prefs.edit().putString(PREF_OBD_KIND, n.kind).putString(PREF_OBD_ADDR, n.addr).putString(PREF_OBD_NAME, n.name).apply()
+        prefs.edit()
+            .putString(PREF_OBD_KIND, n.kind)
+            .putString(PREF_OBD_ADDR, n.addr)
+            .putString(PREF_OBD_NAME, n.name)
+            .putString(PREF_OBD_ADDR_KIND, n.addrKind)
+            .apply()
         _state.update { it.copy(obdSettings = n) }
     }
 
-    /** Вид OBD: off/spp/ble; смена вида сбрасывает выбранный адаптер. Во время записи не действует. */
+    /**
+     * Вид OBD: off/spp/ble. При выключении адаптер сохраняется; при смене Bluetooth ↔ BLE сбрасывается
+     * (см. ObdSettings.withKind). Во время записи не действует.
+     */
     fun setObdKind(kind: String) {
         if (runningFlag.get() || _state.value.running) return
         val old = _state.value.obdSettings
-        val k = ObdSettings.kind(kind)
-        if (k == old.kind) return
+        val n = old.withKind(kind)
+        if (n == old) return
         obdScanner.stop()
-        _state.update { it.copy(obdDevices = emptyList(), obdScanning = false, obdDevicesNote = null) }
-        saveObdSettings(ObdSettings(k))
+        _state.update { it.copy(obdDevices = emptyList(), obdScanning = false, obdDevicesNote = null, obdPicking = false) }
+        saveObdSettings(n)
     }
 
     /** Выбранный адаптер (адрес и имя). Во время записи не действует. */
     fun setObdDevice(device: ObdDevice) {
         if (runningFlag.get() || _state.value.running) return
         obdScanner.stop()
-        _state.update { it.copy(obdScanning = false) }
-        saveObdSettings(_state.value.obdSettings.copy(addr = device.addr, name = device.name))
+        _state.update { it.copy(obdScanning = false, obdPicking = false) }
+        val s = _state.value.obdSettings
+        saveObdSettings(s.copy(addr = device.addr, name = device.name, addrKind = s.kind))
     }
 
     /** Есть ли все разрешения времени выполнения для вида OBD. */
@@ -268,15 +280,27 @@ class M1Controller(private val context: Context) {
             onFound = { d -> _state.update { it.copy(obdDevices = it.obdDevices + d) } },
             onDone = { err ->
                 _state.update { it.copy(obdScanning = false,
-                    obdDevicesNote = err ?: if (it.obdDevices.isEmpty()) "адаптеры не найдены" else null) }
+                    obdDevicesNote = err ?: if (it.obdDevices.isEmpty()) "адаптеры не найдены. $BLE_SCAN_HINT" else null) }
             },
         )
     }
 
+    /** Открывает диалог выбора адаптера и загружает список. Только с главного потока. */
+    fun openObdDevices() {
+        if (_state.value.running || !_state.value.obdSettings.enabled) return
+        _state.update { it.copy(obdPicking = true) }
+        loadObdDevices()
+    }
+
     /** Закрытие диалога выбора адаптера: останавливает поиск BLE. */
-    fun stopObdScan() {
+    fun closeObdDevices() {
         obdScanner.stop()
-        _state.update { it.copy(obdScanning = false) }
+        _state.update { it.copy(obdScanning = false, obdPicking = false) }
+    }
+
+    /** Итог запроса разрешений Bluetooth: при открытом диалоге список загружается заново. Главный поток. */
+    fun onObdPermissionsResult() {
+        if (_state.value.obdPicking) loadObdDevices()
     }
 
     /**
@@ -868,17 +892,13 @@ class M1Controller(private val context: Context) {
      * если датчики не запустились, смещение считается здесь так же. Без разрешения или адаптера запись идёт без OBD.
      */
     private fun startObd(settings: ObdSettings, sensorsStarted: Boolean, feed: (SensorEvent) -> Unit) {
-        if (!settings.enabled) { _state.update { it.copy(obd = null) }; return }
-        val addr = settings.addr
-        val problem = when {
-            !obdPermitted(settings.kind) -> "нет разрешения Bluetooth"
-            addr == null -> "адаптер не выбран"
-            else -> null
-        }
-        if (problem != null || addr == null) {
-            _state.update { it.copy(obd = ObdUi(problem ?: ""), status = it.status + " · OBD: $problem") }
+        if (!settings.enabled) {
+            _state.update { it.copy(obd = null) }
             return
         }
+        val skip = { problem: String -> _state.update { it.copy(obd = ObdUi(problem), status = it.status + " · OBD: $problem") } }
+        if (!obdPermitted(settings.kind)) return skip("нет разрешения Bluetooth")
+        val addr = settings.addr ?: return skip("адаптер не выбран")
         val offsetMs = if (sensorsStarted) sensors.offsetMs else System.currentTimeMillis() - SystemClock.elapsedRealtimeNanos() / 1e6
         val ble = settings.kind == ObdSettings.BLE
         val client = ObdClient(
@@ -1153,6 +1173,8 @@ class M1Controller(private val context: Context) {
         const val PREF_OBD_KIND = "obd_kind"
         const val PREF_OBD_ADDR = "obd_addr"
         const val PREF_OBD_NAME = "obd_name"
+        const val PREF_OBD_ADDR_KIND = "obd_addr_kind"
+        const val BLE_SCAN_HINT = "Включите геолокацию (Android ≤ 11); не чаще 5 поисков за 30 с"
         /** Ожидание потока OBD при остановке. */
         const val OBD_JOIN_MS = 2_000L
         /** Сохранение поправок спидометра — каждые 12 тиков замеров (раз в минуту). */

@@ -34,6 +34,11 @@ class BleChannel private constructor() : ElmChannel, Closeable {
     @Volatile private var chunk = 20
 
     @Volatile private var connected = CountDownLatch(1)
+    /** Шаг GATT, чей колбэк ждём; колбэки других шагов (поздний onMtuChanged и т. п.) игнорируются. */
+    private enum class Step { NONE, MTU, DISCOVER, DESCRIPTOR, WRITE }
+
+    private val stepLock = Any()
+    private var expected = Step.NONE
     @Volatile private var step = CountDownLatch(1)
     @Volatile private var stepOk = false
     @Volatile private var mtu = 23
@@ -51,15 +56,17 @@ class BleChannel private constructor() : ElmChannel, Closeable {
             }
         }
 
-        override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) = finish(status) {
+        override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) = finish(Step.MTU, status) {
             this@BleChannel.mtu = mtu
         }
 
-        override fun onServicesDiscovered(g: BluetoothGatt, status: Int) = finish(status) {}
+        override fun onServicesDiscovered(g: BluetoothGatt, status: Int) = finish(Step.DISCOVER, status) {}
 
-        override fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, status: Int) = finish(status) {}
+        override fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, status: Int) =
+            finish(Step.DESCRIPTOR, status) {}
 
-        override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) = finish(status) {}
+        override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) =
+            finish(Step.WRITE, status) {}
 
         override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray) {
             buffer.append(String(value, Charsets.ISO_8859_1))
@@ -72,21 +79,30 @@ class BleChannel private constructor() : ElmChannel, Closeable {
         }
     }
 
-    private inline fun finish(status: Int, onSuccess: () -> Unit) {
+    private inline fun finish(s: Step, status: Int, onSuccess: () -> Unit) = synchronized(stepLock) {
+        if (s != expected) return@synchronized
+        expected = Step.NONE
         stepOk = status == BluetoothGatt.GATT_SUCCESS
         if (stepOk) onSuccess()
         step.countDown()
     }
 
-    /** Запускает шаг GATT и ждёт его колбэк; false — неудача или таймаут. */
-    private fun await(timeoutMs: Long, start: () -> Boolean): Boolean {
+    /** Запускает шаг GATT [s] и ждёт его колбэк; false — неудача или таймаут. */
+    private fun await(s: Step, timeoutMs: Long, start: () -> Boolean): Boolean {
         if (disconnected) throw IOException("BLE: отключено")
-        step = CountDownLatch(1)
-        stepOk = false
-        if (!start()) return false
-        val done = step.await(timeoutMs, TimeUnit.MILLISECONDS)
-        if (disconnected) throw IOException("BLE: отключено")
-        return done && stepOk
+        synchronized(stepLock) {
+            expected = s
+            step = CountDownLatch(1)
+            stepOk = false
+        }
+        try {
+            if (!start()) return false
+            val done = step.await(timeoutMs, TimeUnit.MILLISECONDS)
+            if (disconnected) throw IOException("BLE: отключено")
+            return done && stepOk
+        } finally {
+            synchronized(stepLock) { expected = Step.NONE }
+        }
     }
 
     // Разрешение проверено в connect() (canConnect); SecurityException при отзыве — там же, как IOException.
@@ -99,8 +115,8 @@ class BleChannel private constructor() : ElmChannel, Closeable {
         if (!connected.await(CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) throw IOException("BLE: нет подключения")
         if (disconnected) throw IOException("BLE: отключено при подключении")
         // MTU 185; при неудаче — 23 (запись по 20 байт).
-        chunk = if (await(STEP_TIMEOUT_MS) { g.requestMtu(185) }) (mtu - 3).coerceAtLeast(20) else 20
-        if (!await(DISCOVER_TIMEOUT_MS) { g.discoverServices() }) throw IOException("BLE: сервисы не найдены")
+        chunk = if (await(Step.MTU, STEP_TIMEOUT_MS) { g.requestMtu(185) }) (mtu - 3).coerceAtLeast(20) else 20
+        if (!await(Step.DISCOVER, DISCOVER_TIMEOUT_MS) { g.discoverServices() }) throw IOException("BLE: сервисы не найдены")
         val (notify, write) = findChars(g) ?: throw IOException("BLE: нет сервиса FFF0 или Nordic UART")
         writeChar = write
         if (!g.setCharacteristicNotification(notify, true)) throw IOException("BLE: уведомления не включены")
@@ -110,7 +126,7 @@ class BleChannel private constructor() : ElmChannel, Closeable {
         } else {
             BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
         }
-        if (!await(STEP_TIMEOUT_MS) { writeDescriptor(g, cccd, value) }) throw IOException("BLE: запись CCCD не удалась")
+        if (!await(Step.DESCRIPTOR, STEP_TIMEOUT_MS) { writeDescriptor(g, cccd, value) }) throw IOException("BLE: запись CCCD не удалась")
     }
 
     private fun findChars(g: BluetoothGatt): Pair<BluetoothGattCharacteristic, BluetoothGattCharacteristic>? {
@@ -135,7 +151,7 @@ class BleChannel private constructor() : ElmChannel, Closeable {
         try {
             for (from in bytes.indices step chunk) {
                 val part = bytes.copyOfRange(from, minOf(from + chunk, bytes.size))
-                if (!await(STEP_TIMEOUT_MS) { writeCharacteristic(g, c, part, type) }) throw IOException("BLE: запись не удалась")
+                if (!await(Step.WRITE, STEP_TIMEOUT_MS) { writeCharacteristic(g, c, part, type) }) throw IOException("BLE: запись не удалась")
             }
         } catch (e: SecurityException) {
             throw IOException("нет разрешения Bluetooth: ${e.message}", e)
@@ -251,6 +267,9 @@ class ObdScanner(private val context: Context) {
             }
 
             override fun onScanFailed(errorCode: Int) {
+                // Снимаем таймер 10 с, иначе его onDone(null) затрёт сообщение об ошибке.
+                stopTask?.let { handler.removeCallbacks(it) }
+                stopTask = null
                 callback = null
                 onDone("ошибка поиска BLE: $errorCode")
             }
