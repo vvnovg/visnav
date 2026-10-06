@@ -234,10 +234,15 @@ class LocalizerObdTest {
         }
     }
 
-    @Test fun underreadingSpeedometerIsClampedAtKMax() {
-        // −5 % (k было бы 1.053): по ECE R39 так не бывает, k упирается в kMax = 1.02.
-        val r = run(LocalizerConfig(), 300.0, { 15.0 }, obdKmh = speedometerF(0.95))
-        assertEquals(1.02, r.outputs.last().first.obdK!!, 1e-9)
+    @Test fun factorOutsideClampDoesNotLatchInnovation() {
+        // −5 % (k было бы 1.053 > kMax): k упирается в 1.02, остаток 3 % не убывает; σ_k по |kRaw − k| не даёт OBD
+        // увести фильтр от GNSS. (Нижний предел kMin = 0.85 так не проверить: при завышении > ~13 % от kInit
+        // раньше срабатывает правило (a) монитора — см. отчёт Task 4.)
+        val a = runArm(LocalizerConfig(), 900.0, 0.95)
+        assertEquals(1.02, a.run.outputs.last().first.obdK!!, 1e-9)
+        assertTrue(a.run.outputs.none { GnssReason.INNOVATION in it.first.reasons })
+        assertEquals(GnssHealth.GOOD, a.run.outputs.last().first.health)
+        assertNotNull(a.armedAtS, "never armed")
     }
 
     @Test fun confirmedRestoreArmsAfterCheckPeriod() {

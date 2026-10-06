@@ -60,6 +60,10 @@ data class LocalizerConfig(
  * и t_k = 0. Зачем: спидометр может завышать до ~10 %, и пока k не выучена, OBD с σ = 0.3 м/с перетягивал бы
  * скорость GNSS — позиция фильтра уходила бы от фиксов, монитор фиксировал INNOVATION (UNTRUSTED), а при нём
  * k не учится, и машина оставалась бы в UNTRUSTED навсегда. Без GNSS OBD всё равно принимается с этим σ.
+ * Пока k упирается в kMin/kMax (крупные шины, спидометр вне ECE R39), остаточная ошибка не убывает со временем:
+ * рядом с k ведётся та же EMA без ограничения kRaw, и σ_k = max(σ_k(t), |kRaw − k| + sigmaKFloor) — иначе σ_k
+ * спала бы до 0.005 при ошибке в несколько процентов, и тот же INNOVATION запер бы машину. kSlow на σ измерения
+ * не влияет (только опора монитора), её остаток в пределах порогов (a) 10 % и (b) 5 %.
  *
  * Не учитывается: задержка ЭБУ (время события — середина запроса; возможная настройка latencyMs — после полевых
  * данных) и задний ход (скорость OBD без знака: v ≥ 0).
@@ -169,6 +173,8 @@ class Localizer(
     private var roadSuspended = false
     private var lastLocT = Double.NEGATIVE_INFINITY
     private var obdK = (config.obd.kRestore ?: config.obd.kInit).coerceIn(config.obd.kMin, config.obd.kMax)
+    /** Та же EMA, что k, но без ограничения: насколько истинная поправка за пределами [kMin, kMax]. */
+    private var obdKRaw = obdK
     private var obdKSlowValue = (config.obd.kSlowRestore ?: config.obd.kInit).coerceIn(config.obd.kMin, config.obd.kMax)
     private var obdSeen = false
     private var lastObdT = Double.NaN
@@ -273,7 +279,8 @@ class Localizer(
         }
         val v = obdK * raw
         predictTo(t)
-        val sigmaK = (sigmaK0 - c.sigmaKFloor) * exp(-sigmaKLearnedMs / c.sigmaKTauMs) + c.sigmaKFloor
+        var sigmaK = (sigmaK0 - c.sigmaKFloor) * exp(-sigmaKLearnedMs / c.sigmaKTauMs) + c.sigmaKFloor
+        if (obdK != obdKRaw) sigmaK = max(sigmaK, abs(obdKRaw - obdK) + c.sigmaKFloor) // k упёрлась в предел
         ekf.updateSpeed(v, hypot(max(c.sigmaMinMps, 0.5 / 3.6 + 0.01 * v), sigmaK * v))
     }
 
@@ -307,7 +314,9 @@ class Localizer(
         val ratio = vGnss / vObd
         if (ratio < c.kMin - OBD_RATIO_MARGIN || ratio > c.kMax + OBD_RATIO_MARGIN) return
         val dt = min(tFix - lastLearnT, OBD_LEARN_MAX_DT_MS)
-        obdK = (obdK + (1 - exp(-dt / c.kTauMs)) * (ratio - obdK)).coerceIn(c.kMin, c.kMax)
+        val alpha = 1 - exp(-dt / c.kTauMs)
+        obdK = (obdK + alpha * (ratio - obdK)).coerceIn(c.kMin, c.kMax)
+        obdKRaw += alpha * (ratio - obdKRaw)
         if (monitor.distanceCheckArmed) {
             obdKSlowValue = (obdKSlowValue + (1 - exp(-dt / c.kSlowTauMs)) * (ratio - obdKSlowValue)).coerceIn(c.kMin, c.kMax)
         }
