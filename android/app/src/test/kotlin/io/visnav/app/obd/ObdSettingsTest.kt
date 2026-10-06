@@ -54,11 +54,12 @@ class ObdSettingsTest {
     @Test fun factorKeysAndSave() {
         assertEquals("obd_k_AA:BB", obdKKey("AA:BB"))
         assertEquals("obd_kslow_AA:BB", obdKSlowKey("AA:BB"))
-        assertNull(factorsToSave(599_999.0, 0.97, 0.98))
-        assertNull(factorsToSave(700_000.0, null, 0.98))
-        assertNull(factorsToSave(700_000.0, 0.97, null))
-        assertNull(factorsToSave(700_000.0, Double.NaN, 0.98))
-        assertEquals(0.97 to 0.98, factorsToSave(600_000.0, 0.97, 0.98))
+        // Только после включения правила (b): до того kSlow не подтверждена, сохранённое не трогаем.
+        assertNull(factorsToSave(false, 0.97, 0.98))
+        assertNull(factorsToSave(true, null, 0.98))
+        assertNull(factorsToSave(true, 0.97, null))
+        assertNull(factorsToSave(true, Double.NaN, 0.98))
+        assertEquals(0.97 to 0.98, factorsToSave(true, 0.97, 0.98))
     }
 
     @Test fun restoredFactor() {

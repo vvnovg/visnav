@@ -151,6 +151,9 @@ private fun ObdControls(controller: M1Controller, s: UiState, requestObdPermissi
             controller.loadObdDevices()
             picking = true
         }) { Text("Устройство: ${obd.name ?: "не выбрано"}") }
+        OutlinedButton(onClick = { controller.resetObdFactors() }, enabled = obd.addr != null) {
+            Text("Сбросить поправку спидометра")
+        }
     }
     if (picking) {
         val close = { controller.stopObdScan(); picking = false }

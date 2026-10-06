@@ -280,13 +280,23 @@ class M1Controller(private val context: Context) {
     }
 
     /**
-     * Сохраняет поправки спидометра адаптера [addr], если в этой сессии обучение шло не меньше 10 мин.
-     * Только на executor (там же, где Localizer).
+     * Сохраняет поправки спидометра адаптера [addr], только когда правило (b) включено (kSlow подтверждена);
+     * иначе прежние сохранённые значения не трогаются. Только на executor (там же, где Localizer).
      */
     private fun saveObdFactors(addr: String?, localizer: Localizer, k: Double?) {
         if (addr == null) return
-        val (fast, slow) = factorsToSave(localizer.obdLearnedMs, k, localizer.obdKSlow) ?: return
+        val (fast, slow) = factorsToSave(localizer.obdDistanceArmed, k, localizer.obdKSlow) ?: return
         prefs.edit().putFloat(obdKKey(addr), fast.toFloat()).putFloat(obdKSlowKey(addr), slow.toFloat()).apply()
+    }
+
+    /** Удаляет сохранённые поправки спидометра выбранного адаптера. Только вне записи. */
+    fun resetObdFactors() {
+        if (runningFlag.get() || _state.value.running) return
+        val addr = _state.value.obdSettings.addr ?: return
+        val had = prefs.contains(obdKKey(addr)) || prefs.contains(obdKSlowKey(addr))
+        prefs.edit().remove(obdKKey(addr)).remove(obdKSlowKey(addr)).apply()
+        val name = _state.value.obdSettings.name ?: addr
+        _state.update { it.copy(status = if (had) "Поправка спидометра сброшена ($name)" else "Сохранённой поправки нет ($name)") }
     }
 
     /** Сохранённая поправка или null. */

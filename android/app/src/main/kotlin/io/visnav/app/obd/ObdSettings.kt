@@ -65,12 +65,13 @@ private const val ACCESS_FINE_LOCATION = "android.permission.ACCESS_FINE_LOCATIO
 internal fun obdKKey(addr: String) = "obd_k_$addr"
 internal fun obdKSlowKey(addr: String) = "obd_kslow_$addr"
 
-/** Минимальное время обучения в сессии, после которого поправки сохраняются, мс. */
-internal const val OBD_SAVE_LEARNED_MS = 600_000.0
-
-/** Пара (k, kSlow) для сохранения или null: обучения меньше 10 мин либо значений нет. */
-internal fun factorsToSave(learnedMs: Double, k: Double?, kSlow: Double?): Pair<Double, Double>? {
-    if (learnedMs < OBD_SAVE_LEARNED_MS || k == null || kSlow == null || !k.isFinite() || !kSlow.isFinite()) return null
+/**
+ * Пара (k, kSlow) для сохранения или null. Сохраняется только после включения правила (b) SPEED_MISMATCH
+ * (Localizer.obdDistanceArmed: kSlow сошлась или восстановленное значение прошло проверку); до того сохранённые
+ * значения не меняются.
+ */
+internal fun factorsToSave(distanceArmed: Boolean, k: Double?, kSlow: Double?): Pair<Double, Double>? {
+    if (!distanceArmed || k == null || kSlow == null || !k.isFinite() || !kSlow.isFinite()) return null
     return k to kSlow
 }
 
