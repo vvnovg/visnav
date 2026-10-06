@@ -44,9 +44,13 @@ data class LocalizerConfig(
  * - Без сохранения: (b) включается, когда obdLearnedMs (сумма dt принятых наблюдений) ≥ distArmLearnedMs; в этот
  *   момент kSlow := k. До включения kSlow не учится, монитор сравнивает с быстрой k.
  * - С сохранением (kSlowRestore): kSlow = восстановленное значение, но (b) сразу не включается — сначала проверка
- *   restoreCheckMs обучения k (быстрая τ). Если затем |k − kSlow| < distRel/2, (b) включается с восстановленной kSlow;
- *   иначе сохранение отбрасывается (kSlow := k) и действует обычный прогрев до distArmLearnedMs. Так неверное
- *   сохранение (другие шины, другая машина) не запирает честную машину в UNTRUSTED.
+ *   restoreCheckMs обучения k (быстрая τ). Если затем |k − kSlow| < restoreTolerance, (b) включается с восстановленной
+ *   kSlow; иначе сохранение отбрасывается (kSlow := k), действует обычный прогрев до distArmLearnedMs, а монитор до
+ *   его конца держит SPEED_FACTOR_CHANGED (DEGRADED; обучению k не мешает). Так неверное сохранение (другие шины,
+ *   другая машина) не запирает честную машину в UNTRUSTED, а отказ от сохранения не молчит: подмена с начала
+ *   поездки могла утянуть k за время проверки.
+ * Принятый риск: физическое изменение поправки больше ~6 % посреди сессии, когда (b) уже включено (дало бы
+ *   SPEED_MISMATCH, который запрещает обучение), снимается кнопкой сброса поправки в приложении.
  * kRestore/kSlowRestore — сохранённые приложением значения (по адаптеру), в пределах [kMin, kMax]; kRestore —
  * начальная k вместо kInit.
  *
@@ -72,6 +76,7 @@ data class ObdConfig(
     val learnMaxAgeMs: Long = 500,
     val distArmLearnedMs: Long = 600_000,
     val restoreCheckMs: Long = 120_000,
+    val restoreTolerance: Double = 0.015,
     val sigmaKInit: Double = 0.05,
     val sigmaKRestored: Double = 0.01,
     val sigmaKFloor: Double = 0.005,
@@ -188,6 +193,13 @@ class Localizer(
      * Приложению сохранять kSlow (и k) только при true: иначе сохранится несошедшееся значение.
      */
     val obdDistanceArmed: Boolean get() = monitor.distanceCheckArmed
+
+    /**
+     * Расхождение k с сохранённой kSlow по итогу проверки сохранения, % со знаком ((k/kSlow − 1)·100);
+     * null — проверки не было или она ещё идёт.
+     */
+    var obdRestoreDeltaPct: Double? = null
+        private set
 
     /** Скорость OBD, которую последней получил монитор (для тестов). */
     internal val monitorObdMps: Double get() = monitor.obdSpeedMps
@@ -306,8 +318,10 @@ class Localizer(
         if (restoreChecking) {
             if (obdLearnedMs < c.restoreCheckMs) return
             restoreChecking = false
-            if (abs(obdK - obdKSlowValue) < config.monitorConfig.distRel / 2) { monitor.armDistanceCheck(); return }
-            obdKSlowValue = obdK // сохранение не подтвердилось — обычный прогрев
+            obdRestoreDeltaPct = (obdK / obdKSlowValue - 1) * 100
+            if (abs(obdK - obdKSlowValue) < c.restoreTolerance) { monitor.armDistanceCheck(); return }
+            obdKSlowValue = obdK // сохранение не подтвердилось — обычный прогрев, причина SPEED_FACTOR_CHANGED
+            monitor.flagSpeedFactorChanged()
             sigmaK0 = c.sigmaKInit; sigmaKLearnedMs = 0.0
         }
         if (obdLearnedMs >= c.distArmLearnedMs) { obdKSlowValue = obdK; monitor.armDistanceCheck() }
@@ -326,7 +340,8 @@ class Localizer(
             learnFixT = Double.NaN
         }
         val spd = ev.speedMps ?: return
-        if (spd < c.learnMinSpeedMps || monitor.assess(ev.tMs).health != GnssHealth.GOOD) return
+        // SPEED_FACTOR_CHANGED обучению не мешает: он держится как раз до конца прогрева.
+        if (spd < c.learnMinSpeedMps || monitor.assess(ev.tMs).reasons.any { it != GnssReason.SPEED_FACTOR_CHANGED }) return
         learnFixT = ev.tMs; learnFixMps = spd.toDouble()
     }
 

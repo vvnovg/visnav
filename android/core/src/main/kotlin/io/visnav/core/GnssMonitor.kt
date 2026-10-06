@@ -5,7 +5,7 @@ import kotlin.math.exp
 import kotlin.math.max
 
 enum class GnssHealth { GOOD, DEGRADED, UNTRUSTED }
-enum class GnssReason { FIX_GAP, NO_FIX, FEW_SATS, LOW_CN0, AGC_DROP, POOR_ACCURACY, JUMP, INNOVATION, UNIFORM_CN0, SPEED_MISMATCH }
+enum class GnssReason { FIX_GAP, NO_FIX, FEW_SATS, LOW_CN0, AGC_DROP, POOR_ACCURACY, JUMP, INNOVATION, UNIFORM_CN0, SPEED_MISMATCH, SPEED_FACTOR_CHANGED }
 data class Assessment(val health: GnssHealth, val reasons: Set<GnssReason>)
 
 data class MonitorConfig(
@@ -85,6 +85,7 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
     /** Включено ли правило (b); см. [armDistanceCheck]. */
     var distanceCheckArmed: Boolean = false
         private set
+    private var speedFactorChanged = false
 
     fun onStatus(e: GnssStatusEvent) {
         val prev = lastStatus
@@ -115,13 +116,24 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
      * машина навсегда осталась бы UNTRUSTED. Поэтому (b) включает локализатор, когда kSlow сошлась (накоплено
      * достаточно времени обучения) или её сохранение подтверждено проверкой. До этого работают только (a) и (c).
      */
-    fun armDistanceCheck() { distanceCheckArmed = true }
+    fun armDistanceCheck() { distanceCheckArmed = true; speedFactorChanged = false }
+
+    /**
+     * Сохранённая поправка спидометра не подтвердилась (см. ObdConfig): причина SPEED_FACTOR_CHANGED (DEGRADED, не
+     * UNTRUSTED) держится до [armDistanceCheck] после обычного прогрева. Не молча: подмена с самого начала поездки
+     * могла утянуть k за время проверки и добиться отказа от сохранения.
+     */
+    fun flagSpeedFactorChanged() { speedFactorChanged = true }
 
     /**
      * Идёт ли накопление нарушения (a) или (c), или удерживается SPEED_MISMATCH: поправку спидометра
-     * в это время не учить. У (b) отдельного «накопления» нет: окно копит сумму всегда, нарушение — её превышение.
+     * в это время не учить; (c) считается копящим со второго подряд фикса. У (b) отдельного «накопления» нет: окно копит сумму всегда, нарушение — её превышение.
      */
-    fun obdSuspicious(tMs: Double): Boolean = instantSince != null || stillSince != null || mismatchHeld(tMs)
+    fun obdSuspicious(tMs: Double): Boolean {
+        val still = stillSince
+        // (c) — со второго подряд отсчёта: одиночный сбойный ноль ELM327 обучение не останавливает.
+        return instantSince != null || (still != null && speedCheckT > still) || mismatchHeld(tMs)
+    }
 
     fun onAgc(e: AgcEvent) {
         lastAgc = e
@@ -241,6 +253,7 @@ class GnssMonitor(private val config: MonitorConfig = MonitorConfig()) {
     fun assess(tMs: Double): Assessment {
         val r = reasonsWithoutAgc(tMs).toMutableSet()
         if (agcDropped(tMs)) r += GnssReason.AGC_DROP
+        if (speedFactorChanged) r += GnssReason.SPEED_FACTOR_CHANGED
         val health = when {
             r.any { it in UNTRUSTED_REASONS } -> GnssHealth.UNTRUSTED
             r.isNotEmpty() -> GnssHealth.DEGRADED

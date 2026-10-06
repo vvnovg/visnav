@@ -224,4 +224,5 @@ internal fun reasonLabel(r: GnssReason): String = when (r) {
     GnssReason.UNIFORM_CN0 -> "признак подмены"
     GnssReason.FIX_GAP -> "перерыв фиксов"
     GnssReason.SPEED_MISMATCH -> "скорость GPS ≠ машина"
+    GnssReason.SPEED_FACTOR_CHANGED -> "поправка спидометра изменилась"
 }

@@ -168,6 +168,7 @@ class GnssMonitorObdTest {
             val t = s * 1_000.0
             m.onObd(t - 100.0, if (s == 10 || s == 25) 0.0 else 15.0)
             m.onStatus(status(t)); m.onFix(fix(t, 15.0), 1.0, 2.0, 4.0)
+            if (s == 10 || s == 25) assertFalse(m.obdSuspicious(t + 100.0), "suspicious after glitch at $s s")
         }
         assertEquals(Assessment(GnssHealth.GOOD, emptySet()), m.assess(40_100.0))
     }
@@ -185,5 +186,14 @@ class GnssMonitorObdTest {
         assertFalse(c.mismatch(5_100.0))
         val noAcc = GnssMonitor(onlyInstant); noAcc.drive(0, 5, 15.0, 12.0, speedAcc = null) // нет оценки — как раньше
         assertTrue(noAcc.mismatch(5_100.0))
+    }
+
+    @Test fun speedFactorChangedIsDegradedUntilArmed() {
+        val m = GnssMonitor()
+        m.drive(0, 2, 15.0, 15.0)
+        m.flagSpeedFactorChanged()
+        assertEquals(Assessment(GnssHealth.DEGRADED, setOf(GnssReason.SPEED_FACTOR_CHANGED)), m.assess(2_100.0))
+        m.armDistanceCheck()
+        assertEquals(Assessment(GnssHealth.GOOD, emptySet()), m.assess(2_200.0))
     }
 }
